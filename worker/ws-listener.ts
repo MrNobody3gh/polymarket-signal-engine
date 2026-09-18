@@ -12,6 +12,8 @@ import { db } from "../src/lib/db";
 import { SignalEngine } from "../src/lib/signals/engine";
 import { WS_LIVE, normalizeFill } from "../src/lib/polymarket/client";
 import { pollOnce } from "../src/lib/signals/poll";
+import { runMarking, gammaSource } from "../src/lib/paper/mark";
+import { heartbeat } from "../src/lib/health/heartbeat";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
@@ -23,6 +25,11 @@ async function main() {
   // REST backstop every 60s so the worker alone is enough (Vercel Hobby crons only run daily).
   const poll = () => pollOnce(db(), engine).then((r) => { if (r.fills) console.log(`poll: ${r.fills} fills, ${r.signals} signals`); }).catch((e) => console.error("poll failed", (e as Error).message));
   poll(); setInterval(poll, 60 * 1000);
+  // V2: paper price marking + settlement. Idempotent, so an overlap with a manual run is harmless.
+  const markEvery = Math.max(2, Number(process.env.MARK_INTERVAL_MIN) || 10) * 60 * 1000;
+  const mark = () => runMarking(db(), gammaSource(), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message));
+  setTimeout(mark, 20_000); setInterval(mark, markEvery);
+  await heartbeat(db(), "worker_boot", new Date().toISOString());
   connect();
 }
 function connect() {
@@ -33,6 +40,7 @@ function connect() {
     ws.send(JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "activity", type: "trades" }] }));
     pinger = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send("PING"); }, 5000);
     console.log("connected to", WS_LIVE);
+    heartbeat(db(), "ws_connected", "true").catch(() => {});
   });
   ws.on("message", async (buf) => {
     let msg: unknown; try { msg = JSON.parse(buf.toString()); } catch { return; }
@@ -40,12 +48,13 @@ function connect() {
       const p = (m as { payload?: Record<string, unknown> })?.payload ?? (m as Record<string, unknown>);
       if (!p || typeof p !== "object" || !("proxyWallet" in p)) continue;
       seen++;
+      heartbeat(db(), "last_trade").catch(() => {});
       const f = normalizeFill(p as Record<string, unknown>, "ws"); if (!f || !engine.isTracked(f.wallet)) continue;
       kept++;
       try { await engine.ingest(f); } catch (e) { console.error("ingest failed", (e as Error).message); }
     }
   });
-  ws.on("close", () => { clearInterval(pinger); console.log(`socket closed; reconnect in ${backoff}ms (seen ${seen}, kept ${kept})`); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 60_000); });
+  ws.on("close", () => { clearInterval(pinger); heartbeat(db(), "ws_connected", "false").catch(() => {}); console.log(`socket closed; reconnect in ${backoff}ms (seen ${seen}, kept ${kept})`); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 60_000); });
   ws.on("error", (e) => { console.error("socket error", e.message); });
 }
 main().catch((e) => { console.error(e); process.exit(1); });

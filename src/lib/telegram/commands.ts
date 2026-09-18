@@ -4,6 +4,8 @@
  */
 import { esc, money, type TgButton } from "./api";
 import type { SignalKind } from "../polymarket/types";
+import { computeStats, byKind, pct, usd, currentReturn, type PaperRowLite, type MarkLite, MIN_SAMPLE } from "../paper/analytics";
+import { assessHealth, healthHtml } from "../health/assess";
 
 export interface Subscriber { chat_id: number; username: string | null; kinds: string[]; min_severity: number; min_usd: number; min_score: number; only_wallets: string[]; muted_wallets: string[]; muted_until: string | null; active: boolean }
 export interface SignalRow { id: string; kind: SignalKind; severity: number; wallet: string; wallet_name: string | null; outcome: string | null; title: string | null; slug: string | null; price: number; usd: number; payload: Record<string, unknown>; created_at: string; closed_at: string | null }
@@ -20,6 +22,10 @@ export interface Store {
   findWallet(q: string): Promise<WalletRow | null>;
   openBook(wallet: string, n: number): Promise<PositionRow[]>;
   status(): Promise<{ tracked: number; signals24h: number; lastRefresh: string | null; lastFill: string | null }>;
+  // V2
+  paper(o: { sinceIso?: string; wallet?: string }): Promise<{ rows: PaperRowLite[]; marks: MarkLite[] }>;
+  signalDetail(idOrPrefix: string): Promise<{ row: Record<string, unknown> | null; marks: Record<string, unknown>[]; consensus: Record<string, unknown> | null; ambiguous: boolean }>;
+  health(): Promise<{ hb: Record<string, string>; dbOk: boolean }>;
 }
 
 export const KINDS: SignalKind[] = ["NEW_POSITION", "CONSENSUS", "CONVICTION_ADD", "EARLY_ENTRY", "EXIT"];
@@ -38,18 +44,33 @@ export function parse(text: string): { cmd: string; args: string[] } {
 }
 
 /** Format one signal the way the bot shows it (also used for pushed alerts). */
+const KIND_EMOJI: Record<SignalKind, string> = { NEW_POSITION: "🚨", CONSENSUS: "👥", CONVICTION_ADD: "📈", EARLY_ENTRY: "🎯", EXIT: "🚪" };
+const cents = (p: number) => `${(p * 100).toFixed(1)}¢`;
+const hhmm = (iso: string) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(11, 16) + " UTC"; };
+/** Alert layout. Every line is backed by a real field on the signal; missing fields are omitted, never faked. */
 export function signalHtml(s: SignalRow): string {
-  const verb = s.kind === "EXIT" ? "sold" : "bought";
-  const extras: string[] = [];
-  const p = s.payload ?? {};
-  if (typeof p.copyScore === "number") extras.push(`score ${p.copyScore}`);
-  if (typeof p.wallets === "number") extras.push(`${p.wallets} wallets same side`);
-  if (typeof p.daysToEnd === "number") extras.push(`${p.daysToEnd}d to resolution`);
-  if (typeof p.soldFraction === "number") extras.push(`sold ${Math.round(Number(p.soldFraction) * 100)}%`);
-  return `<b>${KIND_LABEL[s.kind]}</b> ${stars(s.severity)}\n${esc(s.title ?? s.slug ?? "")}\n<a href="https://polymarket.com/profile/${s.wallet}">${who(s.wallet_name, s.wallet)}</a> ${verb} <b>${esc(s.outcome ?? "?")}</b> @ ${Number(s.price).toFixed(3)} for <b>${money(Number(s.usd))}</b>${extras.length ? `\n<i>${extras.join(" · ")}</i>` : ""}`;
+  const p = s.payload ?? {}; const sell = s.kind === "EXIT";
+  const L: string[] = [];
+  L.push(`${KIND_EMOJI[s.kind]} <b>${KIND_LABEL[s.kind].toUpperCase()}</b> ${stars(s.severity)}`);
+  if (s.title || s.slug) L.push(`\n${esc(s.title ?? s.slug)}`);
+  L.push(`\n👤 <a href="https://polymarket.com/profile/${s.wallet}">${who(s.wallet_name, s.wallet)}</a>`);
+  L.push(`${sell ? "🔴 Sold" : "🟢 Bought"} <b>${esc(s.outcome ?? "?")}</b>`);
+  L.push(`\n💰 Trade: <b>${money(Number(s.usd))}</b>`);
+  L.push(`📍 ${sell ? "Exit" : "Entry"}: ${cents(Number(s.price))}`);
+  if (typeof p.avgEntry === "number" && sell) L.push(`📍 Their avg entry: ${cents(Number(p.avgEntry))}`);
+  const ctx: string[] = [];
+  if (typeof p.copyScore === "number") ctx.push(`⭐ Copy score: ${Math.round(Number(p.copyScore))}/100`);
+  if (typeof p.wallets === "number") ctx.push(`👥 Consensus: ${p.wallets} wallets same side`);
+  if (typeof p.beforeSize === "number" && typeof p.addSize === "number" && Number(p.beforeSize) > 0) ctx.push(`➕ Added ${Math.round((Number(p.addSize) / Number(p.beforeSize)) * 100)}% to position`);
+  if (typeof p.daysToEnd === "number") ctx.push(`📅 ${p.daysToEnd}d to resolution`);
+  if (typeof p.soldFraction === "number") ctx.push(`📉 Sold ${Math.round(Number(p.soldFraction) * 100)}% of position`);
+  if (ctx.length) L.push("\n" + ctx.join("\n"));
+  const t = hhmm(s.created_at); if (t) L.push(`\n⏱ Detected: ${t}`);
+  L.push(`\n<i>Paper ref: ${s.id.slice(0, 8)} · /signal ${s.id.slice(0, 8)}</i>`);
+  return L.join("\n");
 }
 export function signalButtons(s: SignalRow): TgButton[][] {
-  return [[{ text: "Market", url: `https://polymarket.com/event/${s.slug ?? ""}` }, { text: "Wallet", url: `https://polymarket.com/profile/${s.wallet}` }, { text: "Mute wallet", callback_data: `mute:${s.wallet}` }]];
+  return [[{ text: "Market ↗", url: `https://polymarket.com/event/${s.slug ?? ""}` }, { text: "Wallet ↗", url: `https://polymarket.com/profile/${s.wallet}` }], [{ text: "🔕 Mute wallet", callback_data: `mute:${s.wallet}` }]];
 }
 
 export function filtersHtml(s: Subscriber): string {
@@ -66,7 +87,7 @@ export async function handle(chatId: number, username: string | null, text: stri
       const s = await store.upsertSub({ chat_id: chatId, username, active: true, muted_until: null });
       return { html: `Subscribed. You'll get alerts when a watchlist wallet opens, adds, or exits.\n\n${filtersHtml(s)}\n\nTry /signals, /consensus, /wallets, or /help.` };
     }
-    case "help": return { html: `<b>Commands</b>\n/signals [n] — latest signals\n/consensus — markets where 2+ tracked wallets agree\n/wallets [n] — top of the watchlist\n/wallet &lt;name or 0x…&gt; — profile and open book\n/filters — your alert filters\n/kinds new consensus add early exit — choose kinds\n/severity 1–5 — minimum severity\n/min 5000 — minimum fill in USD\n/score 60 — minimum copy score\n/only 0x… 0x… — only these wallets (/only all to reset)\n/mute 6 — mute 6 hours · /mute 0x… — mute a wallet\n/unmute — clear mutes\n/stop — unsubscribe\n/status — engine health` };
+    case "help": return { html: `<b>Commands</b>\n/signals [n] — latest signals\n/consensus — markets where 2+ tracked wallets agree\n/wallets [n] — top of the watchlist\n/wallet &lt;name or 0x…&gt; — profile and open book\n/filters — your alert filters\n/kinds new consensus add early exit — choose kinds\n/severity 1–5 — minimum severity\n/min 5000 — minimum fill in USD\n/score 60 — minimum copy score\n/only 0x… 0x… — only these wallets (/only all to reset)\n/mute 6 — mute 6 hours · /mute 0x… — mute a wallet\n/unmute — clear mutes\n/stop — unsubscribe\n/status — engine health\n\n<b>Paper performance (V2)</b>\n/performance [7d|30d|all] — measured paper results\n/stats — compact overview\n/signal &lt;id&gt; — one signal, what happened after` };
     case "stop": { await store.upsertSub({ chat_id: chatId, active: false }); return { html: "Unsubscribed. /start to resume." }; }
     case "filters": return { html: sub ? filtersHtml(sub) : "Not subscribed yet — /start" };
     case "kinds": {
@@ -114,9 +135,44 @@ export async function handle(chatId: number, username: string | null, text: stri
       const book = await store.openBook(w.address, 6);
       const head = `<b>${who(w.name, w.address)}</b>\n<code>${w.address}</code>\nCopy score <b>${Math.round(Number(w.copy_score))}</b> · 90d ${money(Number(w.pnl_90d))} · ${esc(w.style)}\nNet/DD ${w.net_dd == null ? "—" : Number(w.net_dd).toFixed(1)} · months up ${w.months_up}/${w.months_total} · ${w.fills_per_day == null ? "—" : Math.round(Number(w.fills_per_day))} fills/day · idle ${w.days_idle ?? "—"}d`;
       const b = book.length ? `\n\n<b>Open book</b>\n` + book.map((p) => `${esc(p.outcome ?? "?")} — <a href="https://polymarket.com/event/${p.slug ?? ""}">${esc(p.title ?? p.slug ?? p.token_id.slice(0, 10))}</a>\n${money(Number(p.cost_usd))} at ${Number(p.avg_price).toFixed(2)} · ${ago(p.last_seen)} ago`).join("\n") : "\n\nNo open positions seen by the engine yet.";
-      return { html: head + b, buttons: [[{ text: "Profile", url: `https://polymarket.com/profile/${w.address}` }, { text: sub?.muted_wallets.includes(w.address) ? "Muted" : "Mute wallet", callback_data: `mute:${w.address}` }, { text: "Only this wallet", callback_data: `only:${w.address}` }]] };
+      const { rows: pr, marks: pm } = await store.paper({ wallet: w.address }); const ps = computeStats(pr, pm);
+      const perf = ps.signals ? `\n\n<b>Paper performance</b> (n=${ps.signals}, ${ps.open} open, ${ps.resolved + ps.exited} settled)\nP&amp;L ${usd(ps.pnl)} · avg ${pct(ps.avgReturn)} · median ${pct(ps.medianReturn)}\nWin rate ${ps.winRate == null ? "—" : (ps.winRate * 100).toFixed(0) + "%"} · avg win ${pct(ps.avgWin)} · avg loss ${pct(ps.avgLoss)}${ps.insufficient ? "\n<i>Insufficient data.</i>" : ""}` + byKind(pr, pm).map((k) => `\n${KIND_LABEL[k.key as SignalKind] ?? k.key}: n=${k.stats.signals}, ${usd(k.stats.pnl)}${k.stats.insufficient ? " (insufficient)" : ""}`).join("") : "\n\n<i>No paper signals for this wallet yet.</i>";
+      return { html: head + b + perf, buttons: [[{ text: "Profile", url: `https://polymarket.com/profile/${w.address}` }, { text: sub?.muted_wallets.includes(w.address) ? "Muted" : "Mute wallet", callback_data: `mute:${w.address}` }, { text: "Only this wallet", callback_data: `only:${w.address}` }]] };
     }
-    case "status": { const s = await store.status(); return { html: `<b>Engine</b>\nTracking ${s.tracked} wallets\n${s.signals24h} signals in 24h\nLast refresh: ${s.lastRefresh ? esc(s.lastRefresh) : "never"}\nLast fill seen: ${s.lastFill ? `${ago(s.lastFill)} ago` : "none"}` }; }
+    case "status": {
+      const s = await store.status(); const h = await store.health();
+      return { html: `${healthHtml(assessHealth(h), esc)}\n\nTracking ${s.tracked} wallets · ${s.signals24h} signals in 24h\nLast re-score: ${s.lastRefresh ? esc(s.lastRefresh) : "never"}` };
+    }
+    case "performance": case "stats": {
+      const win = (args[0] ?? (cmd === "stats" ? "30d" : "all")).toLowerCase();
+      const days = win === "all" ? null : Number(win.replace(/d$/i, "")); if (win !== "all" && !(days! > 0)) return { html: "Usage: /performance, /performance 7d, /performance 30d" };
+      const sinceIso = days ? new Date(Date.now() - days * 86_400_000).toISOString() : undefined;
+      const { rows, marks } = await store.paper({ sinceIso }); const st = computeStats(rows, marks);
+      const head = `📊 <b>PAPER PERFORMANCE</b> — ${days ? `last ${days} days` : "all time"}\n$${rows[0]?.size_usd ?? 100} hypothetical per signal, long the outcome token at the signal price.`;
+      if (!st.signals) return { html: `${head}\n\nNo paper signals in this window yet.` };
+      const core = `\nSignals: ${st.signals}\nOpen: ${st.open} · Resolved: ${st.resolved} · Exited: ${st.exited}${st.unresolved ? ` · Unresolved: ${st.unresolved}` : ""}${st.invalid ? ` · Invalid: ${st.invalid}` : ""}\nObserved (have a price after entry): ${st.observed}\n\nHypothetical P&amp;L: <b>${usd(st.pnl)}</b>\nAverage return: ${pct(st.avgReturn)}\nMedian return: ${pct(st.medianReturn)}\nWin rate (settled only): ${st.winRate == null ? "— (nothing settled yet)" : `${(st.winRate * 100).toFixed(1)}% of ${st.resolved + st.exited}`}\nAvg win / avg loss: ${pct(st.avgWin)} / ${pct(st.avgLoss)}`;
+      if (cmd === "stats") return { html: `${head}${core}\n\n<i>Paper only. ${st.insufficient ? "Insufficient data for conclusions." : ""}</i>` };
+      const kinds = byKind(rows, marks).map((k) => `${KIND_LABEL[k.key as SignalKind] ?? k.key}: n=${k.stats.signals}, P&amp;L ${usd(k.stats.pnl)}, avg ${pct(k.stats.avgReturn)}${k.stats.insufficient ? " (insufficient)" : ""}`).join("\n");
+      const bw = st.best ? `\n\nBest: ${pct(st.best.ret)} — ${esc(st.best.title ?? st.best.id.slice(0, 8))}\nWorst: ${pct(st.worst!.ret)} — ${esc(st.worst!.title ?? st.worst!.id.slice(0, 8))}` : "";
+      return { html: `${head}${core}\n\n<b>By signal type</b>\n${kinds}${bw}\n\n<i>Paper only. Samples under ${MIN_SAMPLE} are flagged insufficient; nothing here is a recommendation.</i>` };
+    }
+    case "signal": {
+      if (!args[0]) return { html: "Usage: /signal &lt;id or first 8 chars&gt; — the ref is printed on every alert" };
+      const d = await store.signalDetail(args[0]);
+      if (d.ambiguous) return { html: "That prefix matches more than one signal — give a few more characters." };
+      if (!d.row) return { html: `No paper record for "${esc(args[0])}".` };
+      const r = d.row as Record<string, unknown>; const marks = d.marks as { horizon: string; observed_at: string; price: number; pnl: number; return_pct: number; source: string }[];
+      const entry = Number(r.entry_price); const ts = String(r.signal_ts);
+      const lines = [`🔍 <b>Signal ${String(r.signal_id).slice(0, 8)}</b> — ${esc(KIND_LABEL[r.kind as SignalKind] ?? r.kind)}`, esc(String(r.title ?? r.slug ?? "")), `👤 ${esc(String(r.wallet_name ?? String(r.wallet ?? "").slice(0, 10)))} · <b>${esc(String(r.outcome ?? ""))}</b>`,
+        r.side === "EXIT_EVENT" ? `🚪 Exit event at ${cents(entry)} — closes paper longs, no position of its own` : `📍 Entry ${cents(entry)} · $${r.size_usd} → ${Number(r.shares).toFixed(2)} shares`,
+        `⭐ Score ${r.copy_score ?? "—"} · sev ${r.severity ?? "—"}${r.consensus_depth ? ` · 👥 ${r.consensus_depth} wallets` : ""} · real trade ${r.trade_usd != null ? money(Number(r.trade_usd)) : "—"}`, `⏱ ${hhmm(ts)} ${ts.slice(0, 10)}`];
+      if (d.consensus) { const c = d.consensus as Record<string, unknown>; lines.push(`👥 Participants: ${(c.participants as string[]).map((w) => esc(w.slice(0, 8))).join(", ")}${c.spread_seconds != null ? ` · spread ${Math.round(Number(c.spread_seconds) / 60)} min` : ""}${c.combined_usd != null ? ` · combined ${money(Number(c.combined_usd))}` : ""}`); }
+      lines.push(`\n<b>Timeline</b>\n${hhmm(ts)} — signal at ${cents(entry)}`);
+      if (!marks.length) lines.push("<i>No observations yet — the marker records 1h / 6h / 24h and resolution as they become available.</i>");
+      for (const m of marks) lines.push(`${m.horizon === "resolution" ? "Resolution" : m.horizon === "exit" ? "Exit" : "+" + m.horizon} — ${cents(Number(m.price))} · ${usd(Number(m.pnl))} (${pct(Number(m.return_pct))})`);
+      lines.push(`\nStatus: <b>${esc(String(r.status))}</b>${r.status_reason ? ` — ${esc(String(r.status_reason))}` : ""}${r.final_pnl != null ? ` · settled ${usd(Number(r.final_pnl))}` : ""}`);
+      return { html: lines.join("\n"), buttons: [[{ text: "Market ↗", url: `https://polymarket.com/event/${r.slug ?? ""}` }, { text: "Wallet ↗", url: `https://polymarket.com/profile/${r.wallet ?? ""}` }]] };
+    }
     default: return { html: cmd ? `Unknown command /${esc(cmd)} — /help` : "Send /help for commands." };
   }
 }

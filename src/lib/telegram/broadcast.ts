@@ -4,6 +4,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { TelegramApi } from "./api";
 import { matches, signalButtons, signalHtml, type SignalRow, type Subscriber } from "./commands";
+import { heartbeat } from "../health/heartbeat";
 
 export async function broadcast(db: SupabaseClient, api: TelegramApi, signal: SignalRow, opts: { sleep?: (ms: number) => Promise<void> } = {}): Promise<{ sent: number; failed: number; skipped: number }> {
   const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -20,5 +21,6 @@ export async function broadcast(db: SupabaseClient, api: TelegramApi, signal: Si
     if (!ok && /blocked|chat not found|deactivated/i.test(r.description ?? "")) await db.from("tg_subscribers").update({ active: false }).eq("chat_id", sub.chat_id);
     if (sent % 25 === 0 && sent > 0) await sleep(1000);
   }
+  if (sent > 0) await heartbeat(db, "last_tg_delivery", new Date().toISOString());
   return { sent, failed, skipped };
 }

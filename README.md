@@ -170,3 +170,18 @@ would have returned (mark via `/v2/prices-history?as_of=`, settle via
 `/v2/resolutions`). The engine records every signal's entry price; wiring the
 daily mark is the obvious next step and the honest way to find out whether any
 of this has forward information.
+
+Deployed via Vercel.
+
+Deployed via Vercel.
+
+## V2 — paper measurement
+
+Every signal is also recorded as a **paper experiment**: a $100 hypothetical long on the outcome token at the signal price (`PAPER_SIZE_USD` to change). EXIT signals never open a position; they close that wallet's open paper longs on the token at the exit price. The worker marks open positions at **1h / 6h / 24h** from `/v2/prices-history?as_of=` and settles them when Gamma reports the market closed with final outcome prices (`MARK_INTERVAL_MIN`, default 10). Missing prices and unparseable resolutions are logged to `data_quality_issues`, never zeroed.
+
+- Telegram: `/performance [7d|30d|all]`, `/stats`, `/signal <ref>` (the ref is printed on every alert), `/wallet` now includes paper results, `/status` shows component health with staleness warnings.
+- Dashboard: `/performance` (overview, by type / score band / consensus depth / wallet, signal history) and `/signal/<id>` (timeline of real observations).
+- Migration: `supabase/migrations/0003_v2_paper.sql` (additive). Tables: `paper_marks`, `consensus_events`, `data_quality_issues`; `paper_ledger` extended.
+- Health heartbeats live in `cursors` under `health:*`.
+
+Paper only. Win rates are computed on settled positions; samples under 10 are flagged "Insufficient data".

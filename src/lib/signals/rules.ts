@@ -99,14 +99,14 @@ export function evaluate(ctx: RuleContext, cfg: RuleConfig = DEFAULT_CONFIG): Si
     const peers = ctx.consensus.peers.filter((p) => p.wallet !== f.wallet && p.lastBuyTs >= cutoff);
     if (peers.length >= 1 && (isNew || f.usd >= cfg.newPositionMinUsd)) {
       const n = peers.length + 1; const weighted = peers.reduce((a, p) => a + p.copyScore, w.copyScore);
-      out.push({ ...base, kind: "CONSENSUS", severity: severity(f.usd, w.copyScore, Math.min(2, n - 1)), payload: { wallets: n, peers: peers.map((p) => p.wallet), weightedScore: Math.round(weighted) }, dedupeKey: `CONS:${f.tokenId}:${n}` });
+      out.push({ ...base, kind: "CONSENSUS", severity: severity(f.usd, w.copyScore, Math.min(2, n - 1)), payload: { wallets: n, peers: peers.map((p) => p.wallet), peerLastBuyTs: peers.map((p) => p.lastBuyTs), weightedScore: Math.round(weighted), copyScore: w.copyScore }, dedupeKey: `CONS:${f.tokenId}:${n}` });
     }
   } else {
     // exit: sold ≥ ratio of the position (or all of it) and we had alerted on it
     if (before && before.size > 0 && ctx.hasOpenSignal) {
       const soldFrac = Math.min(1, f.size / before.size);
       if (soldFrac >= cfg.exitSellRatio) {
-        out.push({ ...base, kind: "EXIT", severity: severity(f.usd, w.copyScore), payload: { soldFraction: Math.round(soldFrac * 100) / 100, avgEntry: before.avgPrice, pnlPerShare: f.price - before.avgPrice }, dedupeKey: `EXIT:${f.wallet}:${f.tokenId}:${db}` });
+        out.push({ ...base, kind: "EXIT", severity: severity(f.usd, w.copyScore), payload: { soldFraction: Math.round(soldFrac * 100) / 100, avgEntry: before.avgPrice, pnlPerShare: f.price - before.avgPrice, copyScore: w.copyScore }, dedupeKey: `EXIT:${f.wallet}:${f.tokenId}:${db}` });
       }
     }
   }

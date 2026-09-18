@@ -37,4 +37,7 @@ export const BOT_COMMANDS = [
   { command: "unmute", description: "Clear mutes" },
   { command: "stop", description: "Unsubscribe" },
   { command: "status", description: "Engine health" },
+  { command: "performance", description: "Paper performance: /performance 7d|30d|all" },
+  { command: "stats", description: "Compact paper overview (30d)" },
+  { command: "signal", description: "Inspect one signal by its ref" },
 ];
