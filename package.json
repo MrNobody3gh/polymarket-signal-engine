@@ -1,0 +1,36 @@
+{
+  "name": "polymarket-signal-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Copy-trade signal engine for Polymarket: scores top wallets over a rolling 90-day window, watches their fills live, and alerts on new positions, consensus, conviction adds, early entries and exits.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "worker": "tsx worker/ws-listener.ts",
+    "refresh": "tsx scripts/refresh.ts",
+    "bot": "tsx scripts/bot-poll.ts",
+    "tg:setup": "tsx scripts/telegram-setup.ts",
+    "db:push": "supabase db push"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": { "node": ">=20" }
+}
