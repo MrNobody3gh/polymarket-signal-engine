@@ -1,6 +1,5 @@
 {
   "crons": [
-    { "path": "/api/cron/poll-trades", "schedule": "* * * * *" },
     { "path": "/api/cron/refresh-wallets", "schedule": "15 4 * * *" }
   ]
 }
