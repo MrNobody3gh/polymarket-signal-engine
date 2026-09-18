@@ -165,6 +165,7 @@ tests/                         vitest
 ## Paper ledger
 
 `paper_ledger` is provisioned for tracking what a $100 copy of each signal
+Deployed via Vercel.
 would have returned (mark via `/v2/prices-history?as_of=`, settle via
 `/v2/resolutions`). The engine records every signal's entry price; wiring the
 daily mark is the obvious next step and the honest way to find out whether any
