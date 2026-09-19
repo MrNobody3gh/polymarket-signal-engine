@@ -3,7 +3,7 @@
  * only touches rows still OPEN. Never fabricates a price: a missing observation is logged, not zeroed.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { PolymarketClient, GAMMA_API } from "../polymarket/client";
+import { PolymarketClient, GAMMA_API, type PricePoint } from "../polymarket/client";
 import { isValidPrice, logIssues, pnlFor, returnFor, type DqIssue } from "./ledger";
 import { heartbeat } from "../health/heartbeat";
 
@@ -12,7 +12,7 @@ export const HORIZONS: { key: "1h" | "6h" | "24h"; seconds: number }[] = [{ key:
 export const RESOLUTION_MIN_AGE_SEC = 3600;
 
 export interface OpenPaper { signal_id: string; token_id: string; condition_id: string; entry_price: number; shares: number; signal_ts: string; end_date?: string | null }
-export interface MarkSource { priceAsOf(tokenId: string, asOf: number): Promise<number | null>; resolution(conditionId: string, tokenId: string): Promise<Resolution> }
+export interface MarkSource { priceAsOf(tokenId: string, asOf: number): Promise<PricePoint | null>; resolution(conditionId: string, tokenId: string): Promise<Resolution> }
 export type Resolution = { state: "resolved"; won: boolean; finalPrice: 0 | 1; source: string } | { state: "open" } | { state: "unknown"; reason: string; raw?: unknown };
 
 /** Pure: which horizons are due for this position and not yet marked. */
@@ -42,11 +42,19 @@ export function gammaSource(client = new PolymarketClient()): MarkSource {
   return {
     priceAsOf: (t, asOf) => client.priceAsOf(t, asOf),
     async resolution(conditionId, tokenId) {
+      let viaGamma: Resolution;
       try {
         const b = await client.get<{ markets?: Record<string, unknown>[] }>(GAMMA_API, "/markets/keyset", { condition_ids: conditionId, limit: 5 });
         const m = (b.markets ?? []).find((x) => String(x.conditionId ?? x.condition_id ?? "").toLowerCase() === conditionId.toLowerCase()) ?? b.markets?.[0];
-        return parseGammaResolution(m, tokenId);
-      } catch (e) { return { state: "unknown", reason: `gamma_error: ${(e as Error).message}` }; }
+        viaGamma = parseGammaResolution(m, tokenId);
+      } catch (e) { viaGamma = { state: "unknown", reason: `gamma_error: ${(e as Error).message}` }; }
+      if (viaGamma.state === "resolved") return viaGamma;
+      // Second source: a resolved market's price series ends with an on-chain settlement tick (resolution_seconds 0, price exactly 0 or 1).
+      try {
+        const pt = await client.priceAsOf(tokenId, Math.floor(Date.now() / 1000) + 86_400);
+        if (pt && pt.resolutionSeconds === 0 && (pt.price === 0 || pt.price === 1)) return { state: "resolved", won: pt.price === 1, finalPrice: pt.price, source: "prices-history-settlement" };
+      } catch { /* fall through */ }
+      return viaGamma;
     },
   };
 }
@@ -66,10 +74,14 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
     // 1) horizon marks
     for (const h of dueHorizons(p, have.get(p.signal_id) ?? new Set(), now)) {
       try {
-        const price = await src.priceAsOf(p.token_id, h.at);
-        if (price == null) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { reason: "no_price_returned", at: h.at } }); res.failed++; continue; }
+        const pt = await src.priceAsOf(p.token_id, h.at);
+        if (pt == null) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { reason: "no_price_returned", at: h.at } }); res.failed++; continue; }
+        const price = pt.price;
         if (!(price >= 0 && price <= 1)) { issues.push({ kind: "price_out_of_bounds", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { price } }); res.failed++; continue; }
-        const { error } = await db.from("paper_marks").upsert({ signal_id: p.signal_id, horizon: h.key, observed_at: new Date(h.at * 1000).toISOString(), price, pnl: pnlFor(p.shares, p.entry_price, price), return_pct: returnFor(p.entry_price, price), source: "prices-history" }, { onConflict: "signal_id,horizon", ignoreDuplicates: true });
+        // The observation must post-date the signal; an as_of read that falls back to a tick before entry is not a mark.
+        const entryTs = Math.floor(Date.parse(p.signal_ts) / 1000);
+        if (pt.ts < entryTs) { issues.push({ kind: "stale_market", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { reason: "latest_observation_predates_signal", observed: pt.ts, signal: entryTs } }); res.failed++; continue; }
+        const { error } = await db.from("paper_marks").upsert({ signal_id: p.signal_id, horizon: h.key, observed_at: new Date(pt.ts * 1000).toISOString(), price, pnl: pnlFor(p.shares, p.entry_price, price), return_pct: returnFor(p.entry_price, price), source: pt.resolutionSeconds >= 0 ? `prices-history:${pt.resolutionSeconds}s` : "prices-history" }, { onConflict: "signal_id,horizon", ignoreDuplicates: true });
         if (error) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { error: error.message } }); res.failed++; } else res.marks++;
       } catch (e) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { error: (e as Error).message } }); res.failed++; }
     }

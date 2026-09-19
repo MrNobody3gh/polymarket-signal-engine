@@ -136,9 +136,14 @@ export class PolymarketClient {
   async holders(conditionId: string, limit = 100): Promise<{ token_id: string; holders: Record<string, unknown>[] }[]> {
     const b = await this.get<{ data: { token_id: string; holders: Record<string, unknown>[] }[] }>(DATA_API, "/v2/holders", { condition: conditionId, include_pnl: true, limit }); return b.data ?? [];
   }
-  async priceAsOf(tokenId: string, asOf: number): Promise<number | null> {
-    const b = await this.get<{ data?: { points?: { price?: number; p?: number }[] } }>(DATA_API, "/v2/prices-history", { token_id: tokenId, as_of: asOf });
-    const pt = b.data?.points?.[0]; const v = pt?.price ?? pt?.p; return typeof v === "number" ? v : null;
+  /** Point-in-time read: the latest observation at or before `asOf`. v2 shape is `{ data: [{timestamp, price, resolution_seconds}] }`;
+   *  `resolution_seconds` 0 with price exactly 0/1 is the on-chain settlement point of a resolved market. */
+  async priceAsOf(tokenId: string, asOf: number): Promise<PricePoint | null> {
+    const b = await this.get<{ data?: PricePointRaw[] | { points?: PricePointRaw[] } | null }>(DATA_API, "/v2/prices-history", { token_id: tokenId, as_of: asOf });
+    const arr = Array.isArray(b.data) ? b.data : b.data?.points ?? [];
+    const pt = arr[arr.length - 1]; if (!pt) return null;
+    const price = Number(pt.price ?? pt.p); const ts = Number(pt.timestamp ?? pt.t ?? asOf); const res = Number(pt.resolution_seconds ?? -1);
+    return Number.isFinite(price) ? { price, ts: Number.isFinite(ts) ? ts : asOf, resolutionSeconds: Number.isFinite(res) ? res : -1 } : null;
   }
   async resolutions(conditionIds: string[]): Promise<Record<string, unknown>[]> {
     const b = await this.get<{ data: Record<string, unknown>[] }>(DATA_API, "/v2/resolutions", { condition: conditionIds.slice(0, 20).join(",") }); return b.data ?? [];
@@ -165,3 +170,5 @@ export function normalizeFill(raw: RawFill, source: "rest" | "ws" = "rest"): Fil
   };
 }
 import type { Fill } from "./types";
+type PricePointRaw = { timestamp?: number; price?: number; resolution_seconds?: number; t?: number; p?: number };
+export interface PricePoint { price: number; ts: number; resolutionSeconds: number }

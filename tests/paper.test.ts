@@ -75,17 +75,17 @@ describe("marking", () => {
   it("records 1h/6h/24h marks with P&L, is idempotent, and logs a missing price instead of writing zero", async () => {
     const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });
     const prices: Record<number, number | null> = { 3600: 0.57, 21600: null, 86400: 0.63 };
-    const src: MarkSource = { priceAsOf: vi.fn(async (_t, at) => prices[at - Math.floor(Date.parse(open.signal_ts) / 1000)] ?? null), resolution: async () => ({ state: "open" }) };
+    const src: MarkSource = { priceAsOf: vi.fn(async (_t, at) => { const p = prices[at - Math.floor(Date.parse(open.signal_ts) / 1000)]; return p == null ? null : { price: p, ts: at - 30, resolutionSeconds: 60 }; }), resolution: async () => ({ state: "open" }) };
     const r1 = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 25 * 3600 });
     expect(r1.marks).toBe(2); expect(r1.failed).toBe(1);
-    const m1 = db.tables.paper_marks.find((m) => m.horizon === "1h")!; expect(Number(m1.price)).toBe(0.57); expect(Number(m1.pnl)).toBeCloseTo(sharesFor(100, 0.56) * 0.01, 6);
+    const m1 = db.tables.paper_marks.find((m) => m.horizon === "1h")!; expect(Number(m1.price)).toBe(0.57); expect(m1.source).toBe("prices-history:60s"); expect(m1.observed_at).toBe(new Date((Math.floor(Date.parse(open.signal_ts) / 1000) + 3600 - 30) * 1000).toISOString()); expect(Number(m1.pnl)).toBeCloseTo(sharesFor(100, 0.56) * 0.01, 6);
     expect(db.tables.data_quality_issues.some((i) => i.kind === "mark_failed")).toBe(true);
     const r2 = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 25 * 3600 });
     expect(r2.marks).toBe(0); expect(db.tables.paper_marks).toHaveLength(2); // second run adds nothing
   });
   it("settles a resolved market as WIN/LOSS and never re-settles", async () => {
     const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });
-    const src: MarkSource = { priceAsOf: async () => 0.9, resolution: async () => ({ state: "resolved", won: true, finalPrice: 1, source: "gamma" }) };
+    const src: MarkSource = { priceAsOf: async (_t, at) => ({ price: 0.9, ts: at, resolutionSeconds: 60 }), resolution: async () => ({ state: "resolved", won: true, finalPrice: 1, source: "gamma" }) };
     const r = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 30 * 3600 });
     expect(r.settled).toBe(1); const row = db.tables.paper_ledger[0]; expect(row.status).toBe("RESOLVED_WIN"); expect(Number(row.final_pnl)).toBeCloseTo(100 / 0.56 - 100, 4);
     expect(db.tables.paper_marks.find((m) => m.horizon === "resolution")).toBeTruthy();
@@ -93,15 +93,21 @@ describe("marking", () => {
   });
   it("keeps an unresolvable market OPEN with a logged reason (no silent zero)", async () => {
     const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });
-    const src: MarkSource = { priceAsOf: async () => 0.5, resolution: async () => ({ state: "unknown", reason: "resolution_unparseable", raw: { x: 1 } }) };
+    const src: MarkSource = { priceAsOf: async (_t, at) => ({ price: 0.5, ts: at, resolutionSeconds: 60 }), resolution: async () => ({ state: "unknown", reason: "resolution_unparseable", raw: { x: 1 } }) };
     const r = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 2 * 3600 });
     expect(r.unresolved).toBe(1); expect(db.tables.paper_ledger[0].status).toBe("OPEN"); expect(db.tables.data_quality_issues.some((i) => i.kind === "resolution_unparseable")).toBe(true);
   });
   it("marks a stale (>30d unresolved) position UNRESOLVED", async () => {
     const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });
-    const src: MarkSource = { priceAsOf: async () => 0.5, resolution: async () => ({ state: "unknown", reason: "market_not_found" }) };
+    const src: MarkSource = { priceAsOf: async (_t, at) => ({ price: 0.5, ts: at, resolutionSeconds: 60 }), resolution: async () => ({ state: "unknown", reason: "market_not_found" }) };
     await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 31 * 86400 });
     expect(db.tables.paper_ledger[0].status).toBe("UNRESOLVED"); expect(db.tables.paper_ledger[0].status_reason).toBe("market_not_found");
+  });
+  it("rejects an as_of read whose latest tick predates the signal (stale, not a mark)", async () => {
+    const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });
+    const src: MarkSource = { priceAsOf: async () => ({ price: 0.5, ts: Math.floor(Date.parse(open.signal_ts) / 1000) - 600, resolutionSeconds: 0 }), resolution: async () => ({ state: "open" }) };
+    const r = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 2 * 3600 });
+    expect(r.marks).toBe(0); expect(r.failed).toBe(1); expect(db.tables.data_quality_issues[0].kind).toBe("stale_market");
   });
   it("parses Gamma resolution for the right token, and refuses to guess", () => {
     const m = { closed: true, clobTokenIds: '["tokA","tokB"]', outcomePrices: '["1","0"]' };

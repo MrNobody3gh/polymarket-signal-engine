@@ -42,6 +42,18 @@ describe("retry", () => {
   });
 });
 
+describe("priceAsOf", () => {
+  it("parses the v2 array shape and reports observation time + resolution", async () => {
+    const f = vi.fn(async () => json({ data: [{ timestamp: 1789726400, price: 0.57, resolution_seconds: 60 }], pagination: { limit: 1, offset: 0, has_more: false, next_cursor: null } }));
+    const c = new PolymarketClient({ fetch: f as unknown as typeof fetch });
+    expect(await c.priceAsOf("tok", 1789726459)).toEqual({ price: 0.57, ts: 1789726400, resolutionSeconds: 60 });
+  });
+  it("returns null on an empty series instead of a fake price", async () => {
+    const f = vi.fn(async () => json({ data: [], pagination: { limit: 0, offset: 0, has_more: false } }));
+    expect(await new PolymarketClient({ fetch: f as unknown as typeof fetch }).priceAsOf("tok", 1)).toBeNull();
+  });
+});
+
 describe("normalizeFill", () => {
   it("accepts the websocket/v1 camelCase payload", () => {
     const f = normalizeFill({ proxyWallet: "0xABC", side: "buy", size: "25", price: 0.999, timestamp: 1789658260, asset: "tok", conditionId: "0xc", title: "T", slug: "s", outcome: "No", transactionHash: "0xtx" }, "ws");
