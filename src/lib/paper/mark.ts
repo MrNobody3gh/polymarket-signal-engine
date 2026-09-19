@@ -59,12 +59,22 @@ export function gammaSource(client = new PolymarketClient()): MarkSource {
   };
 }
 
-export interface MarkRunResult { positions: number; marks: number; settled: number; unresolved: number; failed: number }
+export interface MarkRunResult { positions: number; marks: number; settled: number; unresolved: number; failed: number; skipped?: boolean }
+
+// Process-local guards so one worker never stacks runs or hammers the same dead lookup every cycle.
+let running = false;
+const resolutionMemo = new Map<string, { r: Resolution; at: number }>();   // unresolved/open answers are re-asked at most every 6h
+const failedMarks = new Map<string, number>();                              // (signal:horizon) → last failed attempt (retry hourly)
+const RESOLUTION_RECHECK_SEC = 6 * 3600, MARK_RETRY_SEC = 3600, MAX_ISSUES_PER_RUN = 25;
+export function _resetMarkGuards() { running = false; resolutionMemo.clear(); failedMarks.clear(); }
 
 export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { now?: number; limit?: number; log?: (m: string) => void } = {}): Promise<MarkRunResult> {
   const now = opts.now ?? Math.floor(Date.now() / 1000); const log = opts.log ?? (() => {});
   const res: MarkRunResult = { positions: 0, marks: 0, settled: 0, unresolved: 0, failed: 0 };
-  const { data: open } = await db.from("paper_ledger").select("signal_id,token_id,condition_id,entry_price,shares,signal_ts").eq("status", "OPEN").order("signal_ts", { ascending: true }).limit(opts.limit ?? 400);
+  if (running) { log("mark: previous run still in progress, skipping"); return { ...res, skipped: true }; }
+  running = true;
+  try {
+  const { data: open } = await db.from("paper_ledger").select("signal_id,token_id,condition_id,entry_price,shares,signal_ts").eq("status", "OPEN").order("signal_ts", { ascending: true }).limit(opts.limit ?? 150);
   const rows = (open ?? []).map((r) => ({ ...r, entry_price: Number(r.entry_price), shares: Number(r.shares) })) as OpenPaper[];
   res.positions = rows.length; if (!rows.length) { await heartbeat(db, "last_mark"); return res; }
   const { data: marks } = await db.from("paper_marks").select("signal_id,horizon").in("signal_id", rows.map((r) => r.signal_id));
@@ -73,9 +83,11 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
   for (const p of rows) {
     // 1) horizon marks
     for (const h of dueHorizons(p, have.get(p.signal_id) ?? new Set(), now)) {
+      const fk = `${p.signal_id}:${h.key}`; const lastFail = failedMarks.get(fk);
+      if (lastFail != null && now - lastFail < MARK_RETRY_SEC) continue;
       try {
         const pt = await src.priceAsOf(p.token_id, h.at);
-        if (pt == null) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { reason: "no_price_returned", at: h.at } }); res.failed++; continue; }
+        if (pt == null) { failedMarks.set(fk, now); issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: fk, detail: { reason: "no_price_returned", at: h.at } }); res.failed++; continue; }
         const price = pt.price;
         if (!(price >= 0 && price <= 1)) { issues.push({ kind: "price_out_of_bounds", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { price } }); res.failed++; continue; }
         // The observation must post-date the signal; an as_of read that falls back to a tick before entry is not a mark.
@@ -83,13 +95,19 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
         if (pt.ts < entryTs) { issues.push({ kind: "stale_market", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { reason: "latest_observation_predates_signal", observed: pt.ts, signal: entryTs } }); res.failed++; continue; }
         const { error } = await db.from("paper_marks").upsert({ signal_id: p.signal_id, horizon: h.key, observed_at: new Date(pt.ts * 1000).toISOString(), price, pnl: pnlFor(p.shares, p.entry_price, price), return_pct: returnFor(p.entry_price, price), source: pt.resolutionSeconds >= 0 ? `prices-history:${pt.resolutionSeconds}s` : "prices-history" }, { onConflict: "signal_id,horizon", ignoreDuplicates: true });
         if (error) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { error: error.message } }); res.failed++; } else res.marks++;
-      } catch (e) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { error: (e as Error).message } }); res.failed++; }
+      } catch (e) { failedMarks.set(fk, now); issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: fk, detail: { error: (e as Error).message } }); res.failed++; }
     }
     // 2) resolution (only once the position is at least an hour old — markets rarely resolve faster)
     const age = now - Math.floor(Date.parse(p.signal_ts) / 1000);
     if (age < RESOLUTION_MIN_AGE_SEC) continue;
     const key = `${p.condition_id}:${p.token_id}`;
-    let r = resolutionCache.get(key); if (!r) { r = await src.resolution(p.condition_id, p.token_id); resolutionCache.set(key, r); }
+    let r = resolutionCache.get(key);
+    if (!r) {
+      const memo = resolutionMemo.get(key);
+      if (memo && memo.r.state !== "resolved" && now - memo.at < RESOLUTION_RECHECK_SEC) r = memo.r;
+      else { r = await src.resolution(p.condition_id, p.token_id); resolutionMemo.set(key, { r, at: now }); }
+      resolutionCache.set(key, r);
+    }
     if (r.state === "resolved") {
       const pnl = pnlFor(p.shares, p.entry_price, r.finalPrice), ret = returnFor(p.entry_price, r.finalPrice);
       const { error } = await db.from("paper_ledger").update({ status: r.won ? "RESOLVED_WIN" : "RESOLVED_LOSS", final_price: r.finalPrice, final_pnl: pnl, final_return: ret, resolved: true, payout: r.finalPrice, pnl_per_100: pnl, settled_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("signal_id", p.signal_id).eq("status", "OPEN");
@@ -100,8 +118,11 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
       if (age > 30 * 86400) await db.from("paper_ledger").update({ status: "UNRESOLVED", status_reason: r.reason, updated_at: new Date().toISOString() }).eq("signal_id", p.signal_id).eq("status", "OPEN");
     }
   }
-  await logIssues(db, issues);
+  const head = issues.slice(0, MAX_ISSUES_PER_RUN);
+  if (issues.length > MAX_ISSUES_PER_RUN) head.push({ kind: "mark_failed", ref_type: "worker", ref_id: `run:${now}`, detail: { summary: true, total_issues: issues.length, by_kind: issues.reduce<Record<string, number>>((a, i) => { a[i.kind] = (a[i.kind] ?? 0) + 1; return a; }, {}) } });
+  await logIssues(db, head);
   await heartbeat(db, "last_mark");
   log(`mark: ${res.positions} open, ${res.marks} marks, ${res.settled} settled, ${res.unresolved} unresolved, ${res.failed} failed`);
   return res;
+  } finally { running = false; }
 }

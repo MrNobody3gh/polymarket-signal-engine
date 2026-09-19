@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { buildPaperRow, sharesFor, pnlFor, returnFor, isValidPrice, recordPaperSignal, closePaperPositions, type SignalForPaper } from "@/lib/paper/ledger";
-import { dueHorizons, parseGammaResolution, runMarking, type MarkSource } from "@/lib/paper/mark";
+import { dueHorizons, parseGammaResolution, runMarking, _resetMarkGuards, type MarkSource } from "@/lib/paper/mark";
+import { beforeEach } from "vitest";
 import { computeStats, byKind, byScoreBand, byConsensusDepth, byWallet, currentReturn, type PaperRowLite, type MarkLite } from "@/lib/paper/analytics";
 import { assessHealth } from "@/lib/health/assess";
 
@@ -64,6 +65,7 @@ describe("P&L math", () => {
 });
 
 describe("marking", () => {
+  beforeEach(() => _resetMarkGuards());
   const open = { signal_id: "s1", token_id: "tok1", condition_id: "0xc1", entry_price: 0.56, shares: sharesFor(100, 0.56), signal_ts: "2026-09-18T00:00:00.000Z" };
   it("dueHorizons only returns elapsed, un-marked horizons", () => {
     const t0 = Math.floor(Date.parse(open.signal_ts) / 1000);
@@ -108,6 +110,17 @@ describe("marking", () => {
     const src: MarkSource = { priceAsOf: async () => ({ price: 0.5, ts: Math.floor(Date.parse(open.signal_ts) / 1000) - 600, resolutionSeconds: 0 }), resolution: async () => ({ state: "open" }) };
     const r = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 2 * 3600 });
     expect(r.marks).toBe(0); expect(r.failed).toBe(1); expect(db.tables.data_quality_issues[0].kind).toBe("stale_market");
+  });
+  it("does not retry a failed horizon within the hour, and refuses to overlap runs", async () => {
+    const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });
+    const src: MarkSource = { priceAsOf: vi.fn(async () => null), resolution: async () => ({ state: "open" }) };
+    const t = Math.floor(Date.parse(open.signal_ts) / 1000) + 2 * 3600;
+    expect((await runMarking(db, src, { now: t })).failed).toBe(1);
+    expect((await runMarking(db, src, { now: t + 60 })).failed).toBe(0); expect(src.priceAsOf).toHaveBeenCalledTimes(1);
+    expect((await runMarking(db, src, { now: t + 3700 })).failed).toBe(1);
+    const slow: MarkSource = { priceAsOf: () => new Promise((r) => setTimeout(() => r(null), 50)), resolution: async () => ({ state: "open" }) };
+    const first = runMarking(db, slow, { now: t + 8000 }); const second = await runMarking(db, slow, { now: t + 8000 });
+    expect(second.skipped).toBe(true); await first;
   });
   it("parses Gamma resolution for the right token, and refuses to guess", () => {
     const m = { closed: true, clobTokenIds: '["tokA","tokB"]', outcomePrices: '["1","0"]' };
