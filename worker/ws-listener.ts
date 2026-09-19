@@ -18,6 +18,9 @@ import { heartbeat } from "../src/lib/health/heartbeat";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
+// Ingest fills one at a time. Unbounded parallelism starves every other client of the database gateway.
+const queue: Parameters<typeof engine.ingest>[0][] = []; let draining = false;
+async function drain() { if (draining) return; draining = true; try { while (queue.length) { const f = queue.shift()!; try { await engine.ingest(f); } catch (e) { console.error("ingest failed", (e as Error).message); } } } finally { draining = false; } }
 
 async function main() {
   // Boot must survive a database that is restarting: retry with backoff instead of exiting.
@@ -28,7 +31,7 @@ async function main() {
   console.log(`tracking ${engine.trackedAddresses().length} wallets`);
   setInterval(() => engine.loadWallets().catch(() => {}), 10 * 60 * 1000); // pick up daily re-scores
   // REST backstop every 60s so the worker alone is enough (Vercel Hobby crons only run daily).
-  const poll = () => pollOnce(db(), engine).then((r) => { if (r.fills) console.log(`poll: ${r.fills} fills, ${r.signals} signals`); }).catch((e) => console.error("poll failed", (e as Error).message));
+  const poll = () => pollOnce(db(), engine, undefined, { concurrency: 2 }).then((r) => { if (r.fills) console.log(`poll: ${r.fills} fills, ${r.signals} signals`); }).catch((e) => console.error("poll failed", (e as Error).message));
   poll(); setInterval(poll, 60 * 1000);
   // V2: paper price marking + settlement. Idempotent, so an overlap with a manual run is harmless.
   const markEvery = Math.max(2, Number(process.env.MARK_INTERVAL_MIN) || 10) * 60 * 1000;
@@ -62,7 +65,8 @@ function connect() {
       heartbeat(db(), "last_trade").catch(() => {});
       const f = normalizeFill(p as Record<string, unknown>, "ws"); if (!f || !engine.isTracked(f.wallet)) continue;
       kept++;
-      try { await engine.ingest(f); } catch (e) { console.error("ingest failed", (e as Error).message); }
+      queue.push(f); if (queue.length > 5000) queue.splice(0, queue.length - 5000); // never grow without bound; the poller backstops
+      void drain();
     }
   });
   ws.on("pong", () => { lastMsg = Date.now(); });
