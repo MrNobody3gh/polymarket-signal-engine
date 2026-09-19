@@ -4,7 +4,8 @@
  */
 import { esc, money, type TgButton } from "./api";
 import type { SignalKind } from "../polymarket/types";
-import { computeStats, byKind, pct, usd, currentReturn, type PaperRowLite, type MarkLite, MIN_SAMPLE } from "../paper/analytics";
+import { pct, usd, type PaperRowLite, type MarkLite, MIN_SAMPLE } from "../paper/analytics";
+import type { PaperSnapshot } from "../paper/snapshot";
 import { assessHealth, healthHtml } from "../health/assess";
 
 export interface Subscriber { chat_id: number; username: string | null; kinds: string[]; min_severity: number; min_usd: number; min_score: number; only_wallets: string[]; muted_wallets: string[]; muted_until: string | null; active: boolean }
@@ -24,6 +25,7 @@ export interface Store {
   status(): Promise<{ tracked: number; signals24h: number; lastRefresh: string | null; lastFill: string | null }>;
   // V2
   paper(o: { sinceIso?: string; wallet?: string }): Promise<{ rows: PaperRowLite[]; marks: MarkLite[] }>;
+  snapshot(): Promise<PaperSnapshot | null>;
   signalDetail(idOrPrefix: string): Promise<{ row: Record<string, unknown> | null; marks: Record<string, unknown>[]; consensus: Record<string, unknown> | null; ambiguous: boolean }>;
   health(): Promise<{ hb: Record<string, string>; dbOk: boolean }>;
 }
@@ -135,8 +137,8 @@ export async function handle(chatId: number, username: string | null, text: stri
       const book = await store.openBook(w.address, 6);
       const head = `<b>${who(w.name, w.address)}</b>\n<code>${w.address}</code>\nCopy score <b>${Math.round(Number(w.copy_score))}</b> · 90d ${money(Number(w.pnl_90d))} · ${esc(w.style)}\nNet/DD ${w.net_dd == null ? "—" : Number(w.net_dd).toFixed(1)} · months up ${w.months_up}/${w.months_total} · ${w.fills_per_day == null ? "—" : Math.round(Number(w.fills_per_day))} fills/day · idle ${w.days_idle ?? "—"}d`;
       const b = book.length ? `\n\n<b>Open book</b>\n` + book.map((p) => `${esc(p.outcome ?? "?")} — <a href="https://polymarket.com/event/${p.slug ?? ""}">${esc(p.title ?? p.slug ?? p.token_id.slice(0, 10))}</a>\n${money(Number(p.cost_usd))} at ${Number(p.avg_price).toFixed(2)} · ${ago(p.last_seen)} ago`).join("\n") : "\n\nNo open positions seen by the engine yet.";
-      const { rows: pr, marks: pm } = await store.paper({ wallet: w.address }); const ps = computeStats(pr, pm);
-      const perf = ps.signals ? `\n\n<b>Paper performance</b> (n=${ps.signals}, ${ps.open} open, ${ps.resolved + ps.exited} settled)\nP&amp;L ${usd(ps.pnl)} · avg ${pct(ps.avgReturn)} · median ${pct(ps.medianReturn)}\nWin rate ${ps.winRate == null ? "—" : (ps.winRate * 100).toFixed(0) + "%"} · avg win ${pct(ps.avgWin)} · avg loss ${pct(ps.avgLoss)}${ps.insufficient ? "\n<i>Insufficient data.</i>" : ""}` + byKind(pr, pm).map((k) => `\n${KIND_LABEL[k.key as SignalKind] ?? k.key}: n=${k.stats.signals}, ${usd(k.stats.pnl)}${k.stats.insufficient ? " (insufficient)" : ""}`).join("") : "\n\n<i>No paper signals for this wallet yet.</i>";
+      const snap = await store.snapshot(); const ws = snap?.wallets[w.address]; const ps = ws?.stats;
+      const perf = ps && ps.signals ? `\n\n<b>Paper performance</b> (n=${ps.signals}, ${ps.open} open, ${ps.resolved + ps.exited} settled)\nP&amp;L ${usd(ps.pnl)} · avg ${pct(ps.avgReturn)} · median ${pct(ps.medianReturn)}\nWin rate ${ps.winRate == null ? "—" : (ps.winRate * 100).toFixed(0) + "%"} · avg win ${pct(ps.avgWin)} · avg loss ${pct(ps.avgLoss)}${ps.insufficient ? "\n<i>Insufficient data.</i>" : ""}` + ws!.byKind.map((k) => `\n${KIND_LABEL[k.key as SignalKind] ?? k.key}: n=${k.stats.signals}, ${usd(k.stats.pnl)}${k.stats.insufficient ? " (insufficient)" : ""}`).join("") : "\n\n<i>No paper signals for this wallet yet.</i>";
       return { html: head + b + perf, buttons: [[{ text: "Profile", url: `https://polymarket.com/profile/${w.address}` }, { text: sub?.muted_wallets.includes(w.address) ? "Muted" : "Mute wallet", callback_data: `mute:${w.address}` }, { text: "Only this wallet", callback_data: `only:${w.address}` }]] };
     }
     case "status": {
@@ -145,14 +147,16 @@ export async function handle(chatId: number, username: string | null, text: stri
     }
     case "performance": case "stats": {
       const win = (args[0] ?? (cmd === "stats" ? "30d" : "all")).toLowerCase();
-      const days = win === "all" ? null : Number(win.replace(/d$/i, "")); if (win !== "all" && !(days! > 0)) return { html: "Usage: /performance, /performance 7d, /performance 30d" };
-      const sinceIso = days ? new Date(Date.now() - days * 86_400_000).toISOString() : undefined;
-      const { rows, marks } = await store.paper({ sinceIso }); const st = computeStats(rows, marks);
-      const head = `📊 <b>PAPER PERFORMANCE</b> — ${days ? `last ${days} days` : "all time"}\n$${rows[0]?.size_usd ?? 100} hypothetical per signal, long the outcome token at the signal price.`;
+      const key = win === "all" ? "all" : win === "7d" ? "d7" : win === "30d" ? "d30" : null;
+      if (!key) return { html: "Usage: /performance, /performance 7d, /performance 30d" };
+      const snap = await store.snapshot();
+      if (!snap) return { html: "Performance snapshot not built yet — the worker rebuilds it every few minutes after marking." };
+      const w = snap.windows[key]; const st = w.stats; const label = key === "all" ? "all time" : key === "d7" ? "last 7 days" : "last 30 days";
+      const head = `📊 <b>PAPER PERFORMANCE</b> — ${label}\n$${w.sizeUsd} hypothetical per signal, long the outcome token at the signal price. Built ${ago(snap.builtAt)} ago.`;
       if (!st.signals) return { html: `${head}\n\nNo paper signals in this window yet.` };
       const core = `\nSignals: ${st.signals}\nOpen: ${st.open} · Resolved: ${st.resolved} · Exited: ${st.exited}${st.unresolved ? ` · Unresolved: ${st.unresolved}` : ""}${st.invalid ? ` · Invalid: ${st.invalid}` : ""}\nObserved (have a price after entry): ${st.observed}\n\nHypothetical P&amp;L: <b>${usd(st.pnl)}</b>\nAverage return: ${pct(st.avgReturn)}\nMedian return: ${pct(st.medianReturn)}\nWin rate (settled only): ${st.winRate == null ? "— (nothing settled yet)" : `${(st.winRate * 100).toFixed(1)}% of ${st.resolved + st.exited}`}\nAvg win / avg loss: ${pct(st.avgWin)} / ${pct(st.avgLoss)}`;
       if (cmd === "stats") return { html: `${head}${core}\n\n<i>Paper only. ${st.insufficient ? "Insufficient data for conclusions." : ""}</i>` };
-      const kinds = byKind(rows, marks).map((k) => `${KIND_LABEL[k.key as SignalKind] ?? k.key}: n=${k.stats.signals}, P&amp;L ${usd(k.stats.pnl)}, avg ${pct(k.stats.avgReturn)}${k.stats.insufficient ? " (insufficient)" : ""}`).join("\n");
+      const kinds = w.byKind.map((k) => `${KIND_LABEL[k.key as SignalKind] ?? k.key}: n=${k.stats.signals}, P&amp;L ${usd(k.stats.pnl)}, avg ${pct(k.stats.avgReturn)}${k.stats.insufficient ? " (insufficient)" : ""}`).join("\n");
       const bw = st.best ? `\n\nBest: ${pct(st.best.ret)} — ${esc(st.best.title ?? st.best.id.slice(0, 8))}\nWorst: ${pct(st.worst!.ret)} — ${esc(st.worst!.title ?? st.worst!.id.slice(0, 8))}` : "";
       return { html: `${head}${core}\n\n<b>By signal type</b>\n${kinds}${bw}\n\n<i>Paper only. Samples under ${MIN_SAMPLE} are flagged insufficient; nothing here is a recommendation.</i>` };
     }

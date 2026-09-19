@@ -13,6 +13,7 @@ import { SignalEngine } from "../src/lib/signals/engine";
 import { WS_LIVE, normalizeFill } from "../src/lib/polymarket/client";
 import { pollOnce } from "../src/lib/signals/poll";
 import { runMarking, gammaSource } from "../src/lib/paper/mark";
+import { buildSnapshot, saveSnapshot } from "../src/lib/paper/snapshot";
 import { heartbeat } from "../src/lib/health/heartbeat";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
@@ -27,7 +28,9 @@ async function main() {
   poll(); setInterval(poll, 60 * 1000);
   // V2: paper price marking + settlement. Idempotent, so an overlap with a manual run is harmless.
   const markEvery = Math.max(2, Number(process.env.MARK_INTERVAL_MIN) || 10) * 60 * 1000;
-  const mark = () => runMarking(db(), gammaSource(), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message));
+  const snapshot = () => buildSnapshot(db()).then((snap) => saveSnapshot(db(), snap)).then(() => console.log(new Date().toISOString(), "[paper] snapshot rebuilt")).catch((e) => console.error("snapshot failed", (e as Error).message));
+  const mark = () => runMarking(db(), gammaSource(), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message)).then(snapshot);
+  setTimeout(snapshot, 5_000);
   setTimeout(mark, 20_000); setInterval(mark, markEvery);
   await heartbeat(db(), "worker_boot", new Date().toISOString());
   connect();

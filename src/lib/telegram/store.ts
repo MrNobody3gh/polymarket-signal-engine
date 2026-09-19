@@ -2,6 +2,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Store, Subscriber } from "./commands";
 import { loadPaper, loadSignalDetail } from "../paper/queries";
+import { readSnapshot } from "../paper/snapshot";
 import { readHeartbeats } from "../health/heartbeat";
 
 export function supabaseStore(db: SupabaseClient): Store {
@@ -31,6 +32,7 @@ export function supabaseStore(db: SupabaseClient): Store {
       return { tracked: tracked ?? 0, signals24h: signals24h ?? 0, lastRefresh: r?.value ? new Date(Number(r.value) * 1000).toUTCString().slice(5, 22) + " UTC" : null, lastFill: f?.ts ?? null };
     },
     paper: (o) => loadPaper(db, o),
+    snapshot: () => readSnapshot(db),
     signalDetail: (id) => loadSignalDetail(db, id),
     async health() { const hb = await readHeartbeats(db); const { error } = await db.from("cursors").select("key", { head: true, count: "exact" }).limit(1); return { hb, dbOk: !error }; },
   };

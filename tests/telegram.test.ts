@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { handle, handleCallback, matches, parse, signalHtml, type Store, type Subscriber, type SignalRow } from "@/lib/telegram/commands";
 import { broadcast } from "@/lib/telegram/broadcast";
+import { computeStats, byKind, byWallet } from "@/lib/paper/analytics";
 import { TelegramApi } from "@/lib/telegram/api";
 
 const sub = (o: Partial<Subscriber> = {}): Subscriber => ({ chat_id: 1, username: "joseph", kinds: ["NEW_POSITION", "CONSENSUS", "CONVICTION_ADD", "EARLY_ENTRY", "EXIT"], min_severity: 2, min_usd: 0, min_score: 0, only_wallets: [], muted_wallets: [], muted_until: null, active: true, ...o });
@@ -19,6 +20,7 @@ function memStore(): Store & { subs: Map<number, Subscriber> } {
     async openBook() { return [{ token_id: "t", title: "Hormuz", slug: "hormuz", outcome: "No", size: 1000, avg_price: 0.54, cost_usd: 540, last_seen: new Date().toISOString() }]; },
     async status() { return { tracked: 180, signals24h: 7, lastRefresh: "17 Sep 2026 04:15 UTC", lastFill: new Date().toISOString() }; },
     async paper() { return { rows: [], marks: [] }; },
+    async snapshot() { return null; },
     async signalDetail() { return { row: null, marks: [], consensus: null, ambiguous: false }; },
     async health() { return { hb: { ws_connected: "true", last_trade: new Date().toISOString(), last_eval: new Date().toISOString(), last_db_write: new Date().toISOString(), last_mark: new Date().toISOString() }, dbOk: true }; },
   };
@@ -99,14 +101,17 @@ describe("V2 commands", () => {
     { signal_id: "aaaaaaaa-1111-4111-8111-111111111111", wallet: "0xabcabcabcabcabcabcabcabcabcabcabcabcabca", wallet_name: "crckr", kind: "NEW_POSITION", token_id: "t", title: "CS: BBL vs 3DMAX", outcome: "3DMAX", signal_ts: NOW_ISO, entry_price: 0.56, shares: 178.57, size_usd: 100, copy_score: 57, consensus_depth: 4, status: "RESOLVED_WIN", final_pnl: 78.57, final_return: 0.7857 },
     { signal_id: "bbbbbbbb-1111-4111-8111-111111111111", wallet: "0xabcabcabcabcabcabcabcabcabcabcabcabcabca", wallet_name: "crckr", kind: "CONSENSUS", token_id: "t", title: "Hormuz", outcome: "No", signal_ts: NOW_ISO, entry_price: 0.5, shares: 200, size_usd: 100, copy_score: 57, consensus_depth: 3, status: "OPEN", final_pnl: null, final_return: null },
   ] as never[];
-  const withPaper = () => { const st = memStore(); st.paper = async (o) => ({ rows: (o.wallet ? rows.filter((r: { wallet: string }) => r.wallet === o.wallet) : rows) as never, marks: [{ signal_id: "bbbbbbbb-1111-4111-8111-111111111111", horizon: "1h", observed_at: NOW_ISO, price: 0.55, pnl: 10, return_pct: 0.1 }] });
+  const withPaper = () => { const st = memStore(); const marks = [{ signal_id: "bbbbbbbb-1111-4111-8111-111111111111", horizon: "1h", observed_at: NOW_ISO, price: 0.55, pnl: 10, return_pct: 0.1 }];
+    st.paper = async (o) => ({ rows: (o.wallet ? rows.filter((r: { wallet: string }) => r.wallet === o.wallet) : rows) as never, marks });
+    const win = { stats: computeStats(rows as never, marks), byKind: byKind(rows as never, marks), byScoreBand: [], byConsensusDepth: [], sizeUsd: 100 };
+    st.snapshot = async () => ({ builtAt: NOW_ISO, windows: { all: win, d7: win, d30: win }, wallets: Object.fromEntries(byWallet(rows as never, marks).map((w) => [w.key, { stats: w.stats, byKind: w.kinds, name: w.name }])) });
     st.signalDetail = async (id) => (id.startsWith("aaaa") ? { row: { ...(rows[0] as object), side: "LONG", trade_usd: 5000, severity: 3, slug: "bbl" } as never, marks: [{ horizon: "1h", observed_at: NOW_ISO, price: 0.57, pnl: 1.79, return_pct: 0.018, source: "prices-history" }, { horizon: "resolution", observed_at: NOW_ISO, price: 1, pnl: 78.57, return_pct: 0.7857, source: "gamma" }], consensus: { participants: ["0xabcabcabcabcabcabcabcabcabcabcabcabcabca", "0xdef"], spread_seconds: 900, combined_usd: 12000, entry_prices: [0.56, 0.5] }, ambiguous: false } : id === "amb" ? { row: null, marks: [], consensus: null, ambiguous: true } : { row: null, marks: [], consensus: null, ambiguous: false }); return st; };
   it("/performance and /stats report measured numbers with paper-only framing", async () => {
     const st = withPaper(); const r = await handle(1, null, "/performance", st);
     expect(r.html).toContain("PAPER PERFORMANCE"); expect(r.html).toContain("Signals: 2"); expect(r.html).toContain("+$88.57"); expect(r.html).toContain("Win rate (settled only): 100.0% of 1"); expect(r.html).toContain("By signal type"); expect(r.html).toContain("insufficient");
     expect((await handle(1, null, "/performance 7d", st)).html).toContain("last 7 days"); expect((await handle(1, null, "/performance banana", st)).html).toContain("Usage");
     expect((await handle(1, null, "/stats", st)).html).toContain("last 30 days");
-    expect((await handle(1, null, "/performance", memStore())).html).toContain("No paper signals");
+    expect((await handle(1, null, "/performance", memStore())).html).toContain("not built yet");
   });
   it("/signal shows the timeline from real observations", async () => {
     const st = withPaper(); const r = await handle(1, null, "/signal aaaaaaaa", st);
