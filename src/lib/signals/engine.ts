@@ -17,6 +17,7 @@ export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: C
 export class SignalEngine {
   private db: SupabaseClient; private cfg: RuleConfig; private ch: Channels; private now: () => number; private log: (m: string) => void;
   private wallets = new Map<string, WalletProfile>(); private median = new Map<string, number>(); private paperSize: number;
+  private seen = new Set<string>(); private remember(id: string) { this.seen.add(id); if (this.seen.size > 20_000) { const first = this.seen.values().next().value; if (first) this.seen.delete(first); } }
   constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; }
 
   /** Load tracked wallets into memory. Call at start and after each refresh. */
@@ -40,9 +41,14 @@ export class SignalEngine {
   /** Process one fill end-to-end. Returns the signals that were persisted (new, not deduped). */
   async ingest(f: Fill): Promise<Signal[]> {
     const w = this.wallets.get(f.wallet); if (!w) return [];
+    // 0) already ingested? (websocket and poller overlap) — one indexed read instead of the whole path
+    if (this.seen.has(f.id)) return [];
+    const { data: dup } = await this.db.from("fills").select("id").eq("id", f.id).maybeSingle();
+    if (dup) { this.remember(f.id); return []; }
     // 1) store fill (idempotent)
     const { error: fe } = await this.db.from("fills").upsert({ id: f.id, wallet: f.wallet, condition_id: f.conditionId, token_id: f.tokenId, side: f.side, size: f.size, price: f.price, usd: f.usd, ts: new Date(f.ts * 1000).toISOString(), title: f.title, slug: f.slug, outcome: f.outcome, source: f.source, raw: null }, { onConflict: "id", ignoreDuplicates: true });
     if (fe) throw fe;
+    this.remember(f.id);
     await heartbeat(this.db, "last_db_write");
     // 2) position before
     const { data: pb } = await this.db.from("positions").select("*").eq("wallet", f.wallet).eq("token_id", f.tokenId).maybeSingle();

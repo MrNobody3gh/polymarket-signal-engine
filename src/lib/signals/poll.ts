@@ -14,12 +14,14 @@ export async function pollOnce(db: SupabaseClient, engine: SignalEngine, client 
   let i = 0;
   const workers = Array.from({ length: conc }, async () => {
     while (i < wallets.length) {
-      const w = wallets[i++]; const since = (cursor.get(w) ?? now - lookback) - 60; // 60s overlap for indexing lag
+      const w = wallets[i++]; const since = (cursor.get(w) ?? now - lookback); // fills at exactly the cursor second were already ingested
       let rows;
-      try { rows = await client.userTrades(w, { since, cap: 500 }); } catch (e) { console.error(`poll ${w}: ${(e as Error).message}`); continue; }
+      try { rows = await client.userTrades(w, { since, cap: 200 }); } catch (e) { console.error(`poll ${w}: ${(e as Error).message}`); continue; }
       let maxTs = cursor.get(w) ?? since;
-      // oldest first so the book evolves in order
-      const fs = rows.map((r) => normalizeFill(r, "rest")).filter((x): x is NonNullable<typeof x> => !!x).sort((a, b) => a.ts - b.ts);
+      // The API's `start` is not a reliable filter: enforce the cursor here so an already-seen fill never
+      // touches the database again. Oldest first so the book evolves in order.
+      const seen = maxTs;
+      const fs = rows.map((r) => normalizeFill(r, "rest")).filter((x): x is NonNullable<typeof x> => !!x && x.ts > seen).sort((a, b) => a.ts - b.ts);
       for (const f of fs) { fills++; signals += (await engine.ingest(f)).length; maxTs = Math.max(maxTs, f.ts); }
       await db.from("cursors").upsert({ key: `poll:${w}`, value: String(maxTs), updated_at: new Date().toISOString() });
     }
