@@ -20,7 +20,11 @@ const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().t
 let backoff = 1000; let seen = 0, kept = 0;
 
 async function main() {
-  await engine.loadWallets();
+  // Boot must survive a database that is restarting: retry with backoff instead of exiting.
+  for (let attempt = 1; ; attempt++) {
+    try { await engine.loadWallets(); break; }
+    catch (e) { const wait = Math.min(60_000, 2_000 * 2 ** attempt); console.error(`boot: database not ready (${(e as Error).message}); retry in ${wait / 1000}s`); await new Promise((r) => setTimeout(r, wait)); }
+  }
   console.log(`tracking ${engine.trackedAddresses().length} wallets`);
   setInterval(() => engine.loadWallets().catch(() => {}), 10 * 60 * 1000); // pick up daily re-scores
   // REST backstop every 60s so the worker alone is enough (Vercel Hobby crons only run daily).
@@ -35,17 +39,21 @@ async function main() {
   await heartbeat(db(), "worker_boot", new Date().toISOString());
   connect();
 }
+const SILENCE_LIMIT_MS = 2 * 60 * 1000; // no message for this long = dead socket, even if still "open"
 function connect() {
   const ws = new WebSocket(WS_LIVE);
-  let pinger: NodeJS.Timeout | undefined;
+  let pinger: NodeJS.Timeout | undefined; let watchdog: NodeJS.Timeout | undefined; let lastMsg = Date.now();
+  const armWatchdog = () => { clearInterval(watchdog); watchdog = setInterval(() => { if (Date.now() - lastMsg > SILENCE_LIMIT_MS) { console.log(`socket silent for ${Math.round((Date.now() - lastMsg) / 1000)}s; forcing reconnect`); heartbeat(db(), "ws_connected", "false").catch(() => {}); ws.terminate(); } }, 15_000); };
   ws.on("open", () => {
     backoff = 1000;
     ws.send(JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "activity", type: "trades" }] }));
     pinger = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send("PING"); }, 5000);
+    lastMsg = Date.now(); armWatchdog();
     console.log("connected to", WS_LIVE);
     heartbeat(db(), "ws_connected", "true").catch(() => {});
   });
   ws.on("message", async (buf) => {
+    lastMsg = Date.now();
     let msg: unknown; try { msg = JSON.parse(buf.toString()); } catch { return; }
     for (const m of Array.isArray(msg) ? msg : [msg]) {
       const p = (m as { payload?: Record<string, unknown> })?.payload ?? (m as Record<string, unknown>);
@@ -57,7 +65,8 @@ function connect() {
       try { await engine.ingest(f); } catch (e) { console.error("ingest failed", (e as Error).message); }
     }
   });
-  ws.on("close", () => { clearInterval(pinger); heartbeat(db(), "ws_connected", "false").catch(() => {}); console.log(`socket closed; reconnect in ${backoff}ms (seen ${seen}, kept ${kept})`); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 60_000); });
+  ws.on("pong", () => { lastMsg = Date.now(); });
+  ws.on("close", () => { clearInterval(pinger); clearInterval(watchdog); heartbeat(db(), "ws_connected", "false").catch(() => {}); console.log(`socket closed; reconnect in ${backoff}ms (seen ${seen}, kept ${kept})`); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 60_000); });
   ws.on("error", (e) => { console.error("socket error", e.message); });
 }
 main().catch((e) => { console.error(e); process.exit(1); });
