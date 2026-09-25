@@ -5,7 +5,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Fill, Position, Signal, WalletProfile } from "../polymarket/types";
-import { applyFill, configFromEnv, evaluate, type RuleConfig } from "./rules";
+import { applyFill, configFromEnv, evaluate, isBotLike, type RuleConfig } from "./rules";
 import { channelsFromEnv, dispatch, type Channels } from "../alerts/dispatch";
 import { TelegramApi } from "../telegram/api";
 import { broadcast } from "../telegram/broadcast";
@@ -17,8 +17,9 @@ export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: C
 export class SignalEngine {
   private db: SupabaseClient; private cfg: RuleConfig; private ch: Channels; private now: () => number; private log: (m: string) => void;
   private wallets = new Map<string, WalletProfile>(); private median = new Map<string, number>(); private paperSize: number;
+  private minStoreUsd: number;
   private seen = new Set<string>(); private remember(id: string) { this.seen.add(id); if (this.seen.size > 20_000) { const first = this.seen.values().next().value; if (first) this.seen.delete(first); } }
-  constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; }
+  constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; this.minStoreUsd = this.cfg.minFillUsd; }
 
   /** Load tracked wallets into memory. Call at start and after each refresh. */
   async loadWallets(): Promise<Map<string, WalletProfile>> {
@@ -41,6 +42,9 @@ export class SignalEngine {
   /** Process one fill end-to-end. Returns the signals that were persisted (new, not deduped). */
   async ingest(f: Fill): Promise<Signal[]> {
     const w = this.wallets.get(f.wallet); if (!w) return [];
+    // Volume control: sub-threshold fills and bot/maker wallets can never fire a rule, so they never touch the database.
+    // (Their position book is approximate as a result; the rules only read it for tracked, human-speed wallets.)
+    if (f.usd < this.minStoreUsd || isBotLike(w)) return [];
     // 0) already ingested? (websocket and poller overlap) — one indexed read instead of the whole path
     if (this.seen.has(f.id)) return [];
     const { data: dup } = await this.db.from("fills").select("id").eq("id", f.id).maybeSingle();

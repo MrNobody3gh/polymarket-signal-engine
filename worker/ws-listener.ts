@@ -38,6 +38,9 @@ async function main() {
   const snapshot = () => buildSnapshot(db()).then((snap) => saveSnapshot(db(), snap)).then(() => console.log(new Date().toISOString(), "[paper] snapshot rebuilt")).catch((e) => console.error("snapshot failed", (e as Error).message));
   const mark = () => runMarking(db(), gammaSource(), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message)).then(snapshot);
   setTimeout(snapshot, 5_000);
+  // Retention: expire raw fills (7d), closed positions (30d), old data-quality rows (14d). Signals and paper results are permanent.
+  const prune = async () => { const { data, error } = await db().rpc("prune_working_data"); if (error) console.error("prune failed", error.message); else console.log(new Date().toISOString(), "[retention] pruned", JSON.stringify(data)); };
+  setTimeout(prune, 60_000); setInterval(prune, 24 * 3600 * 1000);
   setTimeout(mark, 20_000); setInterval(mark, markEvery);
   await heartbeat(db(), "worker_boot", new Date().toISOString());
   connect();

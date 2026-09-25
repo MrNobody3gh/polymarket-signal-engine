@@ -92,3 +92,12 @@ describe("configFromEnv", () => {
     const c = configFromEnv({ MIN_FILL_USD: "25", EXIT_SELL_RATIO: "abc" }); expect(c.minFillUsd).toBe(25); expect(c.exitSellRatio).toBe(DEFAULT_CONFIG.exitSellRatio);
   });
 });
+
+describe("volume control", () => {
+  it("bot-like wallets are recognised so the engine can skip them before any database work", async () => {
+    const { isBotLike } = await import("@/lib/signals/rules");
+    expect(isBotLike({ ...wallet, style: "Market maker / bot" })).toBe(true);
+    expect(isBotLike({ ...wallet, fillsPerDay: 900 })).toBe(true);
+    expect(isBotLike(wallet)).toBe(false);
+  });
+});

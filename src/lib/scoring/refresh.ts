@@ -58,8 +58,9 @@ export async function refresh(db: SupabaseClient, client = new PolymarketClient(
     }
   }));
   const minScore = opts.minCopyScore ?? 40; const topN = opts.topByPnl ?? 50;
-  const byScore = [...profiles].sort((a, b) => b.copyScore - a.copyScore || b.pnl90d - a.pnl90d);
-  const byPnl = [...profiles].sort((a, b) => b.pnl90d - a.pnl90d);
+  const human = profiles.filter((p) => p.style !== "Market maker / bot");
+  const byScore = [...human].sort((a, b) => b.copyScore - a.copyScore || b.pnl90d - a.pnl90d);
+  const byPnl = [...human].sort((a, b) => b.pnl90d - a.pnl90d);
   const track = new Set<string>([...byScore.filter((p) => p.copyScore >= minScore).slice(0, 150).map((p) => p.address), ...byPnl.slice(0, topN).map((p) => p.address)]);
   const rows = profiles.map((p) => ({ address: p.address, name: p.name, copy_score: p.copyScore, pnl_90d: p.pnl90d, style: p.style, fills_per_day: p.fillsPerDay, program_share: p.programShare, concentration: p.concentration, net_dd: p.netDd, months_up: p.monthsUp, months_total: p.monthsTotal, days_idle: p.daysIdle, trade_count: p.tradeCount, sources: p.sources, tracked: track.has(p.address), scored_at: new Date().toISOString() }));
   for (let j = 0; j < rows.length; j += 500) { const { error } = await db.from("wallets").upsert(rows.slice(j, j + 500), { onConflict: "address" }); if (error) throw error; }
