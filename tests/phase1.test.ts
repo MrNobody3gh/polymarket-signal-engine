@@ -134,6 +134,10 @@ describe("4. startup reconciliation from /v2/positions", () => {
     await e.ingest(fill({ tokenId: "tokY", ts: NOW - 5 })); const r = await e.reconcileWallet(A, [], { freshSec: 600 });
     expect(r.skippedFresh).toBe(1); expect(db.T("positions").find((p) => p.token_id === "tokY")!.size).toBe(10_000);
   });
+  it("a token repeated across API pages is written once (no ON CONFLICT double-hit)", async () => {
+    const db = fakeDb(); const r = await engineOn(db, [profile(A)]).reconcileWallet(A, [remote(), remote(), remote({ token_id: "tok2" })], { freshSec: 0 });
+    expect(r.upserted).toBe(2); expect(db.T("positions")).toHaveLength(2);
+  });
   it("ignores redeemable/closed and empty rows", () => {
     expect(parseRemotePosition({ token_id: "t", condition_id: "c", status: "REDEEMABLE", current_size: 5, avg_price: 0.5 }, A)).toBeNull();
     expect(parseRemotePosition({ token_id: "t", condition_id: "c", status: "OPEN", current_size: 0, avg_price: 0.5 }, A)).toBeNull();

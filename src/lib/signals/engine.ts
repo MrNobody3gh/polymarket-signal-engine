@@ -135,7 +135,9 @@ export class SignalEngine {
       const byToken = new Map((local ?? []).map((r) => [r.token_id as string, rowToPosition(r)]));
       const remoteTokens = new Set<string>(); let upserted = 0, zeroed = 0, skippedFresh = 0;
       const rows = [];
+      // /v2/positions pages are an offset walk and can repeat a row across pages: one row per token.
       for (const r of remote) {
+        if (remoteTokens.has(r.tokenId)) continue;
         remoteTokens.add(r.tokenId); const cur = byToken.get(r.tokenId);
         if (cur && now - cur.lastSeen < freshSec) { skippedFresh++; continue; }
         const same = cur && Math.abs(cur.size - r.size) < 1e-9 && Math.abs(cur.avgPrice - r.avgPrice) < 1e-9;

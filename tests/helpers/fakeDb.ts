@@ -28,6 +28,10 @@ export function fakeDb() {
       if (op === "update") { const rows = match(); rows.forEach((r) => Object.assign(r, payload)); writes.push({ table: t, op, n: rows.length }); return { data: null, error: null }; }
       if (op === "delete") { const rows = new Set(match()); tables[t] = tab.filter((r) => !rows.has(r)); return { data: null, error: null }; }
       const list = Array.isArray(payload) ? payload : [payload]; const out: Row[] = [];
+      if (op === "upsert" && list.length > 1) { // Postgres: ON CONFLICT DO UPDATE cannot affect a row twice in one statement
+        const cc = opts.onConflict ? String(opts.onConflict).split(",") : PK[t]; const keys = list.map((r: Row) => keyOf(t, r, cc));
+        if (new Set(keys).size !== keys.length) throw Object.assign(new Error("ON CONFLICT DO UPDATE command cannot affect row a second time"), { code: "21000" });
+      }
       for (const raw of list) {
         const r = { ...raw }; if (t === "signals" && !r.id) r.id = `00000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`;
         const conflictCols = op === "upsert" && opts.onConflict ? String(opts.onConflict).split(",") : PK[t];
