@@ -371,3 +371,120 @@ describe("PortfolioBook", () => {
     });
   });
 });
+
+// ───────────────────────────── step 5: signals → portfolio requests ─────────────────────────────
+import { buildRequests, duplicateKey, orderRequests, frontierOf, fingerprint, rewindPoint } from "@/lib/paper/portfolio/requests";
+import { simulateEntry, lifecycle, timeline } from "@/lib/paper/sim/execute";
+
+describe("portfolio requests", () => {
+  let seed = 23; const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const uidE = (i: number) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, uidX = (i: number) => `00000000-0000-4000-9000-${String(i).padStart(12, "0")}`;
+  /** Inputs shaped exactly like loadBatchInputs' output. `missing` = share of price observations not fetched yet. */
+  function inputs(n: number, o: { missing?: number } = {}) {
+    const inp: SimInputs = { signals: [], ledger: new Map(), marks: new Map(), resolutions: new Map(), markets: new Map(), obs: new Map() };
+    for (let i = 0; i < n; i++) {
+      const src = T0 + i * 600; const ev = src + 4 + Math.floor(rnd() * 90);
+      inp.signals.push({ id: uidE(i), kind: ["NEW_POSITION", "CONSENSUS", "CONVICTION_ADD", "EARLY_ENTRY"][i % 4], wallet: `w${i % 5}`, condition_id: `c${i % 7}`, token_id: `t${i}`, price: 0.1 + rnd() * 0.8, usd: 40 + rnd() * 4000, created_at: iso(src), evaluated_at: iso(ev) });
+      inp.ledger.set(uidE(i), { signal_id: uidE(i), created_at: iso(ev) });
+      if (rnd() < 0.6) { const xs = src + 30 + Math.floor(rnd() * 5000); inp.signals.push({ id: uidX(i), kind: "EXIT", wallet: `w${i % 5}`, condition_id: `c${i % 7}`, token_id: `t${i}`, price: 0.1 + rnd() * 0.8, usd: rnd() < 0.3 ? 20 : 3000, created_at: iso(xs), evaluated_at: iso(xs + 4) }); }
+      if (rnd() < 0.5) inp.resolutions.set(`t${i}`, { ts: src + 3000 + Math.floor(rnd() * 9000), value: rnd() < 0.5 ? 1 : 0 });
+      if (rnd() < 0.5) inp.marks.set(uidE(i), { ts: src + 3600, price: rnd() });
+      if (i % 7 < 4) inp.markets.set(`c${i % 7}`, { feesEnabled: true, takerFeeRate: 0.02, tickSize: 0.01, minOrderShares: 5 });
+    }
+    for (const x of neededObservations(buildSignals(inp), inp, [MODES.REALISTIC, MODES.CONSERVATIVE])) if (rnd() >= (o.missing ?? 0)) inp.obs.set(`${x.tokenId}@${x.asOf}`, rnd() < 0.08 ? null : { ts: x.asOf - Math.floor(rnd() * 200), price: 0.03 + rnd() * 0.94, resolutionSeconds: 0 });
+    return inp;
+  }
+
+  for (const mode of ["IDEAL", "REALISTIC", "CONSERVATIVE"] as const) {
+    it(`a request carries exactly what simulateMode uses — ${mode}`, () => {
+      const inp = inputs(250, { missing: 0.15 }); const cfg = MODES[mode];
+      const reqs = new Map(buildRequests(buildSignals(inp), inp, cfg, { startTs: 0 }).map((r) => [r.signal.signalId, r]));
+      const recs = simulateMode(buildSignals(inp), inp, cfg).records as any[];
+      let simulated = 0, pending = 0;
+      for (const rec of recs) {
+        const r = reqs.get(rec.signal_id)!;
+        expect(r.pendingEntry || r.exitPendingTs != null, rec.signal_id).toBe(rec.coverage_state === "PENDING_DATA");
+        if (rec.coverage_state === "PENDING_DATA") { pending++; continue; }
+        const e = simulateEntry(r.signal.entry, cfg); const life = lifecycle(e, r.signal.exit ? { input: r.signal.exit } : null, r.signal.resolution, r.signal.mark, cfg);
+        expect({ status: e.status, fill: e.fillPrice, shares: e.filledShares, net: life.netPnl, state: life.state }).toEqual({ status: rec.status, fill: rec.fill_price, shares: rec.filled_shares, net: rec.net_pnl, state: rec.state });
+        if (life.entry.filledShares > 0) simulated++;
+      }
+      expect(simulated).toBeGreaterThan(50); if (mode !== "IDEAL") expect(pending).toBeGreaterThan(10); else expect(pending).toBe(0);
+    });
+  }
+
+  it("duplicate key: the source fill when known, else the legacy key; one fill → one lot, distinct fills → two lots", () => {
+    expect(duplicateKey({ sourceKey: "w|t|1|0.4" }, "0xabc:t:w:1:BUY:10:0.4")).toBe("fill:0xabc:t:w:1:BUY:10:0.4");
+    expect(duplicateKey({ sourceKey: "w|t|1|0.4" }, null)).toBe("w|t|1|0.4");
+    const inp = inputs(1); const s0 = inp.signals.find((s) => s.kind !== "EXIT")!; inp.signals = [s0];
+    const twin = { ...s0, id: uidE(900), kind: "CONSENSUS" }; const other = { ...s0, id: uidE(901), kind: "CONVICTION_ADD" }; // same wallet, token, second and price
+    inp.signals.push(twin, other); for (const s of [twin, other]) inp.ledger.set(s.id, { signal_id: s.id, created_at: inp.ledger.get(s0.id)!.created_at });
+    const pc = { startingCapitalUsd: 10_000, positionUsd: 100, maxMarketExposureUsd: 10_000, maxTotalExposurePct: 100, maxOpenPositions: 100, maxWalletAllocationUsd: 10_000, minCashReserveUsd: 0, allowResize: false };
+    const run = (ids: Map<string, string | null>) => { const b = new PortfolioBook(MODES.IDEAL, pc); for (const r of orderRequests(buildRequests(buildSignals(inp), inp, MODES.IDEAL, { startTs: 0, sourceFillIds: ids }))) b.submit(r.signal); return b.take().decisions; };
+    // legacy key (no fill ids): all three look like one trade → one lot
+    expect(run(new Map()).map((d) => [d.kind, d.outcome])).toEqual([["NEW_POSITION", "FILLED"], ["CONVICTION_ADD", "REJECTED"], ["CONSENSUS", "REJECTED"]]);
+    // with fill ids: NEW_POSITION + CONSENSUS share a fill (one lot, credited to NEW_POSITION); the add is its own fill
+    const d = run(new Map([[s0.id, "f1"], [twin.id, "f1"], [other.id, "f2"]]));
+    expect(d.map((x) => [x.kind, x.outcome, x.reason])).toEqual([["NEW_POSITION", "FILLED", null], ["CONVICTION_ADD", "FILLED", null], ["CONSENSUS", "REJECTED", "REJECTED_DUPLICATE_POSITION"]]);
+  });
+
+  it("start boundary (D4): a fill before the start is never requested; the same signal can fall either side per mode", () => {
+    const inp = inputs(40); const built = buildSignals(inp);
+    const start = timeline(built[20].entry.sourceTs, built[20].entry.evalTs, MODES.REALISTIC).fillTs;
+    const r = buildRequests(built, inp, MODES.REALISTIC, { startTs: start });
+    expect(r.every((x) => x.key.ts >= start)).toBe(true); expect(r.some((x) => x.key.ts === start)).toBe(true);
+    expect(r.length).toBe(built.filter((b) => timeline(b.entry.sourceTs, b.entry.evalTs, MODES.REALISTIC).fillTs >= start).length);
+    const ideal = buildRequests(built, inp, MODES.IDEAL, { startTs: start }); // IDEAL fills at the source time, earlier
+    expect(ideal.map((x) => x.signal.signalId)).not.toContain(built[20].id);
+  });
+
+  it("frontier: earliest missing price; a pending exit does not hold back entries before it; IDEAL is never pending", () => {
+    const inp = inputs(60, { missing: 0 }); const built = buildSignals(inp);
+    expect(frontierOf(buildRequests(built, inp, MODES.REALISTIC, { startTs: 0 }))).toBeNull();
+    const reqs = orderRequests(buildRequests(built, inp, MODES.REALISTIC, { startTs: 0 }));
+    const withExit = reqs.find((r) => r.signal.exit && reqs.indexOf(r) > 5)!; const exitTs = timeline(withExit.signal.exit!.triggerTs, withExit.signal.exit!.triggerEvalTs, MODES.REALISTIC).fillTs;
+    inp.obs.delete(`${withExit.signal.tokenId}@${exitTs}`);                                  // exit price not fetched yet
+    const r2 = buildRequests(built, inp, MODES.REALISTIC, { startTs: 0 }); const w = r2.find((r) => r.signal.signalId === withExit.signal.signalId)!;
+    expect(w).toMatchObject({ pendingEntry: false, exitPendingTs: exitTs }); expect(w.signal.exit).toBeNull();
+    expect(frontierOf(r2)).toEqual({ ts: exitTs, order: 1, id: withExit.signal.signalId });  // entries before exitTs stay decidable
+    const late = reqs[reqs.length - 3]; inp.obs.delete(`${late.signal.tokenId}@${late.key.ts}`); // an entry price missing too
+    const f = frontierOf(buildRequests(built, inp, MODES.REALISTIC, { startTs: 0 }))!; expect(f.ts).toBe(Math.min(exitTs, late.key.ts));
+    expect(frontierOf(buildRequests(built, inp, MODES.IDEAL, { startTs: 0 }))).toBeNull();
+  });
+
+  it("orderRequests puts same-second requests in the book's order (kind, then id), unlike the database's (fill_ts, signal_id)", () => {
+    const inp = inputs(8, { missing: 0 }); for (const s of inp.signals) if (s.kind !== "EXIT") { s.created_at = iso(T0); s.evaluated_at = iso(T0 + 5); inp.ledger.set(s.id, { signal_id: s.id, created_at: iso(T0 + 5) }); }
+    const reqs = buildRequests(buildSignals(inp), inp, MODES.IDEAL, { startTs: 0 });
+    const dbOrder = [...reqs].sort((a, b) => a.key.ts - b.key.ts || (a.signal.signalId < b.signal.signalId ? -1 : 1));
+    const ordered = orderRequests(dbOrder);
+    expect(ordered.map((r) => r.key.order)).toEqual([...ordered.map((r) => r.key.order)].sort((a, b) => a - b));
+    expect(ordered.map((r) => r.signal.signalId)).not.toEqual(dbOrder.map((r) => r.signal.signalId)); // the re-sort matters
+    const book = new PortfolioBook(MODES.IDEAL, { startingCapitalUsd: 1e6, positionUsd: 100, maxMarketExposureUsd: 1e6, maxTotalExposurePct: 100, maxOpenPositions: 1e3, maxWalletAllocationUsd: 1e6, minCashReserveUsd: 0, allowResize: false });
+    expect(() => { for (const r of dbOrder) book.submit(r.signal); }).toThrow(/out of order/);           // the book would refuse DB order
+  });
+
+  describe("fingerprint and rewind point (§B2)", () => {
+    const one = (mut: (inp: SimInputs) => void = () => {}) => { seed = 5; const inp = inputs(30, { missing: 0 }); mut(inp); return new Map(buildRequests(buildSignals(inp), inp, MODES.REALISTIC, { startTs: 0 }).map((r) => [r.signal.signalId, r])); };
+    const base = one(); const target = [...base.values()].find((r) => r.signal.exit && r.signal.resolution)!; const id = target.signal.signalId;
+    const exitTs = timeline(target.signal.exit!.triggerTs, target.signal.exit!.triggerEvalTs, MODES.REALISTIC).fillTs;
+    it("a new mark changes nothing; unchanged inputs give the same text every time", () => {
+      expect(one((inp) => inp.marks.set(id, { ts: T0 + 99_999, price: 0.77 })).get(id)!.fingerprint).toBe(target.fingerprint);
+      expect(rewindPoint(target.fingerprint, one().get(id)!)).toBeNull();
+      expect(fingerprint({ ...target.signal, entry: Object.fromEntries(Object.entries(target.signal.entry).reverse()) as never }, MODES.REALISTIC, false, null)).toBe(target.fingerprint); // key order irrelevant
+    });
+    it("rewinds to the entry when the entry changes, to the changed event otherwise, and to the entry when never decided", () => {
+      const tok = target.signal.tokenId;
+      const priceMoved = one((inp) => inp.obs.set(`${tok}@${target.key.ts}`, { ts: target.key.ts - 1, price: 0.5, resolutionSeconds: 0 })).get(id)!;
+      expect(rewindPoint(target.fingerprint, priceMoved)).toBe(target.key.ts);
+      const resolvedLater = one((inp) => inp.resolutions.set(tok, { ts: target.signal.resolution!.ts + 5000, value: target.signal.resolution!.value })).get(id)!;
+      expect(rewindPoint(target.fingerprint, resolvedLater)).toBe(target.signal.resolution!.ts);                // earlier of old and new
+      const flipped = one((inp) => inp.resolutions.set(tok, { ts: target.signal.resolution!.ts, value: 1 - target.signal.resolution!.value })).get(id)!;
+      expect(rewindPoint(target.fingerprint, flipped)).toBe(target.signal.resolution!.ts);
+      const exitGone = one((inp) => { inp.signals = inp.signals.filter((s) => !(s.kind === "EXIT" && s.token_id === tok)); }).get(id)!;
+      expect(rewindPoint(target.fingerprint, exitGone)).toBe(exitTs);
+      const exitPriceMissing = one((inp) => inp.obs.delete(`${tok}@${exitTs}`)).get(id)!;
+      expect(rewindPoint(target.fingerprint, exitPriceMissing)).toBe(exitTs);
+      expect(rewindPoint(null, target)).toBe(target.key.ts);
+    });
+  });
+});
