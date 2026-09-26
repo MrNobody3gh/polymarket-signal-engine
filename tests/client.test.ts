@@ -55,13 +55,14 @@ describe("priceAsOf", () => {
 });
 
 describe("normalizeFill", () => {
+  const W = "0x" + "ab".repeat(20);
   it("accepts the websocket/v1 camelCase payload", () => {
-    const f = normalizeFill({ proxyWallet: "0xABC", side: "buy", size: "25", price: 0.999, timestamp: 1789658260, asset: "tok", conditionId: "0xc", title: "T", slug: "s", outcome: "No", transactionHash: "0xtx" }, "ws");
-    expect(f).toMatchObject({ wallet: "0xabc", side: "BUY", size: 25, usd: 24.98, tokenId: "tok", source: "ws" }); expect(f!.id).toBe("0xtx:tok:0xabc:1789658260:BUY:25");
+    const f = normalizeFill({ proxyWallet: W.toUpperCase().replace("0X", "0x"), side: "buy", size: "25", price: 0.999, timestamp: 1789658260, asset: "tok", conditionId: "0xc", title: "T", slug: "s", outcome: "No", transactionHash: "0xtx" }, "ws");
+    expect(f).toMatchObject({ wallet: W, side: "BUY", size: 25, usd: 24.98, tokenId: "tok", source: "ws" }); expect(f!.id).toBe(`0xtx:tok:${W}:1789658260:BUY:25:0.999`);
   });
   it("accepts the v2 snake_case payload and rejects incomplete rows", () => {
-    expect(normalizeFill({ proxy_wallet: "0xabc", side: "SELL", size: 10, price: 0.5, timestamp: 1, token_id: "t", condition_id: "c" })).toMatchObject({ side: "SELL", usd: 5 });
-    expect(normalizeFill({ proxy_wallet: "0xabc", side: "SELL", size: 10, price: 0.5 })).toBeNull();
-    expect(normalizeFill({ proxy_wallet: "0xabc", side: "HOLD", size: 10, price: 0.5, timestamp: 1, token_id: "t" })).toBeNull();
+    expect(normalizeFill({ proxy_wallet: W, side: "SELL", size: 10, price: 0.5, timestamp: 1789658260, token_id: "t", condition_id: "c" })).toMatchObject({ side: "SELL", usd: 5 });
+    expect(normalizeFill({ proxy_wallet: W, side: "SELL", size: 10, price: 0.5 })).toBeNull();
+    expect(normalizeFill({ proxy_wallet: W, side: "HOLD", size: 10, price: 0.5, timestamp: 1789658260, token_id: "t", condition_id: "c" })).toBeNull();
   });
 });

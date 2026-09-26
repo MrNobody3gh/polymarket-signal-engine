@@ -35,7 +35,7 @@ describe("evaluate: NEW_POSITION", () => {
     const s = evaluate(ctx({ fill: fill({ usd: 600, size: 2000 }), medianFillUsd: 250 })); expect(s.map((x) => x.kind)).toContain("NEW_POSITION");
   });
   it("does not fire on a small add to an existing position", () => {
-    const before: Position = { wallet: "0xabc", tokenId: "tok1", conditionId: "0xc1", outcome: "Yes", title: "", slug: "", size: 50_000, avgPrice: 0.3, costUsd: 15_000, peakSize: 50_000, firstSeen: NOW - 1000, lastSeen: NOW - 1000, endDate: null };
+    const before: Position = { wallet: "0xabc", tokenId: "tok1", conditionId: "0xc1", outcome: "Yes", title: "", slug: "", size: 50_000, avgPrice: 0.3, costUsd: 15_000, peakSize: 50_000, firstSeen: NOW - 1000, lastSeen: NOW - 1000, lastBuyTs: NOW - 1000, lastSellTs: null, endDate: null };
     const s = evaluate(ctx({ before, fill: fill({ size: 1000, usd: 300 }) })); expect(s.map((x) => x.kind)).not.toContain("NEW_POSITION");
   });
   it("dedupe key changes across the dedupe window", () => {
@@ -45,7 +45,7 @@ describe("evaluate: NEW_POSITION", () => {
 });
 
 describe("evaluate: CONVICTION_ADD", () => {
-  const before: Position = { wallet: "0xabc", tokenId: "tok1", conditionId: "0xc1", outcome: "Yes", title: "", slug: "", size: 10_000, avgPrice: 0.35, costUsd: 3500, peakSize: 10_000, firstSeen: NOW - 1000, lastSeen: NOW - 1000, endDate: null };
+  const before: Position = { wallet: "0xabc", tokenId: "tok1", conditionId: "0xc1", outcome: "Yes", title: "", slug: "", size: 10_000, avgPrice: 0.35, costUsd: 3500, peakSize: 10_000, firstSeen: NOW - 1000, lastSeen: NOW - 1000, lastBuyTs: NOW - 1000, lastSellTs: null, endDate: null };
   it("fires when the add is ≥50% at no worse than entry", () => { expect(evaluate(ctx({ before, fill: fill({ size: 6000, price: 0.33, usd: 1980 }) })).map((x) => x.kind)).toContain("CONVICTION_ADD"); });
   it("does not fire when averaging down below 50% or at a worse price", () => {
     expect(evaluate(ctx({ before, fill: fill({ size: 2000, price: 0.33, usd: 660 }) })).map((x) => x.kind)).not.toContain("CONVICTION_ADD");
@@ -67,7 +67,7 @@ describe("evaluate: EARLY_ENTRY", () => {
 describe("evaluate: CONSENSUS", () => {
   it("fires when a second tracked wallet joins inside the window and carries the count", () => {
     const s = evaluate(ctx({ consensus: { peers: [{ wallet: "0xdef", lastBuyTs: NOW - 3600, copyScore: 60 }] } }));
-    const c = s.find((x) => x.kind === "CONSENSUS")!; expect(c).toBeTruthy(); expect(c.payload.wallets).toBe(2); expect(c.dedupeKey).toBe("CONS:tok1:2");
+    const c = s.find((x) => x.kind === "CONSENSUS")!; expect(c).toBeTruthy(); expect(c.payload.wallets).toBe(2); expect(c.dedupeKey).toMatch(/^CONS:tok1:[0-9a-f]{24}$/);
   });
   it("ignores peers outside the 72h window and the wallet itself", () => {
     const s = evaluate(ctx({ consensus: { peers: [{ wallet: "0xdef", lastBuyTs: NOW - 80 * 3600, copyScore: 60 }, { wallet: "0xabc", lastBuyTs: NOW, copyScore: 77 }] } }));
@@ -76,7 +76,7 @@ describe("evaluate: CONSENSUS", () => {
 });
 
 describe("evaluate: EXIT", () => {
-  const before: Position = { wallet: "0xabc", tokenId: "tok1", conditionId: "0xc1", outcome: "Yes", title: "", slug: "", size: 10_000, avgPrice: 0.3, costUsd: 3000, peakSize: 10_000, firstSeen: NOW - 1000, lastSeen: NOW - 1000, endDate: null };
+  const before: Position = { wallet: "0xabc", tokenId: "tok1", conditionId: "0xc1", outcome: "Yes", title: "", slug: "", size: 10_000, avgPrice: 0.3, costUsd: 3000, peakSize: 10_000, firstSeen: NOW - 1000, lastSeen: NOW - 1000, lastBuyTs: NOW - 1000, lastSellTs: null, endDate: null };
   it("fires when ≥60% of an alerted position is sold", () => {
     const s = evaluate(ctx({ before, hasOpenSignal: true, fill: fill({ side: "SELL", size: 7000, price: 0.6, usd: 4200 }) }));
     const e = s.find((x) => x.kind === "EXIT")!; expect(e).toBeTruthy(); expect(e.payload.soldFraction).toBe(0.7); expect(e.payload.pnlPerShare).toBeCloseTo(0.3);

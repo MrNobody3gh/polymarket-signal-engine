@@ -53,9 +53,14 @@ export interface Position {
   avgPrice: number;
   costUsd: number;
   peakSize: number;
-  firstSeen: number;     // epoch seconds
+  firstSeen: number;     // epoch seconds — when the current (non-zero) holding was opened
+  /** Last fill of ANY side, or the last reconciliation. Bookkeeping only; never used for "recent buyer". */
   lastSeen: number;
-  endDate: string | null; // YYYY-MM-DD
+  /** Last BUY fill only (epoch s). SELLs and reconciliation never touch it. null = no buy observed. */
+  lastBuyTs: number | null;
+  /** Last SELL fill only (epoch s). */
+  lastSellTs: number | null;
+  endDate: string | null; // YYYY-MM-DD, from authoritative market metadata
 }
 
 export type SignalKind = "NEW_POSITION" | "CONSENSUS" | "CONVICTION_ADD" | "EARLY_ENTRY" | "EXIT";

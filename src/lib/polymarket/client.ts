@@ -153,21 +153,60 @@ export class PolymarketClient {
   }
 }
 
-/** Accepts v1 REST / websocket (camelCase) and v2 REST (snake_case) fill rows. */
+/** Why a raw fill was rejected (for data-quality logging). */
+export type FillRejection = "missing_wallet" | "bad_side" | "bad_size" | "bad_price" | "bad_timestamp" | "missing_token" | "missing_market";
+const WALLET_RE = /^0x[0-9a-f]{40}$/;
+
+/** Validate + normalise one raw fill. Accepts v1 REST / websocket (camelCase) and v2 REST (snake_case).
+ *  Returns null for malformed rows (use `explainFill` for the reason). Never guesses missing fields. */
 export function normalizeFill(raw: RawFill, source: "rest" | "ws" = "rest"): Fill | null {
+  const r = explainFill(raw, source); return "fill" in r ? r.fill : null;
+}
+export function explainFill(raw: RawFill, source: "rest" | "ws" = "rest", nowSec = Math.floor(Date.now() / 1000)): { fill: Fill } | { reject: FillRejection } {
   const g = (...ks: string[]) => { for (const k of ks) { const v = raw[k]; if (v !== undefined && v !== null && v !== "") return v; } return undefined; };
   const wallet = String(g("proxyWallet", "proxy_wallet", "wallet") ?? "").toLowerCase();
   const side = String(g("side") ?? "").toUpperCase();
   const size = Number(g("size")); const price = Number(g("price")); const ts = Number(g("timestamp", "ts"));
   const tokenId = String(g("asset", "token_id", "tokenId", "assetId") ?? "");
   const conditionId = String(g("conditionId", "condition_id") ?? "");
-  if (!wallet || (side !== "BUY" && side !== "SELL") || !Number.isFinite(size) || !Number.isFinite(price) || !Number.isFinite(ts) || !tokenId) return null;
+  if (!WALLET_RE.test(wallet)) return { reject: "missing_wallet" };
+  if (side !== "BUY" && side !== "SELL") return { reject: "bad_side" };
+  if (!Number.isFinite(size) || size <= 0) return { reject: "bad_size" };
+  if (!Number.isFinite(price) || price <= 0 || price > 1) return { reject: "bad_price" };
+  if (!Number.isInteger(ts) || ts < 1_500_000_000 || ts > nowSec + 86_400) return { reject: "bad_timestamp" };
+  if (!tokenId) return { reject: "missing_token" };
+  if (!conditionId) return { reject: "missing_market" };
   const tx = String(g("transactionHash", "transaction_hash", "tx") ?? "");
-  return {
-    id: `${tx}:${tokenId}:${wallet}:${ts}:${side}:${size}`,
+  // The v2 feed exposes no per-fill id (its sequence_id is internal to the cursor). Price is part of the identity
+  // because one transaction can fill the same wallet at several levels; truly identical rows are disambiguated by
+  // an occurrence suffix (see withOccurrence).
+  return { fill: {
+    id: `${tx}:${tokenId}:${wallet}:${ts}:${side}:${size}:${price}`,
     wallet, conditionId, tokenId, side: side as "BUY" | "SELL", size, price, usd: Math.round(size * price * 100) / 100, ts,
     title: String(g("title") ?? ""), slug: String(g("slug", "eventSlug", "event_slug") ?? ""), outcome: String(g("outcome") ?? ""), tx, source,
-  };
+  } };
+}
+
+/** Two byte-identical fills (same tx, token, wallet, second, side, size and price) are still two fills. Suffix the
+ *  2nd, 3rd … occurrence in arrival order so they keep distinct ids. The same function is used by REST (per batch)
+ *  and the websocket (per rolling window), so both paths assign the same ids to the same set of rows. */
+export function withOccurrence(fills: Fill[], counter: Map<string, number> = new Map()): Fill[] {
+  return fills.map((f) => { const n = (counter.get(f.id) ?? 0) + 1; counter.set(f.id, n); return n === 1 ? f : { ...f, id: `${f.id}#${n}` }; });
+}
+
+/** One open position row from /v2/positions, normalised. null for unusable rows. */
+export interface RemotePosition { wallet: string; tokenId: string; conditionId: string; outcome: string; title: string; slug: string; size: number; avgPrice: number; costUsd: number; lastEventAt: number | null; endDate: string | null }
+export function parseRemotePosition(raw: Record<string, unknown>, wallet: string): RemotePosition | null {
+  const g = (...ks: string[]) => { for (const k of ks) { const v = raw[k]; if (v !== undefined && v !== null && v !== "") return v; } return undefined; };
+  const status = String(g("status") ?? "OPEN").toUpperCase();
+  if (status !== "OPEN") return null; // REDEEMABLE = resolved, CLOSED = gone
+  const tokenId = String(g("token_id", "asset", "tokenId") ?? ""); const conditionId = String(g("condition_id", "conditionId") ?? "");
+  const size = Number(g("current_size", "size")); const avg = Number(g("avg_price", "avgPrice"));
+  if (!tokenId || !conditionId || !Number.isFinite(size) || size <= 0) return null;
+  const cost = Number(g("entry_cost_usdc", "initial_value", "initialValue"));
+  const le = Number(g("last_event_at")); const end = String(g("end_date", "endDate") ?? "");
+  return { wallet: wallet.toLowerCase(), tokenId, conditionId, outcome: String(g("outcome") ?? ""), title: String(g("title") ?? ""), slug: String(g("slug") ?? ""), size, avgPrice: Number.isFinite(avg) ? avg : 0,
+    costUsd: Number.isFinite(cost) ? cost : (Number.isFinite(avg) ? avg * size : 0), lastEventAt: Number.isFinite(le) && le > 0 ? le : null, endDate: /^\d{4}-\d{2}-\d{2}/.test(end) ? end.slice(0, 10) : null };
 }
 import type { Fill } from "./types";
 type PricePointRaw = { timestamp?: number; price?: number; resolution_seconds?: number; t?: number; p?: number };

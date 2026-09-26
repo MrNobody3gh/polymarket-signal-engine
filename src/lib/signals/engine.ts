@@ -11,15 +11,34 @@ import { TelegramApi } from "../telegram/api";
 import { broadcast } from "../telegram/broadcast";
 import { recordConsensusEvent, recordPaperSignal } from "../paper/ledger";
 import { heartbeat } from "../health/heartbeat";
+import { GammaMarketMeta, type MarketMetaSource } from "../polymarket/markets";
+import type { RemotePosition } from "../polymarket/client";
 
-export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: Channels; now?: () => number; log?: (m: string) => void }
+export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: Channels; now?: () => number; log?: (m: string) => void; markets?: MarketMetaSource }
+
+const toSec = (iso: string | null | undefined) => (iso ? Math.floor(Date.parse(iso) / 1000) : null);
+const toIso = (sec: number | null | undefined) => (sec == null ? null : new Date(sec * 1000).toISOString());
+/** DB row → Position. */
+export function rowToPosition(pb: Record<string, any>): Position {
+  return { wallet: pb.wallet, tokenId: pb.token_id, conditionId: pb.condition_id, outcome: pb.outcome ?? "", title: pb.title ?? "", slug: pb.slug ?? "", size: Number(pb.size), avgPrice: Number(pb.avg_price), costUsd: Number(pb.cost_usd), peakSize: Number(pb.peak_size), firstSeen: toSec(pb.first_seen) ?? 0, lastSeen: toSec(pb.last_seen) ?? 0, lastBuyTs: toSec(pb.last_buy_ts), lastSellTs: toSec(pb.last_sell_ts), endDate: pb.end_date ?? null };
+}
+export function positionToRow(p: Position) {
+  return { wallet: p.wallet, token_id: p.tokenId, condition_id: p.conditionId, outcome: p.outcome, title: p.title, slug: p.slug, size: p.size, avg_price: p.avgPrice, cost_usd: p.costUsd, peak_size: p.peakSize, first_seen: toIso(p.firstSeen), last_seen: toIso(p.lastSeen), last_buy_ts: toIso(p.lastBuyTs), last_sell_ts: toIso(p.lastSellTs), end_date: p.endDate };
+}
 
 export class SignalEngine {
   private db: SupabaseClient; private cfg: RuleConfig; private ch: Channels; private now: () => number; private log: (m: string) => void;
   private wallets = new Map<string, WalletProfile>(); private median = new Map<string, number>(); private paperSize: number;
-  private minStoreUsd: number;
+  private minStoreUsd: number; private markets: MarketMetaSource;
+  /** Per-wallet serialisation: a wallet's fills and reconciliation never interleave (position book is read-modify-write). */
+  private locks = new Map<string, Promise<unknown>>();
+  private withWalletLock<T>(wallet: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(wallet) ?? Promise.resolve(); const run = prev.then(fn, fn);
+    const tail = run.then(() => {}, () => {}); this.locks.set(wallet, tail); tail.then(() => { if (this.locks.get(wallet) === tail) this.locks.delete(wallet); });
+    return run;
+  }
   private seen = new Set<string>(); private remember(id: string) { this.seen.add(id); if (this.seen.size > 20_000) { const first = this.seen.values().next().value; if (first) this.seen.delete(first); } }
-  constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; this.minStoreUsd = this.cfg.minFillUsd; }
+  constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; this.minStoreUsd = this.cfg.minFillUsd; this.markets = d.markets ?? new GammaMarketMeta(this.db); }
 
   /** Load tracked wallets into memory. Call at start and after each refresh. */
   async loadWallets(): Promise<Map<string, WalletProfile>> {
@@ -31,6 +50,7 @@ export class SignalEngine {
   }
   isTracked(wallet: string): boolean { return this.wallets.has(wallet.toLowerCase()); }
   trackedAddresses(): string[] { return [...this.wallets.keys()]; }
+  trackedProfiles(): WalletProfile[] { return [...this.wallets.values()]; }
 
   private async medianFill(wallet: string): Promise<number | null> {
     if (this.median.has(wallet)) return this.median.get(wallet)!;
@@ -39,34 +59,41 @@ export class SignalEngine {
     const m = xs.length ? xs[Math.floor(xs.length / 2)] : null; if (m != null) this.median.set(wallet, m); return m;
   }
 
-  /** Process one fill end-to-end. Returns the signals that were persisted (new, not deduped). */
+  /** Process one fill end-to-end. Returns the signals that were persisted (new, not deduped).
+   *  Order: filter → atomically CLAIM the fill in the database → (only the claimant) read book → evaluate → write book → signals.
+   *  A fill arriving twice (websocket + REST, two workers, a restart) is processed downstream exactly once. */
   async ingest(f: Fill): Promise<Signal[]> {
     const w = this.wallets.get(f.wallet); if (!w) return [];
     // Volume control: sub-threshold fills and bot/maker wallets can never fire a rule, so they never touch the database.
-    // (Their position book is approximate as a result; the rules only read it for tracked, human-speed wallets.)
+    // Periodic reconciliation (reconcileWallet) corrects any drift this causes in the position book.
     if (f.usd < this.minStoreUsd || isBotLike(w)) return [];
-    // 0) already ingested? (websocket and poller overlap) — one indexed read instead of the whole path
     if (this.seen.has(f.id)) return [];
-    const { data: dup } = await this.db.from("fills").select("id").eq("id", f.id).maybeSingle();
-    if (dup) { this.remember(f.id); return []; }
-    // 1) store fill (idempotent)
-    const { error: fe } = await this.db.from("fills").upsert({ id: f.id, wallet: f.wallet, condition_id: f.conditionId, token_id: f.tokenId, side: f.side, size: f.size, price: f.price, usd: f.usd, ts: new Date(f.ts * 1000).toISOString(), title: f.title, slug: f.slug, outcome: f.outcome, source: f.source, raw: null }, { onConflict: "id", ignoreDuplicates: true });
+    return this.withWalletLock(f.wallet, () => this.ingestClaimed(f, w));
+  }
+
+  private async ingestClaimed(f: Fill, w: WalletProfile): Promise<Signal[]> {
+    // 1) CLAIM: INSERT … ON CONFLICT DO NOTHING RETURNING id. Only the process that actually inserted continues.
+    const { data: claimed, error: fe } = await this.db.from("fills").upsert({ id: f.id, wallet: f.wallet, condition_id: f.conditionId, token_id: f.tokenId, side: f.side, size: f.size, price: f.price, usd: f.usd, ts: new Date(f.ts * 1000).toISOString(), title: f.title, slug: f.slug, outcome: f.outcome, source: f.source, raw: null }, { onConflict: "id", ignoreDuplicates: true }).select("id");
     if (fe) throw fe;
     this.remember(f.id);
+    if (!claimed || claimed.length === 0) return []; // someone else owns this fill
     await heartbeat(this.db, "last_db_write");
     // 2) position before
     const { data: pb } = await this.db.from("positions").select("*").eq("wallet", f.wallet).eq("token_id", f.tokenId).maybeSingle();
-    const before: Position | null = pb ? { wallet: pb.wallet, tokenId: pb.token_id, conditionId: pb.condition_id, outcome: pb.outcome, title: pb.title, slug: pb.slug, size: Number(pb.size), avgPrice: Number(pb.avg_price), costUsd: Number(pb.cost_usd), peakSize: Number(pb.peak_size), firstSeen: Math.floor(Date.parse(pb.first_seen) / 1000), lastSeen: Math.floor(Date.parse(pb.last_seen) / 1000), endDate: pb.end_date } : null;
-    // 3) consensus peers: other tracked wallets long the same token
-    const { data: peersRows } = await this.db.from("positions").select("wallet,last_seen").eq("token_id", f.tokenId).gt("size", 0).neq("wallet", f.wallet);
-    const peers = (peersRows ?? []).filter((p) => this.wallets.has(p.wallet)).map((p) => ({ wallet: p.wallet, lastBuyTs: Math.floor(Date.parse(p.last_seen) / 1000), copyScore: this.wallets.get(p.wallet)!.copyScore }));
+    const before: Position | null = pb ? rowToPosition(pb) : null;
+    // 2b) authoritative market end date (for EARLY_ENTRY). Unknown stays null — never guessed.
+    let endDate: string | null = before?.endDate ?? null;
+    if (f.side === "BUY") { try { endDate = (await this.markets.endDate(f.conditionId)) ?? endDate; } catch { /* stays as known */ } }
+    // 3) consensus peers: other tracked wallets long the same token, keyed by their last BUY (never last fill)
+    const { data: peersRows } = await this.db.from("positions").select("wallet,last_buy_ts").eq("token_id", f.tokenId).gt("size", 0).neq("wallet", f.wallet);
+    const peers = (peersRows ?? []).filter((p) => this.wallets.has(p.wallet)).map((p) => ({ wallet: p.wallet as string, lastBuyTs: toSec(p.last_buy_ts), copyScore: this.wallets.get(p.wallet)!.copyScore }));
     // 4) open signal?
     const { count } = await this.db.from("signals").select("id", { count: "exact", head: true }).eq("wallet", f.wallet).eq("token_id", f.tokenId).is("closed_at", null).neq("kind", "EXIT");
-    const signals = evaluate({ fill: f, wallet: w, before, consensus: { peers }, medianFillUsd: await this.medianFill(f.wallet), hasOpenSignal: (count ?? 0) > 0, endDate: before?.endDate ?? null, now: this.now() }, this.cfg);
+    const signals = evaluate({ fill: f, wallet: w, before, consensus: { peers }, medianFillUsd: await this.medianFill(f.wallet), hasOpenSignal: (count ?? 0) > 0, endDate, now: this.now() }, this.cfg);
     await heartbeat(this.db, "last_eval");
     // 5) update book
-    const after = applyFill(before, f, before?.endDate ?? null);
-    const { error: pe } = await this.db.from("positions").upsert({ wallet: after.wallet, token_id: after.tokenId, condition_id: after.conditionId, outcome: after.outcome, title: after.title, slug: after.slug, size: after.size, avg_price: after.avgPrice, cost_usd: after.costUsd, peak_size: after.peakSize, first_seen: new Date(after.firstSeen * 1000).toISOString(), last_seen: new Date(after.lastSeen * 1000).toISOString(), end_date: after.endDate }, { onConflict: "wallet,token_id" });
+    const after = applyFill(before, f, endDate);
+    const { error: pe } = await this.db.from("positions").upsert(positionToRow(after), { onConflict: "wallet,token_id" });
     if (pe) throw pe;
     // 6) persist + dispatch (dedupe via unique index)
     const fired: Signal[] = [];
@@ -90,5 +117,41 @@ export class SignalEngine {
       this.log(`${s.kind} ${s.walletName ?? s.wallet} ${s.outcome} @${s.price} $${s.usd}`);
     }
     return fired;
+  }
+
+  /**
+   * Reconcile one wallet's book with the authoritative /v2/positions snapshot. Establishes state only — never
+   * evaluates rules or creates signals. Idempotent: running it twice leaves the same rows.
+   *  - remote open position → upsert size / avg price / cost (keeps first_seen, last_buy_ts, last_sell_ts)
+   *  - local open position absent remotely → size 0
+   *  - rows touched by a live fill in the last `freshSec` seconds are left alone (the REST snapshot is CDN-cached
+   *    and could be older than a fill we just applied)
+   */
+  async reconcileWallet(wallet: string, remote: RemotePosition[], opts: { freshSec?: number } = {}): Promise<{ upserted: number; zeroed: number; skippedFresh: number }> {
+    const addr = wallet.toLowerCase(); const freshSec = opts.freshSec ?? 600;
+    return this.withWalletLock(addr, async () => {
+      const now = this.now();
+      const { data: local } = await this.db.from("positions").select("*").eq("wallet", addr);
+      const byToken = new Map((local ?? []).map((r) => [r.token_id as string, rowToPosition(r)]));
+      const remoteTokens = new Set<string>(); let upserted = 0, zeroed = 0, skippedFresh = 0;
+      const rows = [];
+      for (const r of remote) {
+        remoteTokens.add(r.tokenId); const cur = byToken.get(r.tokenId);
+        if (cur && now - cur.lastSeen < freshSec) { skippedFresh++; continue; }
+        const same = cur && Math.abs(cur.size - r.size) < 1e-9 && Math.abs(cur.avgPrice - r.avgPrice) < 1e-9;
+        if (same) continue;
+        const p: Position = { wallet: addr, tokenId: r.tokenId, conditionId: r.conditionId || cur?.conditionId || "", outcome: r.outcome || cur?.outcome || "", title: r.title || cur?.title || "", slug: r.slug || cur?.slug || "",
+          size: r.size, avgPrice: r.avgPrice, costUsd: r.costUsd, peakSize: Math.max(cur?.peakSize ?? 0, r.size), firstSeen: cur && cur.size > 0 ? cur.firstSeen : (r.lastEventAt ?? now),
+          lastSeen: now, lastBuyTs: cur?.lastBuyTs ?? null, lastSellTs: cur?.lastSellTs ?? null, endDate: r.endDate ?? cur?.endDate ?? null };
+        rows.push(positionToRow(p)); upserted++;
+      }
+      for (const [token, cur] of byToken) {
+        if (remoteTokens.has(token) || cur.size <= 0) continue;
+        if (now - cur.lastSeen < freshSec) { skippedFresh++; continue; }
+        rows.push(positionToRow({ ...cur, size: 0, costUsd: 0, avgPrice: 0, lastSeen: now })); zeroed++;
+      }
+      for (let i = 0; i < rows.length; i += 200) { const { error } = await this.db.from("positions").upsert(rows.slice(i, i + 200), { onConflict: "wallet,token_id" }); if (error) throw error; }
+      return { upserted, zeroed, skippedFresh };
+    });
   }
 }

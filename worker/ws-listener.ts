@@ -10,7 +10,8 @@
 import WebSocket from "ws";
 import { db } from "../src/lib/db";
 import { SignalEngine } from "../src/lib/signals/engine";
-import { WS_LIVE, normalizeFill } from "../src/lib/polymarket/client";
+import { WS_LIVE, PolymarketClient, normalizeFill, parseRemotePosition, withOccurrence } from "../src/lib/polymarket/client";
+import { isBotLike } from "../src/lib/signals/rules";
 import { pollOnce } from "../src/lib/signals/poll";
 import { runMarking, gammaSource } from "../src/lib/paper/mark";
 import { buildSnapshot, saveSnapshot } from "../src/lib/paper/snapshot";
@@ -29,6 +30,10 @@ async function main() {
     catch (e) { const wait = Math.min(60_000, 2_000 * 2 ** attempt); console.error(`boot: database not ready (${(e as Error).message}); retry in ${wait / 1000}s`); await new Promise((r) => setTimeout(r, wait)); }
   }
   console.log(`tracking ${engine.trackedAddresses().length} wallets`);
+  // Bootstrap: reconcile every tracked wallet's book from /v2/positions BEFORE any fill is evaluated, so a position
+  // that existed before this process started is an existing position (CONVICTION_ADD), not a NEW_POSITION.
+  await reconcileAll("boot");
+  setInterval(() => reconcileAll("periodic").catch((e) => console.error("reconcile failed", (e as Error).message)), 6 * 3600 * 1000);
   setInterval(() => engine.loadWallets().catch(() => {}), 10 * 60 * 1000); // pick up daily re-scores
   // REST backstop every 60s so the worker alone is enough (Vercel Hobby crons only run daily).
   const poll = () => pollOnce(db(), engine, undefined, { concurrency: 2 }).then((r) => { if (r.fills) console.log(`poll: ${r.fills} fills, ${r.signals} signals`); }).catch((e) => console.error("poll failed", (e as Error).message));
@@ -45,6 +50,21 @@ async function main() {
   await heartbeat(db(), "worker_boot", new Date().toISOString());
   connect();
 }
+const pm = new PolymarketClient();
+async function reconcileAll(reason: string) {
+  const wallets = engine.trackedProfiles().filter((w) => !isBotLike(w)).map((w) => w.address);
+  let up = 0, zero = 0, fail = 0;
+  for (const w of wallets) {
+    try {
+      const rows = await pm.userPositions(w, "OPEN");
+      const remote = rows.map((r) => parseRemotePosition(r, w)).filter((x): x is NonNullable<typeof x> => !!x);
+      const r = await engine.reconcileWallet(w, remote, { freshSec: reason === "boot" ? 0 : 600 }); up += r.upserted; zero += r.zeroed;
+    } catch (e) { fail++; console.error(`reconcile ${w}: ${(e as Error).message}`); }
+  }
+  console.log(new Date().toISOString(), `[reconcile:${reason}] ${wallets.length} wallets, ${up} upserted, ${zero} zeroed, ${fail} failed`);
+}
+// Identical websocket rows (same tx/token/wallet/second/side/size/price) get the same occurrence suffixes REST assigns.
+const wsOccurrence = new Map<string, number>(); setInterval(() => wsOccurrence.clear(), 15 * 60 * 1000);
 const SILENCE_LIMIT_MS = 2 * 60 * 1000; // no message for this long = dead socket, even if still "open"
 function connect() {
   const ws = new WebSocket(WS_LIVE);
@@ -66,7 +86,8 @@ function connect() {
       if (!p || typeof p !== "object" || !("proxyWallet" in p)) continue;
       seen++;
       heartbeat(db(), "last_trade").catch(() => {});
-      const f = normalizeFill(p as Record<string, unknown>, "ws"); if (!f || !engine.isTracked(f.wallet)) continue;
+      const raw = normalizeFill(p as Record<string, unknown>, "ws"); if (!raw || !engine.isTracked(raw.wallet)) continue;
+      const [f] = withOccurrence([raw], wsOccurrence);
       kept++;
       queue.push(f); if (queue.length > 5000) queue.splice(0, queue.length - 5000); // never grow without bound; the poller backstops
       void drain();

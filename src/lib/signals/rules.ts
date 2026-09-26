@@ -2,6 +2,7 @@
  * The rule engine. Pure: (fill, wallet profile, position before the fill,
  * consensus context, config) -> signals[]. No I/O, fully unit-tested.
  */
+import { createHash } from "node:crypto";
 import type { Fill, Position, Signal, WalletProfile } from "../polymarket/types";
 
 export interface RuleConfig {
@@ -24,8 +25,15 @@ export function configFromEnv(env: Record<string, string | undefined> = process.
 }
 
 export interface ConsensusContext {
-  /** Other tracked wallets holding the same token, with when they last bought. */
-  peers: { wallet: string; lastBuyTs: number; copyScore: number }[];
+  /** Other tracked wallets currently holding the same token, with the time of their last BUY fill
+   *  (null if no buy was observed — e.g. a position known only from reconciliation). */
+  peers: { wallet: string; lastBuyTs: number | null; copyScore: number }[];
+}
+
+/** Deterministic identity of a consensus group: token + the sorted, de-duplicated participant set. */
+export function consensusKey(tokenId: string, wallets: string[]): string {
+  const set = [...new Set(wallets.map((w) => w.toLowerCase()))].sort();
+  return `CONS:${tokenId}:${createHash("sha256").update(set.join(",")).digest("hex").slice(0, 24)}`;
 }
 export interface RuleContext {
   fill: Fill; wallet: WalletProfile; before: Position | null; consensus: ConsensusContext; medianFillUsd: number | null;
@@ -35,17 +43,19 @@ export interface RuleContext {
 
 /** Apply a fill to a position book entry. Returns the position after the fill. */
 export function applyFill(before: Position | null, f: Fill, endDate: string | null): Position {
-  const base: Position = before ?? { wallet: f.wallet, tokenId: f.tokenId, conditionId: f.conditionId, outcome: f.outcome, title: f.title, slug: f.slug, size: 0, avgPrice: 0, costUsd: 0, peakSize: 0, firstSeen: f.ts, lastSeen: f.ts, endDate };
-  const p = { ...base, lastSeen: Math.max(base.lastSeen, f.ts), endDate: base.endDate ?? endDate };
+  const base: Position = before ?? { wallet: f.wallet, tokenId: f.tokenId, conditionId: f.conditionId, outcome: f.outcome, title: f.title, slug: f.slug, size: 0, avgPrice: 0, costUsd: 0, peakSize: 0, firstSeen: f.ts, lastSeen: f.ts, lastBuyTs: null, lastSellTs: null, endDate };
+  const p: Position = { ...base, lastSeen: Math.max(base.lastSeen, f.ts), endDate: endDate ?? base.endDate };
   if (f.title && !p.title) p.title = f.title; if (f.slug && !p.slug) p.slug = f.slug; if (f.outcome && !p.outcome) p.outcome = f.outcome;
   if (f.side === "BUY") {
     const newSize = p.size + f.size;
     p.avgPrice = newSize > 0 ? (p.avgPrice * p.size + f.price * f.size) / newSize : 0;
     p.size = newSize; p.costUsd = p.avgPrice * p.size; p.peakSize = Math.max(p.peakSize, newSize);
     if (before === null || before.size <= 0) p.firstSeen = f.ts;
+    p.lastBuyTs = Math.max(p.lastBuyTs ?? 0, f.ts);
   } else {
     p.size = Math.max(0, p.size - f.size); p.costUsd = p.avgPrice * p.size;
     if (p.size === 0) p.avgPrice = 0;
+    p.lastSellTs = Math.max(p.lastSellTs ?? 0, f.ts); // a SELL never counts as buying
   }
   return p;
 }
@@ -95,11 +105,19 @@ export function evaluate(ctx: RuleContext, cfg: RuleConfig = DEFAULT_CONFIG): Si
       out.push({ ...base, kind: "EARLY_ENTRY", severity: severity(f.usd, w.copyScore, 1), payload: { daysToEnd: Math.round(dte), monthsUp: w.monthsUp, copyScore: w.copyScore }, dedupeKey: `EARLY:${f.wallet}:${f.tokenId}:${db}` });
     }
     // consensus: this buy makes N≥2 tracked wallets on the same side within the window
+    // Only a BUY inside the window qualifies a peer; a peer is counted once however many rows/fills it has.
     const cutoff = f.ts - cfg.consensusWindowHours * 3600;
-    const peers = ctx.consensus.peers.filter((p) => p.wallet !== f.wallet && p.lastBuyTs >= cutoff);
+    const byWallet = new Map<string, { wallet: string; lastBuyTs: number; copyScore: number }>();
+    for (const p of ctx.consensus.peers) {
+      const addr = p.wallet.toLowerCase();
+      if (addr === f.wallet || p.lastBuyTs == null || p.lastBuyTs < cutoff) continue;
+      const prev = byWallet.get(addr); if (!prev || p.lastBuyTs > prev.lastBuyTs) byWallet.set(addr, { wallet: addr, lastBuyTs: p.lastBuyTs, copyScore: p.copyScore });
+    }
+    const peers = [...byWallet.values()].sort((a, b) => a.wallet.localeCompare(b.wallet));
     if (peers.length >= 1 && (isNew || f.usd >= cfg.newPositionMinUsd)) {
       const n = peers.length + 1; const weighted = peers.reduce((a, p) => a + p.copyScore, w.copyScore);
-      out.push({ ...base, kind: "CONSENSUS", severity: severity(f.usd, w.copyScore, Math.min(2, n - 1)), payload: { wallets: n, peers: peers.map((p) => p.wallet), peerLastBuyTs: peers.map((p) => p.lastBuyTs), weightedScore: Math.round(weighted), copyScore: w.copyScore }, dedupeKey: `CONS:${f.tokenId}:${n}` });
+      // Dedupe on WHO is in the group (sorted set), not how many: a different group of the same size is a different event.
+      out.push({ ...base, kind: "CONSENSUS", severity: severity(f.usd, w.copyScore, Math.min(2, n - 1)), payload: { wallets: n, peers: peers.map((p) => p.wallet), peerLastBuyTs: peers.map((p) => p.lastBuyTs), weightedScore: Math.round(weighted), copyScore: w.copyScore }, dedupeKey: consensusKey(f.tokenId, [f.wallet, ...peers.map((p) => p.wallet)]) });
     }
   } else {
     // exit: sold ≥ ratio of the position (or all of it) and we had alerted on it
