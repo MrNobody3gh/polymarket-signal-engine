@@ -21,6 +21,8 @@ import { memSample, fmtMem, withMemLog, storeMem } from "../src/lib/health/memor
 import { measureActivity, activityRow } from "../src/lib/scoring/activity";
 import { GammaMarketMeta } from "../src/lib/polymarket/markets";
 import { refresh, refreshDue } from "../src/lib/scoring/refresh";
+import { resolveOrphans } from "../src/lib/paper/resolve-orphans";
+import { ensureTokenOrder } from "../src/lib/polymarket/token-order";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
@@ -52,7 +54,8 @@ async function main() {
   // Execution simulation: bounded batches; aggregates computed in Postgres.
   const meta = new GammaMarketMeta(db());
   let simBusy = false;
-  const simulate = async () => { if (simBusy) return; simBusy = true; try { await withMemLog("sim", () => runSimulation(db(), { fetchBudget: 3000, metaFetcher: (c) => meta.endDate(c), log: (m) => console.log(new Date().toISOString(), "[sim]", m) })); } catch (e) { console.error("sim failed", (e as Error).message); } finally { simBusy = false; } };
+  const simulate = async () => { if (simBusy) return; simBusy = true; try { await withMemLog("orphans", () => resolveOrphans(db(), gammaSource(pm, db()), { prepare: (c) => ensureTokenOrder(db(), c, { client: pm }), log: (m) => console.log(new Date().toISOString(), "[orphans]", m) })); } catch (e) { console.error("orphans failed", (e as Error).message); }
+    try { await withMemLog("sim", () => runSimulation(db(), { fetchBudget: 3000, metaFetcher: (c) => meta.endDate(c), log: (m) => console.log(new Date().toISOString(), "[sim]", m) })); } catch (e) { console.error("sim failed", (e as Error).message); } finally { simBusy = false; } };
   setTimeout(simulate, 90_000); setInterval(simulate, 15 * 60 * 1000);
   // Bot detection: measure fills/day for tracked wallets daily (and now, if the last measurement is stale).
   const measureAll = async () => {

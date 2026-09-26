@@ -207,3 +207,65 @@ d("SQL Phase 3.1 — migration 0008", () => {
     expect((await a.query("select count(*)::int n from portfolios where id = $1", [P])).rows[0].n).toBe(1);         // other portfolios untouched
   });
 });
+
+// ───────────────────────── Phase 3 step 3: migration 0009 (orphan candidates) ─────────────────────────
+d("SQL Phase 3 step 3 — orphan_resolution_candidates", () => {
+  let a: pg.Client; let n = 0;
+  const MIG = readFileSync(path.resolve(__dirname, "../supabase/migrations/0009_orphan_resolutions.sql"), "utf8");
+  const uid = () => `33000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+  /** One entry signal on `token` with an execution in `mode` and, optionally, its own ledger row. */
+  const pos = async (token: string, o: { state?: string; coverage?: string; ledger?: string | null; fill?: string; mode?: string } = {}) => {
+    const id = uid();
+    await a.query("insert into signals (id, kind, severity, wallet, condition_id, token_id, outcome, dedupe_key, created_at) values ($1,'NEW_POSITION',2,'0xw',$2,$3,'Yes',$4,now())", [id, `0xCOND-${token}`, token, `p33:${id}`]);
+    await a.query("insert into paper_executions (signal_id, mode, kind, config_hash, status, state, coverage_state, fill_ts) values ($1,$2,'NEW_POSITION','h','FILLED',$3,$4,$5)", [id, o.mode ?? "REALISTIC", o.state ?? "OPEN", o.coverage ?? "SIMULATED", o.fill ?? "2026-09-27T05:00:00Z"]);
+    if (o.ledger !== null) await a.query("insert into paper_ledger (signal_id, entry_price, token_id, status) values ($1, 0.4, $2, $3)", [id, token, o.ledger ?? "EXITED"]);
+    return id;
+  };
+  const run = async (limit = 1000, recheck = 21600) => (await a.query("select * from orphan_resolution_candidates($1, $2) where token_id like 'tok-p33%'", [limit, recheck])).rows;
+  beforeAll(async () => {
+    a = new pg.Client({ connectionString: URL }); await a.connect();
+    await a.query(MIG); await a.query(MIG); // idempotent
+    await a.query("delete from signals where dedupe_key like 'p33:%'"); await a.query("delete from token_resolution_obs where token_id like 'tok-p33%'"); await a.query("delete from token_resolution_checks where token_id like 'tok-p33%'");
+    await pos("tok-p33-exited", { fill: "2026-09-27T06:00:00Z" });                 // ledger EXITED, lot open → candidate
+    await pos("tok-p33-exited", { mode: "CONSERVATIVE", fill: "2026-09-27T07:00:00Z" }); // same token, second mode → one row, 2 lots
+    await pos("tok-p33-invalid", { ledger: "INVALID", fill: "2026-09-27T08:00:00Z" });  // → candidate
+    await pos("tok-p33-frozen", { ledger: null, fill: "2026-09-19T00:00:00Z" });         // no ledger row → candidate, counted frozen
+    const w = await pos("tok-p33-watched"); await pos("tok-p33-watched", { ledger: "OPEN" }); void w; // an OPEN ledger row on the token → marker's job
+    await pos("tok-p33-resolved"); await a.query("insert into token_resolution_obs (token_id, condition_id, value, resolved_ts, source) values ('tok-p33-resolved','c',1,now(),'t')");
+    await pos("tok-p33-closed", { state: "RESOLVED" });                                  // not open
+    await pos("tok-p33-exitedlot", { state: "EXITED" });                                 // not open
+    await pos("tok-p33-pending", { coverage: "PENDING_DATA", state: "PENDING" });      // not simulated
+    await pos("tok-p33-partial", { state: "PARTIALLY_EXITED", fill: "2026-09-27T09:00:00Z" }); // → candidate
+    await pos("tok-p33-recent"); await a.query("insert into token_resolution_checks (token_id, condition_id, last_checked_at, last_state) values ('tok-p33-recent','c', now() - interval '1 hour', 'OPEN')");
+    await pos("tok-p33-stale", { fill: "2026-09-27T10:00:00Z" }); await a.query("insert into token_resolution_checks (token_id, condition_id, last_checked_at, last_state) values ('tok-p33-stale','c', now() - interval '7 hours', 'OPEN')");
+    // an open portfolio lot on a token no simulated position holds
+    await a.query("insert into portfolios (id, mode, exec_config_hash, config, config_hash, start_ts) values ('p33test0001','REALISTIC','e','{}','c',now()) on conflict do nothing");
+    const lotSig = uid(); await a.query("insert into signals (id, kind, severity, wallet, condition_id, token_id, dedupe_key, created_at) values ($1,'NEW_POSITION',2,'0xw','0xCOND-lot','tok-p33-lot',$2,now())", [lotSig, `p33:${lotSig}`]);
+    await a.query("insert into portfolio_decisions (portfolio_id, signal_id, kind, source_key, event_ts, outcome, requested_usd, filled_usd, filled_shares, input_hash, record_hash) values ('p33test0001',$1,'NEW_POSITION','k','2026-09-27T11:00:00Z','FILLED',100,100,250,'i','r')", [lotSig]);
+    await a.query("insert into portfolio_lots (portfolio_id, signal_id, wallet, token_id, condition_id, opened_ts, shares_filled, cost_usd, shares_open, cost_open, state, record_hash) values ('p33test0001',$1,'0xw','tok-p33-lot','0xCOND-lot','2026-09-27T11:00:00Z',250,100,250,100,'OPEN','r')", [lotSig]);
+  });
+  afterAll(async () => { await a?.query("delete from portfolios where id = 'p33test0001'"); await a?.query("delete from signals where dedupe_key like 'p33:%'"); await a?.query("delete from token_resolution_obs where token_id like 'tok-p33%'"); await a?.query("delete from token_resolution_checks where token_id like 'tok-p33%'"); await a?.end(); });
+
+  it("returns exactly the unwatched, unresolved tokens held by open positions or lots; never-checked first, then oldest", async () => {
+    const rows = await run();
+    expect(rows.map((r) => r.token_id)).toEqual(["tok-p33-frozen", "tok-p33-exited", "tok-p33-invalid", "tok-p33-partial", "tok-p33-lot", "tok-p33-stale"]);
+    const by = Object.fromEntries(rows.map((r) => [r.token_id, r]));
+    expect(by["tok-p33-exited"]).toMatchObject({ open_lots: "2", frozen_lots: "0", condition_id: "0xcond-tok-p33-exited", outcome: "Yes", last_checked_at: null });
+    expect(by["tok-p33-frozen"]).toMatchObject({ open_lots: "1", frozen_lots: "1" });
+    expect(by["tok-p33-lot"]).toMatchObject({ open_lots: "1", condition_id: "0xcond-lot", outcome: null });
+    expect(by["tok-p33-stale"].last_checked_at).not.toBeNull();
+  });
+  it("honours the re-check spacing and the limit", async () => {
+    expect((await run(1000, 0)).map((r) => r.token_id)).toContain("tok-p33-recent");       // no spacing → recent one comes back
+    expect((await run(1000, 12 * 3600)).map((r) => r.token_id)).not.toContain("tok-p33-stale"); // 7 h < 12 h
+    expect((await a.query("select count(*)::int n from orphan_resolution_candidates(1, 0)")).rows[0].n).toBe(1);
+    expect((await a.query("select count(*)::int n from orphan_resolution_candidates(0, 0)")).rows[0].n).toBe(0);
+  });
+  it("a token resolved through the view disappears; only the service role may call the function", async () => {
+    await a.query("insert into token_resolution_obs (token_id, condition_id, value, resolved_ts, source) values ('tok-p33-invalid','c',0,now(),'t')");
+    expect((await run()).map((r) => r.token_id)).not.toContain("tok-p33-invalid");
+    expect((await a.query("select has_function_privilege('anon', 'orphan_resolution_candidates(integer,integer)', 'execute') x")).rows[0].x).toBe(false);
+    expect((await a.query("select has_function_privilege('service_role', 'orphan_resolution_candidates(integer,integer)', 'execute') x")).rows[0].x).toBe(true);
+    expect((await a.query("select rowsecurity from pg_tables where tablename = 'token_resolution_checks'")).rows[0].rowsecurity).toBe(true);
+  });
+});

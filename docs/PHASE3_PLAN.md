@@ -29,6 +29,15 @@ Status: **READY** (decisions D1–D4 approved 2026-09-26; D4 revised after revie
 | D4 | Portfolio start | **The first successful worker re-score on 27 Sep 2026** (scheduled 04:15 UTC; the exact instant is the **completion** of that run, `cursors['refresh:last'].updated_at`. Its `value` is the run's *start*: on 26 Sep that was 04:24:51 against a completion at 04:26:41, and the new watchlist only applies after completion). Earlier signals are excluded: 77% came from wallets now filtered as bots, and the watchlist changes at that re-score. No retroactive bot filter is applied to older history (that would use today's classification in the past). `start_ts` is part of `portfolio_id`. |
 | D5 | `PAPER_PORTFOLIO_CONFIG` values | Operator's choice, no defaults. Needed only to switch the feature on. |
 
+## Decisions raised by step 3 (open)
+
+| # | Finding | Measured | Options | Recommendation |
+|---|---|---|---|---|
+| D6 | Neg-risk markets settled by UMA: `/v2/resolutions` says resolved but gives no payouts and no `resolved_at`. Under D2 they never settle. | 116 of 329 orphan tokens; Gamma's `umaEndDate` is within 30 s (median) / 76 s (p90) of the v2 row's `last_update_timestamp` | (a) keep D2 strict; (b) accept Gamma's final prices with `umaEndDate` as the resolution time when `umaResolutionStatus = resolved` | (b): the time is independently confirmed by v2 to within a minute, and without it 35% of orphan tokens (and those markets in Phase 3) never release capital |
+| D7 | 648 entry signals from 18–20 Sep have execution records but no ledger row, so the sweep never recomputes them: their stored Phase 2 results are frozen. | 648 signals; 991 open positions across modes | (a) backfill ledger rows (their `evaluated_at` is null, so REALISTIC latency would come from the backfill time: wrong); (b) exclude them from Phase 2 reports; (c) leave as is, documented | (b): they cannot be recomputed honestly. Phase 3 is unaffected (it starts 27 Sep) |
+| D8 | The marker has the same token-order gap as the orphans: Gamma omits closed markets unless asked, and 81% of conditions with OPEN ledger rows have no cached token order. | 8,378 of 10,333 conditions; 1,457 `resolution_unparseable` issues logged | (a) leave `mark.ts` alone; (b) a worker warm-up that runs `ensureTokenOrder` for OPEN ledger conditions (no change to `mark.ts`) | (b): same helper, no marker code change; settles ledger positions the marker currently cannot |
+| D9 | About 2% of signals carry an empty condition id, or one ending in 30+ zeros (the token id converted to a float and printed as hex). They can never be looked up. | 196 empty + 912 zero-tailed signals, 31 in the last 24 h; 4,690 fills from both websocket and REST | (a) reject at ingestion (`explainFill`); (b) accept and repair the condition id from Gamma by token id | Investigate the payload first; then (b) if Gamma maps the token, else (a) |
+
 ## A. Current architecture
 
 - **Execution (Phase 2/2.5):** the worker runs `runSimulation` every 15 min: `processBacklog` (prices), then the batched `sweepSimulation`. One `paper_executions` row per signal per mode (`fill_ts`, `exit_fill_ts`, `resolution_ts`, `coverage_state`), rewritten only when inputs change. Every position is $100 and independent; no capital limit.
@@ -81,7 +90,7 @@ A deterministic, streaming replay per `(mode, portfolio config)`, with checkpoin
 - `portfolio_lots(pk portfolio_id, signal_id; wallet, token, condition, open shares/cost, `exit_signal_id` and exit details, resolution details, state, realised P&L, closed_ts, record_hash)` — `exit_signal_id` lets rehydration (B11) see when a lot's linked exit changes
 - `portfolio_equity(pk portfolio_id, ts, seq; cash, exposure, equity)`
 - Indexes on `paper_executions`: `(mode, fill_ts, signal_id)`, `(mode, computed_at)`
-- `portfolio_report(portfolio_id)` SQL function (JS parity test) — **moved to migration `0009` in step 7**, where the JS report it must match exists
+- `portfolio_report(portfolio_id)` SQL function (JS parity test) — **moved to migration `0010` in step 7**, where the JS report it must match exists (`0009` is the orphan resolver, step 3)
 - D3: `token_resolution_obs` table + `create or replace view token_resolutions` with a union
 - `paper_portfolio_runs` left as is. RLS: public read on report tables; leases/checkpoints service role only.
 
@@ -134,8 +143,8 @@ Existing 211 tests untouched (especially G–L, O, S; `phase25`; `sql`; `fixes`)
 ## J. Implementation order
 
 1. Decisions — done (D4 revised: start at the 27 Sep re-score).
-2. Migration `0008` + SQL tests (**3.1**; `portfolio_report` deferred to `0009`, step 7). **Done** — `supabase/migrations/0008_portfolio.sql`; 6 real-Postgres tests in `tests/sql.test.ts` (schema, RLS and grants, ordered index walk, lease exclusivity under 8 concurrent claimants, `token_resolutions` union and conflicts, constraints, cascade).
-3. Orphan resolver + view union + tests; re-run the sweep and report the Phase 2 before/after.
+2. Migration `0008` + SQL tests (**3.1**; `portfolio_report` deferred to `0010`, step 7). **Done** — `supabase/migrations/0008_portfolio.sql`; 6 real-Postgres tests in `tests/sql.test.ts` (schema, RLS and grants, ordered index walk, lease exclusivity under 8 concurrent claimants, `token_resolutions` union and conflicts, constraints, cascade).
+3. Orphan resolver + view union + tests; re-run the sweep and report the Phase 2 before/after. **Done** — `supabase/migrations/0009_orphan_resolutions.sql` (candidate function + check log), `src/lib/paper/resolve-orphans.ts` (runs before every sweep in the worker), `src/lib/polymarket/token-order.ts` (finds closed markets), read-only `scripts/orphan-impact.ts`; report in `docs/reports/2026-09-26-orphan-resolution-impact.md`. Findings D6–D9 below.
 4. Pure `PortfolioBook` + parity, restore and tie tests.
 5. `requests.ts` + tests.
 6. `portfolio/run.ts` + restart, rollback, idempotency, memory tests.
