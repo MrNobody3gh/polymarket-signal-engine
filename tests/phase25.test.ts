@@ -186,3 +186,17 @@ describe("P3: Telegram delivery health", () => {
     expect(db.T("tg_subscribers").find((s) => s.chat_id === -42)).toMatchObject({ active: false, migrated_to: -10042 });
   });
 });
+
+describe("P1: no request carries an unbounded IN list", () => {
+  it("a 500-signal batch never puts more than IN_CHUNK values in one query", async () => {
+    const { IN_CHUNK } = await import("@/lib/paper/sim/run");
+    const db = stressDb({ slimExecutions: true }); populate(db, 1500);
+    const seen: number[] = []; const orig = db.from; (db as any).from = (t: string) => { const q = orig(t); const inFn = q.in; q.in = (k: string, v: unknown[]) => { if (k !== "horizon") seen.push(v.length); return inFn(k, v); }; return q; };
+    await sweepSimulation(db as never, { batchSize: 500 });
+    expect(Math.max(...seen)).toBeLessThanOrEqual(IN_CHUNK); expect(db.T("paper_executions")).toHaveLength(4500);
+  });
+  it("a failed chunk surfaces as an error instead of silently producing empty inputs", async () => {
+    const { selectIn } = await import("@/lib/paper/sim/run");
+    await expect(selectIn([1, 2, 3], async () => ({ data: null, error: { message: "414 URI Too Long" } }))).rejects.toThrow(/414/);
+  });
+});

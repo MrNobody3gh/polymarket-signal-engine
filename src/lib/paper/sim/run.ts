@@ -148,27 +148,49 @@ export function recordHash(r: Record<string, unknown>): string {
   const s = JSON.stringify(r, Object.keys(r).sort()); let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(16);
 }
 
+/** PostgREST puts `in.(…)` lists in the URL. 500 uuids ≈ 19 KB and 300 token ids ≈ 23 KB — past common URL limits.
+ *  Every IN list is therefore split into chunks of IN_CHUNK values (≈ 4–8 KB), and every chunk's error is surfaced. */
+export const IN_CHUNK = 100;
+/** Rows for exact (token, as_of) pairs, fetched in chunks of IN_CHUNK pairs (both columns filtered in the database). */
+export async function selectPairs<T = Record<string, any>>(pairs: { tokenId: string; asOf: number }[], run: (tokens: string[], asOfs: number[]) => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
+  const wanted = new Set(pairs.map((p) => `${p.tokenId}@${p.asOf}`)); const sorted = [...pairs].sort((a, b) => a.tokenId.localeCompare(b.tokenId) || a.asOf - b.asOf); const out: T[] = [];
+  for (let i = 0; i < sorted.length; i += IN_CHUNK) {
+    const chunk = sorted.slice(i, i + IN_CHUNK);
+    const { data, error } = await run([...new Set(chunk.map((p) => p.tokenId))], [...new Set(chunk.map((p) => p.asOf))]);
+    if (error) throw new Error(`query failed: ${(error as { message?: string }).message ?? String(error)}`);
+    for (const r of (data ?? []) as any[]) if (wanted.has(`${r.token_id}@${Number(r.as_of)}`)) out.push(r as T);
+  }
+  return out;
+}
+export async function selectIn<T = Record<string, any>>(values: unknown[], run: (chunk: unknown[]) => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < values.length; i += IN_CHUNK) {
+    const { data, error } = await run(values.slice(i, i + IN_CHUNK));
+    if (error) throw new Error(`query failed: ${(error as { message?: string }).message ?? String(error)}`);
+    out.push(...((data ?? []) as T[]));
+  }
+  return out;
+}
+
 /** Load only what one batch of ledger rows needs. Every query is bounded by the batch's ids/tokens/markets. */
 export async function loadBatchInputs(db: SupabaseClient, ids: string[]): Promise<SimInputs> {
-  const { data: sigs } = await db.from("signals").select("id,kind,wallet,condition_id,token_id,price,usd,created_at,evaluated_at").in("id", ids);
-  const signals = (sigs ?? []) as Record<string, any>[];
+  const cols = "id,kind,wallet,condition_id,token_id,price,usd,created_at,evaluated_at";
+  const signals = await selectIn<Record<string, any>>(ids, (c) => db.from("signals").select(cols).in("id", c as string[]));
   const tokens = [...new Set(signals.map((s) => s.token_id))]; const conds = [...new Set(signals.map((s) => String(s.condition_id ?? "").toLowerCase()))];
   const wallets = new Set(signals.map((s) => s.wallet));
-  const { data: ex } = tokens.length ? await db.from("signals").select("id,kind,wallet,condition_id,token_id,price,usd,created_at,evaluated_at").eq("kind", "EXIT").in("token_id", tokens) : { data: [] };
-  const exits = ((ex ?? []) as Record<string, any>[]).filter((x) => wallets.has(x.wallet));
-  const ledgerIds = [...ids, ...exits.map((x) => x.id)];
-  const { data: led } = await db.from("paper_ledger").select("signal_id,created_at").in("signal_id", ledgerIds);
-  const { data: mk } = await db.from("paper_marks").select("signal_id,horizon,observed_at,price").in("signal_id", ids).in("horizon", ["1h", "6h", "24h"]);
-  const { data: rs } = tokens.length ? await db.from("token_resolutions").select("token_id,value,resolved_ts").in("token_id", tokens) : { data: [] };
-  const { data: mt } = conds.length ? await db.from("markets").select("condition_id,fees_enabled,taker_fee_rate,tick_size,min_order_shares,meta_fetched_at").in("condition_id", conds) : { data: [] };
+  const exits = (await selectIn<Record<string, any>>(tokens, (c) => db.from("signals").select(cols).eq("kind", "EXIT").in("token_id", c as string[]))).filter((x) => wallets.has(x.wallet));
+  const led = await selectIn<Record<string, any>>([...ids, ...exits.map((x) => x.id)], (c) => db.from("paper_ledger").select("signal_id,created_at").in("signal_id", c as string[]));
+  const mk = await selectIn<Record<string, any>>(ids, (c) => db.from("paper_marks").select("signal_id,horizon,observed_at,price").in("signal_id", c as string[]).in("horizon", ["1h", "6h", "24h"]));
+  const rs = await selectIn<Record<string, any>>(tokens, (c) => db.from("token_resolutions").select("token_id,value,resolved_ts").in("token_id", c as string[]));
+  const mt = await selectIn<Record<string, any>>(conds, (c) => db.from("markets").select("condition_id,fees_enabled,taker_fee_rate,tick_size,min_order_shares,meta_fetched_at").in("condition_id", c as string[]));
   const inp: SimInputs = { signals: [...signals, ...exits], ledger: new Map(((led ?? []) as any[]).map((r) => [r.signal_id, r])), marks: new Map(), resolutions: new Map(), markets: new Map(), obs: new Map() };
   for (const m of (mk ?? []) as any[]) { const ts = sec(m.observed_at)!; const prev = inp.marks.get(m.signal_id); if (!prev || ts > prev.ts) inp.marks.set(m.signal_id, { ts, price: Number(m.price) }); }
   for (const r of (rs ?? []) as any[]) if (r.resolved_ts != null && r.value != null) inp.resolutions.set(r.token_id, { ts: sec(r.resolved_ts)!, value: Number(r.value) });
   for (const r of (mt ?? []) as any[]) inp.markets.set(String(r.condition_id).toLowerCase(), { feesEnabled: r.fees_enabled ?? null, takerFeeRate: r.taker_fee_rate == null ? null : Number(r.taker_fee_rate), tickSize: r.tick_size == null ? null : Number(r.tick_size), minOrderShares: r.min_order_shares == null ? null : Number(r.min_order_shares), observedAt: r.meta_fetched_at ?? null });
   const built = buildSignals(inp); const need = neededObservations(built, inp, [MODES.REALISTIC, MODES.CONSERVATIVE]);
   if (need.length) {
-    const { data: ob } = await db.from("price_observations").select("token_id,as_of,obs_ts,price,resolution_seconds,state,attempts").in("token_id", [...new Set(need.map((n) => n.tokenId))]).in("as_of", [...new Set(need.map((n) => n.asOf))]);
-    for (const r of (ob ?? []) as any[]) {
+    const ob = await selectPairs<Record<string, any>>(need, (t, a) => db.from("price_observations").select("token_id,as_of,obs_ts,price,resolution_seconds,state,attempts").in("token_id", t).in("as_of", a));
+    for (const r of ob) {
       const key = `${r.token_id}@${Number(r.as_of)}`;
       if (r.state === "COMPLETE") inp.obs.set(key, { ts: Number(r.obs_ts), price: Number(r.price), resolutionSeconds: Number(r.resolution_seconds) });
       else if (r.state === "UNAVAILABLE" || (r.state === "FAILED" && Number(r.attempts) >= MAX_FETCH_ATTEMPTS)) inp.obs.set(key, null); // permanently unavailable
@@ -178,7 +200,7 @@ export async function loadBatchInputs(db: SupabaseClient, ids: string[]): Promis
   return inp;
 }
 
-export interface SweepStats { batches: number; signals: number; written: number; unchanged: number; enqueued: number; newlyTerminal: number; maxBatchRows: number; peakHeapMb: number; missingMarkets: string[] }
+export interface SweepStats { lastBatchMs?: number; batches: number; signals: number; written: number; unchanged: number; enqueued: number; newlyTerminal: number; maxBatchRows: number; peakHeapMb: number; missingMarkets: string[] }
 /** Sweep every non-terminal entry row in keyset batches. */
 export async function sweepSimulation(db: SupabaseClient, opts: { batchSize?: number; maxBatches?: number; onBatch?: (s: SweepStats) => void } = {}): Promise<SweepStats> {
   const B = opts.batchSize ?? SIM_BATCH_SIZE; const modes = [MODES.IDEAL, MODES.REALISTIC, MODES.CONSERVATIVE];
@@ -189,26 +211,26 @@ export async function sweepSimulation(db: SupabaseClient, opts: { batchSize?: nu
     const q = db.from("paper_ledger").select("signal_id").eq("sim_terminal", false).eq("side", "LONG").order("signal_id", { ascending: true }).limit(B);
     const { data: page, error } = await (last ? q.gt("signal_id", last) : q); if (error) throw error;
     const ids = ((page ?? []) as any[]).map((r) => r.signal_id as string); if (!ids.length) break;
-    last = ids[ids.length - 1]; st.batches++; st.signals += ids.length; st.maxBatchRows = Math.max(st.maxBatchRows, ids.length);
+    const tb = Date.now(); last = ids[ids.length - 1]; st.batches++; st.signals += ids.length; st.maxBatchRows = Math.max(st.maxBatchRows, ids.length);
     const inp = await loadBatchInputs(db, ids); const built = buildSignals(inp);
     for (const b of built) if (!inp.markets.has(b.conditionId) && missing.size < 200) missing.add(b.conditionId);
     // enqueue what this batch still needs (idempotent: existing rows are left alone)
     const need = neededObservations(built, inp, modes).filter((n) => !inp.obs.has(`${n.tokenId}@${n.asOf}`));
-    if (need.length) { const { data: existing } = await db.from("price_observations").select("token_id,as_of").in("token_id", [...new Set(need.map((n) => n.tokenId))]).in("as_of", [...new Set(need.map((n) => n.asOf))]);
-      const have = new Set(((existing ?? []) as any[]).map((r) => `${r.token_id}@${Number(r.as_of)}`)); const fresh = need.filter((n) => !have.has(`${n.tokenId}@${n.asOf}`));
-      if (fresh.length) { await db.from("price_observations").upsert(fresh.map((n) => ({ token_id: n.tokenId, as_of: n.asOf, state: "PENDING" })), { onConflict: "token_id,as_of", ignoreDuplicates: true }); st.enqueued += fresh.length; } }
+    if (need.length) { const existing = await selectPairs<Record<string, any>>(need, (t, a) => db.from("price_observations").select("token_id,as_of").in("token_id", t).in("as_of", a));
+      const have = new Set(existing.map((r) => `${r.token_id}@${Number(r.as_of)}`)); const fresh = need.filter((n) => !have.has(`${n.tokenId}@${n.asOf}`));
+      if (fresh.length) { const { error: qe } = await db.from("price_observations").upsert(fresh.map((n) => ({ token_id: n.tokenId, as_of: n.asOf, state: "PENDING" })), { onConflict: "token_id,as_of", ignoreDuplicates: true }); if (qe) throw qe; st.enqueued += fresh.length; } }
     // simulate, write only changed records
     const outs = modes.map((m) => simulateMode(built, inp, m)); const records: Record<string, any>[] = outs.flatMap((o) => o.records).map((r) => ({ ...r, record_hash: recordHash(r) }));
-    const { data: prev } = await db.from("paper_executions").select("signal_id,mode,record_hash").in("signal_id", ids);
-    const prevHash = new Map(((prev ?? []) as any[]).map((r) => [`${r.signal_id}|${r.mode}`, r.record_hash]));
+    const prev = await selectIn<Record<string, any>>(ids, (c) => db.from("paper_executions").select("signal_id,mode,record_hash").in("signal_id", c as string[]));
+    const prevHash = new Map(prev.map((r) => [`${r.signal_id}|${r.mode}`, r.record_hash]));
     const changed = records.filter((r) => prevHash.get(`${r.signal_id}|${r.mode}`) !== r.record_hash);
     for (let i = 0; i < changed.length; i += 500) { const { error: we } = await db.from("paper_executions").upsert(changed.slice(i, i + 500).map((r) => ({ ...r, computed_at: new Date().toISOString() })), { onConflict: "signal_id,mode" }); if (we) throw we; }
     st.written += changed.length; st.unchanged += records.length - changed.length;
     // signals whose outcome is final in every mode leave the sweep for good
     const byId = new Map<string, boolean>(); for (const r of records) byId.set(r.signal_id as string, (byId.get(r.signal_id as string) ?? true) && isTerminal(r.coverage_state as CoverageState, r.state as string));
     const done = [...byId].filter(([, t]) => t).map(([id]) => id);
-    if (done.length) { await db.from("paper_ledger").update({ sim_terminal: true }).in("signal_id", done); st.newlyTerminal += done.length; }
-    st.peakHeapMb = Math.max(st.peakHeapMb, process.memoryUsage().heapUsed / 1048576); opts.onBatch?.(st);
+    if (done.length) { await selectIn(done, (c) => db.from("paper_ledger").update({ sim_terminal: true }).in("signal_id", c as string[])); st.newlyTerminal += done.length; }
+    st.peakHeapMb = Math.max(st.peakHeapMb, process.memoryUsage().heapUsed / 1048576); st.lastBatchMs = Date.now() - tb; opts.onBatch?.(st);
     if (ids.length < B) break;
   }
   st.missingMarkets = [...missing];
@@ -219,7 +241,8 @@ export async function sweepSimulation(db: SupabaseClient, opts: { batchSize?: nu
 export async function runSimulation(db: SupabaseClient, opts: { client?: PriceSource & Partial<PolymarketClient>; fetchBudget?: number; log?: (m: string) => void; metaFetcher?: (conditionId: string) => Promise<unknown> } = {}) {
   const log = opts.log ?? (() => {}); const client = opts.client ?? new PolymarketClient(); const t0 = Date.now();
   const backlog = await processBacklog(supabaseBacklog(db), client, { budget: opts.fetchBudget ?? 3000 });
-  const sweep = await sweepSimulation(db, { onBatch: (s) => { if (s.batches % 20 === 0) log(`sim: batch ${s.batches}, ${s.signals} signals, heap ${s.peakHeapMb.toFixed(0)} MB`); } });
+  log(`sim: backlog ${backlog.done} fetched (${backlog.unavailable} unavailable, ${backlog.failed} failed); sweeping`);
+  const sweep = await sweepSimulation(db, { onBatch: (s) => { if (s.batches === 1 || s.batches % 10 === 0) log(`sim: batch ${s.batches} (size ${SIM_BATCH_SIZE}, ${s.lastBatchMs} ms), ${s.signals} signals, wrote ${s.written}, heap peak ${s.peakHeapMb.toFixed(0)} MB`); } });
   if (opts.metaFetcher) for (const c of sweep.missingMarkets.slice(0, 50)) { try { await opts.metaFetcher(c); } catch { /* next run */ } }
   const reports: Record<string, unknown> = {};
   for (const m of ["IDEAL", "REALISTIC", "CONSERVATIVE"]) { const { data, error } = await db.rpc("paper_exec_report", { p_mode: m }); if (error) throw error; reports[m] = { configHash: configHash(MODES[m as ModeName]), ...(data as object) }; }
