@@ -73,7 +73,7 @@ export class SignalEngine {
 
   private async ingestClaimed(f: Fill, w: WalletProfile): Promise<Signal[]> {
     // 1) CLAIM: INSERT … ON CONFLICT DO NOTHING RETURNING id. Only the process that actually inserted continues.
-    const { data: claimed, error: fe } = await this.db.from("fills").upsert({ id: f.id, wallet: f.wallet, condition_id: f.conditionId, token_id: f.tokenId, side: f.side, size: f.size, price: f.price, usd: f.usd, ts: new Date(f.ts * 1000).toISOString(), title: f.title, slug: f.slug, outcome: f.outcome, source: f.source, raw: null }, { onConflict: "id", ignoreDuplicates: true }).select("id");
+    const { data: claimed, error: fe } = await this.db.from("fills").upsert({ id: f.id, wallet: f.wallet, condition_id: f.conditionId, token_id: f.tokenId, side: f.side, size: f.size, price: f.price, usd: f.usd, ts: new Date(f.ts * 1000).toISOString(), title: f.title, slug: f.slug, outcome: f.outcome, source: f.source, raw: null, received_at: toIso(f.receivedAt ?? this.now()) }, { onConflict: "id", ignoreDuplicates: true }).select("id");
     if (fe) throw fe;
     this.remember(f.id);
     if (!claimed || claimed.length === 0) return []; // someone else owns this fill
@@ -89,6 +89,7 @@ export class SignalEngine {
     const peers = (peersRows ?? []).filter((p) => this.wallets.has(p.wallet)).map((p) => ({ wallet: p.wallet as string, lastBuyTs: toSec(p.last_buy_ts), copyScore: this.wallets.get(p.wallet)!.copyScore }));
     // 4) open signal?
     const { count } = await this.db.from("signals").select("id", { count: "exact", head: true }).eq("wallet", f.wallet).eq("token_id", f.tokenId).is("closed_at", null).neq("kind", "EXIT");
+    const evaluatedAt = this.now(); // OBSERVED evaluation time (paper execution latency starts here)
     const signals = evaluate({ fill: f, wallet: w, before, consensus: { peers }, medianFillUsd: await this.medianFill(f.wallet), hasOpenSignal: (count ?? 0) > 0, endDate, now: this.now() }, this.cfg);
     await heartbeat(this.db, "last_eval");
     // 5) update book
@@ -98,7 +99,7 @@ export class SignalEngine {
     // 6) persist + dispatch (dedupe via unique index)
     const fired: Signal[] = [];
     for (const s of signals) {
-      const { data: ins, error } = await this.db.from("signals").insert({ kind: s.kind, severity: s.severity, wallet: s.wallet, wallet_name: s.walletName, condition_id: s.conditionId, token_id: s.tokenId, outcome: s.outcome, title: s.title, slug: s.slug, price: s.price, usd: s.usd, payload: s.payload, dedupe_key: s.dedupeKey, created_at: new Date(s.ts * 1000).toISOString() }).select("id").maybeSingle();
+      const { data: ins, error } = await this.db.from("signals").insert({ kind: s.kind, severity: s.severity, wallet: s.wallet, wallet_name: s.walletName, condition_id: s.conditionId, token_id: s.tokenId, outcome: s.outcome, title: s.title, slug: s.slug, price: s.price, usd: s.usd, payload: s.payload, dedupe_key: s.dedupeKey, created_at: new Date(s.ts * 1000).toISOString(), received_at: toIso(f.receivedAt ?? this.now()), evaluated_at: toIso(evaluatedAt), source_fill_id: f.id }).select("id").maybeSingle();
       if (error) { if (error.code === "23505") { await this.db.from("data_quality_issues").insert({ kind: "duplicate_signal", ref_type: "signal", ref_id: s.dedupeKey, detail: { wallet: s.wallet, token: s.tokenId } }).then(() => {}, () => {}); continue; } throw error; } // 23505 = duplicate dedupe key
       fired.push(s);
       // V2: paper experiment + consensus context. Failures are logged, never fatal to alerting.

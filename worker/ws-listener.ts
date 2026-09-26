@@ -16,6 +16,7 @@ import { pollOnce } from "../src/lib/signals/poll";
 import { runMarking, gammaSource } from "../src/lib/paper/mark";
 import { buildSnapshot, saveSnapshot } from "../src/lib/paper/snapshot";
 import { heartbeat } from "../src/lib/health/heartbeat";
+import { runSimulation } from "../src/lib/paper/sim/run";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
@@ -41,7 +42,11 @@ async function main() {
   // V2: paper price marking + settlement. Idempotent, so an overlap with a manual run is harmless.
   const markEvery = Math.max(2, Number(process.env.MARK_INTERVAL_MIN) || 10) * 60 * 1000;
   const snapshot = () => buildSnapshot(db()).then((snap) => saveSnapshot(db(), snap)).then(() => console.log(new Date().toISOString(), "[paper] snapshot rebuilt")).catch((e) => console.error("snapshot failed", (e as Error).message));
-  const mark = () => runMarking(db(), gammaSource(), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message)).then(snapshot);
+  // Phase 2: execution simulation (IDEAL / REALISTIC / CONSERVATIVE). Reports every run; per-signal records every 4th.
+  let simRuns = 0; let simBusy = false;
+  const simulate = async () => { if (simBusy) return; simBusy = true; try { await runSimulation(db(), { fetchBudget: 1500, persistRecords: simRuns++ % 4 === 0, log: (m) => console.log(new Date().toISOString(), "[sim]", m) }); } catch (e) { console.error("sim failed", (e as Error).message); } finally { simBusy = false; } };
+  setTimeout(simulate, 90_000); setInterval(simulate, 15 * 60 * 1000);
+  const mark = () => runMarking(db(), gammaSource(undefined, db()), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message)).then(snapshot);
   setTimeout(snapshot, 5_000);
   // Retention: expire raw fills (7d), closed positions (30d), old data-quality rows (14d). Signals and paper results are permanent.
   const prune = async () => { const { data, error } = await db().rpc("prune_working_data"); if (error) console.error("prune failed", error.message); else console.log(new Date().toISOString(), "[retention] pruned", JSON.stringify(data)); };

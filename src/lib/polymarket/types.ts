@@ -16,6 +16,8 @@ export interface Fill {
   outcome: string;
   tx: string;
   source: "rest" | "ws";
+  /** When this process received the fill (epoch s). OBSERVED; used for latency accounting. */
+  receivedAt?: number;
 }
 
 export interface WalletProfile {

@@ -9,6 +9,18 @@ import { GAMMA_API, PolymarketClient } from "./client";
 
 export interface MarketMetaSource { endDate(conditionId: string): Promise<string | null> }
 
+/** Execution-relevant market configuration. Every field is null when the source did not provide it. */
+export interface MarketExecMeta { conditionId: string; feesEnabled: boolean | null; takerFeeRate: number | null; tickSize: number | null; minOrderShares: number | null; clobTokenIds: string[] | null; endDate: string | null }
+/** Pure: read execution metadata from a Gamma market row. Never infers a missing value. */
+export function parseGammaExecMeta(conditionId: string, m: Record<string, unknown> | null | undefined): MarketExecMeta {
+  const num = (...ks: string[]) => { for (const k of ks) { const v = Number(m?.[k]); if (m?.[k] !== undefined && m?.[k] !== null && m?.[k] !== "" && Number.isFinite(v)) return v; } return null; };
+  const bool = (k: string) => (m?.[k] === true || m?.[k] === "true" ? true : m?.[k] === false || m?.[k] === "false" ? false : null);
+  const raw = m?.clobTokenIds; const arr = Array.isArray(raw) ? raw : typeof raw === "string" ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
+  let rate = num("takerFeeRate", "taker_fee_rate", "feeRate", "takerBaseFee");
+  if (rate != null && rate > 1) rate = rate / 10_000; // basis points → fraction
+  return { conditionId: conditionId.toLowerCase(), feesEnabled: bool("feesEnabled"), takerFeeRate: rate, tickSize: num("orderPriceMinTickSize"), minOrderShares: num("orderMinSize"), clobTokenIds: Array.isArray(arr) ? arr.map(String) : null, endDate: parseGammaEndDate(m) };
+}
+
 /** Pure: read an end date from a Gamma market row. Prefers the date-only field; never infers. */
 export function parseGammaEndDate(m: Record<string, unknown> | null | undefined): string | null {
   if (!m) return null;
@@ -34,10 +46,14 @@ export class GammaMarketMeta implements MarketMetaSource {
     try {
       const b = await this.client.get<{ markets?: Record<string, unknown>[] }>(GAMMA_API, "/markets/keyset", { condition_ids: conditionId, limit: 5 });
       const m = (b.markets ?? []).find((x) => String(x.conditionId ?? x.condition_id ?? "").toLowerCase() === key);
-      v = parseGammaEndDate(m);
+      const meta = parseGammaExecMeta(key, m); v = meta.endDate;
+      if (m && this.db) await this.db.from("markets").upsert(execMetaRow(meta, this.now()), { onConflict: "condition_id" });
     } catch { v = null; }
     this.mem.set(key, { v, at: this.now() });
-    if (v && this.db) await this.db.from("markets").upsert({ condition_id: key, end_date: v, fetched_at: new Date(this.now()).toISOString() }, { onConflict: "condition_id" });
     return v;
   }
+}
+
+export function execMetaRow(meta: MarketExecMeta, nowMs: number) {
+  return { condition_id: meta.conditionId, end_date: meta.endDate, fees_enabled: meta.feesEnabled, taker_fee_rate: meta.takerFeeRate, tick_size: meta.tickSize, min_order_shares: meta.minOrderShares, clob_token_ids: meta.clobTokenIds, meta_fetched_at: new Date(nowMs).toISOString(), fetched_at: new Date(nowMs).toISOString() };
 }

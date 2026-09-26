@@ -183,7 +183,7 @@ export function explainFill(raw: RawFill, source: "rest" | "ws" = "rest", nowSec
   return { fill: {
     id: `${tx}:${tokenId}:${wallet}:${ts}:${side}:${size}:${price}`,
     wallet, conditionId, tokenId, side: side as "BUY" | "SELL", size, price, usd: Math.round(size * price * 100) / 100, ts,
-    title: String(g("title") ?? ""), slug: String(g("slug", "eventSlug", "event_slug") ?? ""), outcome: String(g("outcome") ?? ""), tx, source,
+    title: String(g("title") ?? ""), slug: String(g("slug", "eventSlug", "event_slug") ?? ""), outcome: String(g("outcome") ?? ""), tx, source, receivedAt: nowSec,
   } };
 }
 
