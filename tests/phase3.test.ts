@@ -229,3 +229,145 @@ describe("resolveOrphans: the token-order step", () => {
     expect(r).toMatchObject({ candidates: 2, resolved: 1 }); expect(logs.some((l) => /token-order lookup failed: gamma down/.test(l))).toBe(true);
   });
 });
+
+// ───────────────────────────── step 4: PortfolioBook ─────────────────────────────
+import { PortfolioBook, entryKey, cmpKey, emptyState, TAKEN_WINDOW_SEC } from "@/lib/paper/portfolio/book";
+import { simulatePortfolio, type PortfolioSignal } from "@/lib/paper/sim/portfolio";
+import type { PortfolioConfig } from "@/lib/paper/sim/config";
+import type { BookSignal, BookOutput } from "@/lib/paper/portfolio/types";
+
+describe("PortfolioBook", () => {
+  const PCS: Record<string, PortfolioConfig> = {
+    roomy: { startingCapitalUsd: 100_000, positionUsd: 100, maxMarketExposureUsd: 10_000, maxTotalExposurePct: 100, maxOpenPositions: 1000, maxWalletAllocationUsd: 10_000, minCashReserveUsd: 0, allowResize: false },
+    tight: { startingCapitalUsd: 1_000, positionUsd: 100, maxMarketExposureUsd: 150, maxTotalExposurePct: 60, maxOpenPositions: 8, maxWalletAllocationUsd: 250, minCashReserveUsd: 50, allowResize: false },
+    exposureBound: { startingCapitalUsd: 2_000, positionUsd: 100, maxMarketExposureUsd: 10_000, maxTotalExposurePct: 30, maxOpenPositions: 100, maxWalletAllocationUsd: 10_000, minCashReserveUsd: 0, allowResize: false },
+    cashBound: { startingCapitalUsd: 500, positionUsd: 100, maxMarketExposureUsd: 10_000, maxTotalExposurePct: 100, maxOpenPositions: 50, maxWalletAllocationUsd: 10_000, minCashReserveUsd: 120, allowResize: true },
+    resize: { startingCapitalUsd: 1_000, positionUsd: 100, maxMarketExposureUsd: 150, maxTotalExposurePct: 60, maxOpenPositions: 8, maxWalletAllocationUsd: 250, minCashReserveUsd: 50, allowResize: true },
+  };
+  let seed = 11; const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const pick = <T,>(xs: T[]) => xs[Math.floor(rnd() * xs.length)];
+  /** Random history: bursts in the same second, duplicate source trades, exits, resolutions, marks, missing prices. */
+  function history(n: number, o: { exitsAfter?: number; resolutionsAfter?: number } = {}): BookSignal[] {
+    const out: BookSignal[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = `s${String(i).padStart(5, "0")}`; const src = T0 + Math.floor(i / 3) * 40; const ev = src + 3 + Math.floor(rnd() * 60);
+      const price = 0.05 + rnd() * 0.9; const obs = rnd() < 0.08 ? null : { ts: ev - Math.floor(rnd() * 30), price: Math.min(0.99, Math.max(0.01, price + (rnd() - 0.5) * 0.05)), resolutionSeconds: 0 };
+      const market = rnd() < 0.5 ? null : { feesEnabled: rnd() < 0.5, takerFeeRate: rnd() < 0.5 ? 0.02 : null, tickSize: 0.01, minOrderShares: rnd() < 0.2 ? 300 : 5 };
+      const dup = i > 0 && rnd() < 0.12 ? out[i - 1] : null; // NEW_POSITION + CONSENSUS on one fill
+      const xs = Math.max(o.exitsAfter ?? 0, src + 30 + Math.floor(rnd() * 4000));
+      const exit = rnd() < 0.5 ? { triggerTs: xs, triggerEvalTs: xs + 5, triggerPrice: 0.05 + rnd() * 0.9, triggerUsd: rnd() < 0.3 ? 10 + rnd() * 40 : 500 + rnd() * 2000, obs: rnd() < 0.1 ? null : { ts: xs, price: 0.05 + rnd() * 0.9, resolutionSeconds: 0 }, market } : null;
+      const rts = Math.max(o.resolutionsAfter ?? 0, src + pick([-50, 300, 2000, 9000]));
+      out.push({ signalId: id, kind: dup ? "CONSENSUS" : pick(["NEW_POSITION", "NEW_POSITION", "CONVICTION_ADD", "EARLY_ENTRY", "CONSENSUS"]), wallet: `w${Math.floor(rnd() * 6)}`, conditionId: `c${Math.floor(rnd() * 5)}`, tokenId: `t${i}`,
+        sourceKey: dup ? dup.sourceKey : `k${i}`, exitId: exit ? `x${i}` : null,
+        entry: dup ? { ...dup.entry } : { sourceTs: src, evalTs: ev, signalPrice: price, sourceUsd: 50 + rnd() * 3000, obs, market },
+        exit, resolution: rnd() < 0.6 ? { ts: rts, value: pick([0, 1, 1, 0.5]) } : null, mark: rnd() < 0.5 ? { ts: src + 3600, price: rnd() } : null });
+    }
+    return out;
+  }
+  const ordered = (sigs: BookSignal[], exec: typeof MODES.IDEAL) => [...sigs].sort((a, b) => cmpKey(entryKey(a, exec), entryKey(b, exec)));
+  function runBook(sigs: BookSignal[], exec: typeof MODES.IDEAL, pc: PortfolioConfig) {
+    const book = new PortfolioBook(exec, pc); for (const s of ordered(sigs, exec)) book.submit(s); book.advance(null);
+    return { book, out: book.take() };
+  }
+  const seen = new Set<string>(); // every outcome/reason produced across the parity runs
+  const ref = (out: BookOutput) => out.decisions.map((d) => ({ signalId: d.signalId, kind: d.kind, outcome: d.outcome, reason: d.reason, requestedUsd: d.requestedUsd, filledUsd: d.filledUsd, ts: d.ts }));
+
+  for (const mode of ["IDEAL", "REALISTIC", "CONSERVATIVE"] as const) for (const pcName of Object.keys(PCS)) {
+    it(`equals simulatePortfolio exactly — ${mode}, ${pcName} limits`, () => {
+      seed = [...`${mode}/${pcName}`].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 2 ** 31, 7); // own fixed history per run
+      const sigs = history(300); const exec = MODES[mode]; const pc = PCS[pcName];
+      const want = simulatePortfolio(sigs as PortfolioSignal[], exec, pc); const { book, out } = runBook(sigs, exec, pc);
+      expect(ref(out)).toEqual(want.decisions); expect(out.equity).toEqual(want.curve);
+      const { decisions: _d, curve: _c, ...totals } = want; expect(book.summary()).toEqual(totals);
+      // …and the histories are not trivial: fills, rejections for several reasons, exits, resolutions all happen
+      const reasons = new Set(out.decisions.map((d) => d.reason?.replace(/:.*/, "") ?? d.outcome));
+      expect(out.decisions.filter((d) => d.filledShares > 0).length).toBeGreaterThan(pcName === "roomy" ? 100 : 5);
+      for (const r of reasons) seen.add(r);
+      for (const l of out.lots) seen.add(`lot:${l.state}`);
+    });
+  }
+
+  it("the parity runs above exercised every rejection reason, the non-fill outcomes and every lot state", () => {
+    for (const r of ["REJECTED_DUPLICATE_POSITION", "REJECTED_MAX_OPEN_POSITIONS", "REJECTED_MAX_WALLET_ALLOCATION", "REJECTED_MAX_MARKET_EXPOSURE", "REJECTED_INSUFFICIENT_CASH", "REJECTED_MAX_PORTFOLIO_EXPOSURE", "RESIZED", "NO_PRICE_OBSERVATION", "INSUFFICIENT_LIQUIDITY", "lot:OPEN", "lot:PARTIALLY_EXITED", "lot:EXITED", "lot:RESOLVED"]) expect(seen, r).toContain(r);
+  });
+
+  it("stopping at any event, checkpointing through JSON, and resuming gives the uninterrupted result", () => {
+    const sigs = ordered(history(80), MODES.REALISTIC); const pc = PCS.resize; const exec = MODES.REALISTIC;
+    const whole = runBook(sigs, exec, pc);
+    for (let k = 0; k <= sigs.length; k++) {
+      const a = new PortfolioBook(exec, pc); for (const s of sigs.slice(0, k)) a.submit(s);
+      const first = a.take(); const state = JSON.parse(JSON.stringify(a.snapshot()));
+      const b = new PortfolioBook(exec, pc, state); for (const s of sigs.slice(k)) b.submit(s); b.advance(null); const second = b.take();
+      expect({ d: [...first.decisions, ...second.decisions], e: [...first.equity, ...second.equity], l: [...first.lots, ...second.lots] }).toEqual({ d: whole.out.decisions, e: whole.out.equity, l: whole.out.lots });
+      expect(b.summary()).toEqual(whole.book.summary());
+    }
+  });
+
+  it("refuses entries out of event order; ties in one second resolve by kind, then id, never by arrival", () => {
+    const sigs = ordered(history(20), MODES.IDEAL); const book = new PortfolioBook(MODES.IDEAL, PCS.roomy);
+    book.submit(sigs[5]); expect(() => book.submit(sigs[2])).toThrow(/out of order/); expect(() => book.submit(sigs[5])).toThrow(/out of order/);
+    const same = history(6).map((s, i) => ({ ...s, sourceKey: `u${i}`, entry: { ...s.entry, sourceTs: T0, evalTs: T0 + 5 } }));
+    const keys = ordered(same, MODES.REALISTIC).map((s) => [entryKey(s, MODES.REALISTIC).order, s.signalId]);
+    expect(keys).toEqual([...keys].sort((a, b) => (a[0] as number) - (b[0] as number) || String(a[1]).localeCompare(String(b[1]))));
+  });
+
+  it("state stays bounded: open lots within maxOpenPositions, pending events at most two per open lot, old source keys forgotten", () => {
+    const sigs = ordered(history(400), MODES.REALISTIC); const book = new PortfolioBook(MODES.REALISTIC, PCS.tight);
+    for (const s of sigs) { book.submit(s); const st = book.snapshot(); expect(st.lots.length).toBeLessThanOrEqual(PCS.tight.maxOpenPositions); expect(st.heap.length).toBeLessThanOrEqual(2 * st.lots.length); }
+    const st = book.snapshot(); expect(st.taken.every(([, t]) => t >= st.last!.ts - TAKEN_WINDOW_SEC)).toBe(true);
+    expect(emptyState(PCS.tight)).toMatchObject({ cash: 1000, lots: [], heap: [], last: null });
+  });
+
+  it("a duplicate source trade is still rejected after a checkpoint, and forgotten once it is older than the window", () => {
+    const [a0] = history(1); const a = { ...a0, sourceKey: "same", exit: null, resolution: null };
+    const b = { ...a, signalId: "s99999", kind: "CONSENSUS" };
+    const book = new PortfolioBook(MODES.IDEAL, PCS.roomy); book.submit(a);
+    const restored = new PortfolioBook(MODES.IDEAL, PCS.roomy, book.snapshot()); expect(restored.submit(b)).toMatchObject({ outcome: "REJECTED", reason: "REJECTED_DUPLICATE_POSITION" });
+    const later = { ...b, signalId: "s99998", entry: { ...b.entry, sourceTs: b.entry.sourceTs + TAKEN_WINDOW_SEC + 10, evalTs: (b.entry.evalTs ?? 0) + TAKEN_WINDOW_SEC + 10 } };
+    const far = new PortfolioBook(MODES.IDEAL, PCS.roomy, book.snapshot()); far.submit({ ...a, signalId: "s99997", sourceKey: "other", entry: later.entry });
+    const pruned = new PortfolioBook(MODES.IDEAL, PCS.roomy, far.snapshot()); expect(pruned.submit({ ...later, signalId: "s99999", entry: { ...later.entry, evalTs: (later.entry.evalTs ?? 0) + 1 } }).outcome).not.toBe("REJECTED");
+  });
+
+  describe("relink (§B11): a restored lot learns exits and resolutions that arrived after its checkpoint", () => {
+    // First half of the history is submitted knowing nothing about exits/resolutions (they had not happened yet);
+    // they all occur after the checkpoint, so re-linking must give exactly the book that knew them from the start.
+    const exec = MODES.REALISTIC; const pc = PCS.resize;
+    function split() {
+      const all = ordered(history(120), exec); const cut = 60; const cutTs = entryKey(all[cut], exec).ts;
+      const full = ordered(history(120, { exitsAfter: cutTs + 10, resolutionsAfter: cutTs + 10 }), exec); // same seed sequence is not needed: use `full` for both
+      return { full, cut };
+    }
+    it("re-linked book equals the book that knew everything from the start", () => {
+      seed = 99; const { full, cut } = split();
+      const knew = runBook(full, exec, pc);
+      const blind = new PortfolioBook(exec, pc); for (const s of full.slice(0, cut)) blind.submit({ ...s, exit: null, exitId: null, resolution: null }); const early = blind.take();
+      const restored = new PortfolioBook(exec, pc, JSON.parse(JSON.stringify(blind.snapshot())));
+      const bySig = new Map(full.map((s) => [s.signalId, s]));
+      for (const lot of restored.openLots()) { const s = bySig.get(lot.signalId)!; expect(restored.relink(lot.signalId, { exit: s.exit, exitId: s.exitId ?? null, resolution: s.resolution })).toEqual({ ok: true }); }
+      for (const s of full.slice(cut)) restored.submit(s); restored.advance(null); const late = restored.take();
+      expect([...early.decisions, ...late.decisions]).toEqual(knew.out.decisions);
+      expect([...early.equity, ...late.equity]).toEqual(knew.out.equity);
+      expect(restored.summary()).toEqual(knew.book.summary());
+    });
+    it("an event that should already have happened is refused with the time to rewind to, and nothing changes", () => {
+      seed = 99; const { full, cut } = split();
+      const book = new PortfolioBook(exec, pc); for (const s of full.slice(0, cut)) book.submit({ ...s, exit: null, exitId: null, resolution: null });
+      const lot = book.openLots()[0]; const before = JSON.stringify(book.snapshot()); const lastTs = book.lastKey()!.ts;
+      expect(book.relink(lot.signalId, { exit: null, exitId: null, resolution: { ts: lastTs - 100, value: 1 } })).toEqual({ ok: false, rewindTo: lastTs - 100 });
+      expect(JSON.stringify(book.snapshot())).toBe(before);
+      expect(() => book.relink("no-such-lot", { exit: null, exitId: null, resolution: null })).toThrow(/no open lot/);
+    });
+    it("a lot whose exit already filled keeps it; a different exit, or a resolution before it, asks for a rewind", () => {
+      const exitAt = T0 + 500;
+      const s: BookSignal = { ...history(1)[0], sourceKey: "solo", exitId: "x-1", exit: { triggerTs: exitAt, triggerEvalTs: exitAt + 5, triggerPrice: 0.5, triggerUsd: 20, obs: { ts: exitAt, price: 0.5, resolutionSeconds: 0 }, market: null }, resolution: null, entry: { sourceTs: T0, evalTs: T0 + 5, signalPrice: 0.4, sourceUsd: 2000, obs: { ts: T0, price: 0.4, resolutionSeconds: 0 }, market: null } };
+      const book = new PortfolioBook(exec, PCS.roomy); book.submit(s);
+      const next = { ...history(1)[0], signalId: "s77777", sourceKey: "n", exit: null, resolution: null, entry: { ...s.entry, sourceTs: exitAt + 1000, evalTs: exitAt + 1005 } };
+      book.submit(next);                                       // advances past the (partial: $20 cap) exit
+      const lot = book.openLots().find((l) => l.signalId === s.signalId)!; expect(lot.state).toBe("PARTIALLY_EXITED"); const xTs = lot.exitTs!;
+      expect(book.relink(s.signalId, { exit: s.exit, exitId: "x-1", resolution: { ts: xTs + 50_000, value: 1 } })).toEqual({ ok: true });
+      expect(book.relink(s.signalId, { exit: s.exit, exitId: "x-2", resolution: null })).toEqual({ ok: false, rewindTo: xTs });
+      expect(book.relink(s.signalId, { exit: s.exit, exitId: "x-1", resolution: { ts: xTs - 10, value: 1 } })).toEqual({ ok: false, rewindTo: xTs - 10 });
+      book.advance(null); expect(book.take().lots.at(-1)).toMatchObject({ signalId: s.signalId, state: "RESOLVED", resolutionValue: 1 });
+    });
+  });
+});
