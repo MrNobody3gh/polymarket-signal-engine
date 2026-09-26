@@ -12,10 +12,11 @@ Read-only research on public data. Nothing here places trades.
 ## How it works
 
 ```
-daily 04:15 UTC   /api/cron/refresh-wallets   discover every board (11 cats × 4 windows × 2 sorts)
-                                              + recent $10k+ fills → score ~1,400 wallets → mark watchlist
-every minute      /api/cron/poll-trades       REST backstop: new fills per tracked wallet since cursor
 always-on         npm run worker              websocket firehose → tracked wallets only → same engine
+  every minute      (worker) REST backstop    new fills per tracked wallet since cursor
+  daily 04:15 UTC   (worker) re-score         discover every board (11 cats × 4 windows × 2 sorts)
+                                              + recent $10k+ fills → score ~1,400 wallets → mark watchlist
+  every 10 / 15 min (worker) paper            mark 1h/6h/24h + settle; execution simulation
                         ↓
                   src/lib/signals/rules.ts    NEW_POSITION · CONSENSUS · CONVICTION_ADD · EARLY_ENTRY · EXIT
                         ↓
@@ -24,12 +25,16 @@ always-on         npm run worker              websocket firehose → tracked wal
 
 The websocket path is real-time (~2 s Polygon blocks). REST is CDN-cached
 `max-age=300`, so the poller alone is up to 5 minutes behind — it exists so a
-dropped socket costs latency, not fills.
+dropped socket costs latency, not fills. Every scheduled job runs inside the one
+worker process; the Vercel app is the dashboard, the Telegram webhook and manual
+entry points (`/api/cron/*`, protected by `CRON_SECRET`).
 
 ## Setup (15 minutes)
 
-1. **Supabase** — create a project, open the SQL editor, paste
-   `supabase/migrations/0001_init.sql`, run it.
+1. **Supabase** — create a project, then apply **every** migration in
+   `supabase/migrations/` in order, `0001` through `0007` (`npm run db:push`,
+   or paste each file into the SQL editor and run it). All are additive; the
+   code needs all seven.
 2. **Env** — `cp .env.example .env.local` and fill in the Supabase URL + service
    role key, a `CRON_SECRET`, and whichever alert channels you want
    (Telegram: create a bot with @BotFather, message it once, get your chat id
@@ -37,7 +42,7 @@ dropped socket costs latency, not fills.
 3. **Install + test**
    ```bash
    npm install
-   npm test          # 54 tests: rules, scoring, client, dispatch, bot
+   npm test          # ~200 tests; the 5 real-Postgres tests run when PG_TEST_URL is set
    npm run typecheck
    ```
 4. **Seed the watchlist** from the snapshot so it works before the first full
@@ -48,11 +53,12 @@ dropped socket costs latency, not fills.
    npm run dev       # dashboard on :3000 — /, /signals, /wallets, /api/signals
    npm run worker    # live listener (separate terminal)
    ```
-6. **Deploy** — push to Vercel; `vercel.json` registers both crons and Vercel
-   sends `Authorization: Bearer $CRON_SECRET` automatically. Run the worker on
-   Railway / Fly / any box (`npm run worker`) — Vercel functions can't hold a
-   socket open.
-7. **First full re-score**: `npm run refresh` (≈4,000 API calls, ~5 min).
+6. **Deploy** — push to Vercel for the dashboard and bot webhook. Run the worker
+   on Railway / Fly / any box (`npm run worker`) — Vercel functions can't hold a
+   socket open, and the ~5-minute daily re-score doesn't fit a serverless time
+   limit. `vercel.json` therefore registers no crons.
+7. **First full re-score**: the worker runs one on its first start (and daily at
+   04:15 UTC after that). To run it by hand: `npm run refresh` (≈4,000 API calls, ~5 min).
 
 ## Telegram bot
 
@@ -62,7 +68,7 @@ alert stream; signals are pushed the moment the rules fire.
 **Setup**
 1. @BotFather → `/newbot` → copy the token into `TELEGRAM_BOT_TOKEN`; set any
    random string as `TELEGRAM_WEBHOOK_SECRET`.
-2. Run both migrations (`0001_init.sql`, `0002_telegram.sql`).
+2. Apply all migrations (Setup step 1).
 3. Deployed on Vercel: `npm run tg:setup -- https://your-app.vercel.app`
    registers the webhook (`/api/telegram/webhook`) and the command menu.
    Locally: `npm run tg:setup` (no URL) then `npm run bot` to long-poll.
@@ -158,30 +164,19 @@ src/lib/telegram/              bot: api, commands (pure), store, broadcast, webh
 scripts/telegram-setup.ts      register webhook + command menu
 scripts/bot-poll.ts            local long-polling mode
 src/app/                       dashboard + API routes
-worker/ws-listener.ts          live websocket listener
+src/lib/paper/                 paper ledger, marking/settlement, execution simulator (sim/)
+src/lib/chunk.ts               IN-list chunking for PostgREST (URL length)
+worker/ws-listener.ts          the worker: websocket, poller, re-score, marking, simulation, retention
 tests/                         vitest
 ```
 
-## Paper ledger
-
-`paper_ledger` is provisioned for tracking what a $100 copy of each signal
-Deployed via Vercel.
-would have returned (mark via `/v2/prices-history?as_of=`, settle via
-`/v2/resolutions`). The engine records every signal's entry price; wiring the
-daily mark is the obvious next step and the honest way to find out whether any
-of this has forward information.
-
-Deployed via Vercel.
-
-Deployed via Vercel.
-
 ## V2 — paper measurement
 
-Every signal is also recorded as a **paper experiment**: a $100 hypothetical long on the outcome token at the signal price (`PAPER_SIZE_USD` to change). EXIT signals never open a position; they close that wallet's open paper longs on the token at the exit price. The worker marks open positions at **1h / 6h / 24h** from `/v2/prices-history?as_of=` and settles them when Gamma reports the market closed with final outcome prices (`MARK_INTERVAL_MIN`, default 10). Missing prices and unparseable resolutions are logged to `data_quality_issues`, never zeroed.
+Every signal is also recorded as a **paper experiment**: a $100 hypothetical long on the outcome token at the signal price (`PAPER_SIZE_USD` to change). EXIT signals never open a position; they close that wallet's open paper longs on the token at the exit price. The worker marks open positions at **1h / 6h / 24h** from `/v2/prices-history?as_of=` and settles them from `/v2/resolutions` payouts (Gamma and the price-history settlement tick are fallbacks) (`MARK_INTERVAL_MIN`, default 10). Missing prices and unparseable resolutions are logged to `data_quality_issues`, never zeroed.
 
 - Telegram: `/performance [7d|30d|all]`, `/stats`, `/signal <ref>` (the ref is printed on every alert), `/wallet` now includes paper results, `/status` shows component health with staleness warnings.
 - Dashboard: `/performance` (overview, by type / score band / consensus depth / wallet, signal history) and `/signal/<id>` (timeline of real observations).
-- Migration: `supabase/migrations/0003_v2_paper.sql` (additive). Tables: `paper_marks`, `consensus_events`, `data_quality_issues`; `paper_ledger` extended.
+- Migrations `0003`–`0007` (additive): `paper_marks`, `consensus_events`, `data_quality_issues`, `markets`, `price_observations`, `paper_executions`; `paper_ledger` extended. Execution realism is documented in `docs/PAPER_EXECUTION.md`, bot detection in `docs/BOT_DETECTION.md`.
 - Health heartbeats live in `cursors` under `health:*`.
 
 Paper only. Win rates are computed on settled positions; samples under 10 are flagged "Insufficient data".

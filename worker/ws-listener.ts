@@ -20,6 +20,7 @@ import { runSimulation } from "../src/lib/paper/sim/run";
 import { memSample, fmtMem, withMemLog, storeMem } from "../src/lib/health/memory";
 import { measureActivity, activityRow } from "../src/lib/scoring/activity";
 import { GammaMarketMeta } from "../src/lib/polymarket/markets";
+import { refresh, refreshDue } from "../src/lib/scoring/refresh";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
@@ -67,6 +68,21 @@ async function main() {
   };
   setTimeout(() => withMemLog("activity", measureAll).catch((e) => console.error("activity failed", (e as Error).message)), 45_000);
   setInterval(() => withMemLog("activity", measureAll).catch((e) => console.error("activity failed", (e as Error).message)), 6 * 3600 * 1000);
+  // Daily wallet re-score (04:15 UTC). It lives here, not in a Vercel cron: the job runs ~5 minutes and writes only at
+  // the end, so a 60 s serverless cap would kill it every day without saving anything. Checked every 15 minutes; the
+  // last success is `cursors['refresh:last']`, so a restart never repeats a finished day.
+  let refreshBusy = false; let refreshAttempt: number | null = null;
+  const rescore = async () => {
+    if (refreshBusy) return;
+    const { data, error } = await db().from("cursors").select("value").eq("key", "refresh:last").maybeSingle();
+    if (error) { console.error("rescore: cannot read refresh:last", error.message); return; }
+    const now = Math.floor(Date.now() / 1000);
+    if (!refreshDue(data?.value ? Number(data.value) : null, now, refreshAttempt)) return;
+    refreshBusy = true; refreshAttempt = now;
+    try { const r = await withMemLog("rescore", () => refresh(db(), pm, { log: (m) => console.log(new Date().toISOString(), "[rescore]", m) })); console.log(new Date().toISOString(), `[rescore] scored ${r.scored}, tracking ${r.tracked}`); await engine.loadWallets(); }
+    catch (e) { console.error("rescore failed", (e as Error).message); } finally { refreshBusy = false; }
+  };
+  setTimeout(rescore, 120_000); setInterval(rescore, 15 * 60 * 1000);
   const mark = () => runMarking(db(), gammaSource(undefined, db()), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message)).then(snapshot);
   setTimeout(snapshot, 5_000);
   // Retention: expire raw fills (7d), closed positions (30d), old data-quality rows (14d). Signals and paper results are permanent.

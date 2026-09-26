@@ -6,6 +6,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { PolymarketClient, GAMMA_API, type PricePoint } from "../polymarket/client";
 import { isValidPrice, logIssues, pnlFor, returnFor, type DqIssue } from "./ledger";
 import { heartbeat } from "../health/heartbeat";
+import { selectIn } from "../chunk";
 
 export const HORIZONS: { key: "1h" | "6h" | "24h"; seconds: number }[] = [{ key: "1h", seconds: 3600 }, { key: "6h", seconds: 6 * 3600 }, { key: "24h", seconds: 24 * 3600 }];
 /** Only settle by "stale" fallback if the market is well past its end and Gamma says closed. */
@@ -125,6 +126,12 @@ export function gammaSource(client = new PolymarketClient(), db: SupabaseClient 
   } as MarkSource;
 }
 
+/** Pure: the settled label follows the sign of P&L. Exactly break-even (only possible when a fractional payout, e.g. a 50/50
+ *  resolution, equals the entry) is labelled by the market outcome instead of defaulting to a loss. */
+export function settledStatus(pnl: number, won: boolean): "RESOLVED_WIN" | "RESOLVED_LOSS" {
+  return pnl > 0 ? "RESOLVED_WIN" : pnl < 0 ? "RESOLVED_LOSS" : won ? "RESOLVED_WIN" : "RESOLVED_LOSS";
+}
+
 export interface MarkRunResult { positions: number; marks: number; settled: number; unresolved: number; failed: number; skipped?: boolean }
 
 // Process-local guards so one worker never stacks runs or hammers the same dead lookup every cycle.
@@ -145,13 +152,16 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
   running = true;
   try {
   // Round-robin: least-recently-checked first, so no position is starved by an older one that never resolves.
-  const { data: open } = await db.from("paper_ledger").select("signal_id,token_id,condition_id,entry_price,shares,signal_ts,outcome").eq("status", "OPEN").order("mark_checked_at", { ascending: true, nullsFirst: true }).order("signal_ts", { ascending: true }).limit(opts.limit ?? 600);
+  const { data: open, error: openErr } = await db.from("paper_ledger").select("signal_id,token_id,condition_id,entry_price,shares,signal_ts,outcome").eq("status", "OPEN").order("mark_checked_at", { ascending: true, nullsFirst: true }).order("signal_ts", { ascending: true }).limit(opts.limit ?? 600);
+  if (openErr) throw new Error(`paper_ledger open-positions query failed: ${openErr.message}`); // never heartbeat a run that read nothing
   const rows = (open ?? []).map((r) => ({ ...r, entry_price: Number(r.entry_price), shares: Number(r.shares) })) as (OpenPaper & { outcome?: string | null })[];
   const outcomeMap = (src as unknown as { _outcomes?: Map<string, string> })._outcomes; if (outcomeMap) for (const r of rows) if (r.outcome) outcomeMap.set(r.token_id, r.outcome);
   if (src.prefetch) { const age = (r: OpenPaper) => now - Math.floor(Date.parse(r.signal_ts) / 1000); await src.prefetch([...new Set(rows.filter((r) => age(r) >= RESOLUTION_MIN_AGE_SEC).map((r) => r.condition_id))]); }
   res.positions = rows.length; if (!rows.length) { await heartbeat(db, "last_mark"); return res; }
-  const { data: marks } = await db.from("paper_marks").select("signal_id,horizon").in("signal_id", rows.map((r) => r.signal_id));
-  const have = new Map<string, Set<string>>(); for (const m of marks ?? []) { if (!have.has(m.signal_id)) have.set(m.signal_id, new Set()); have.get(m.signal_id)!.add(m.horizon); }
+  // Chunked: 600 uuids in one `in.(…)` is ~22 KB of URL. A failed read must abort the run — treating every horizon as
+  // unmarked would silently re-fetch prices already recorded.
+  const marks = await selectIn<{ signal_id: string; horizon: string }>(rows.map((r) => r.signal_id), (c) => db.from("paper_marks").select("signal_id,horizon").in("signal_id", c as string[]));
+  const have = new Map<string, Set<string>>(); for (const m of marks) { if (!have.has(m.signal_id)) have.set(m.signal_id, new Set()); have.get(m.signal_id)!.add(m.horizon); }
   const issues: DqIssue[] = []; const resolutionCache = new Map<string, Resolution>();
   for (const p of rows) {
     // 1) horizon marks
@@ -186,7 +196,7 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
     if (r.state === "resolved") {
       const pnl = pnlFor(p.shares, p.entry_price, r.finalPrice), ret = returnFor(p.entry_price, r.finalPrice);
       const resolvedIso = new Date(((r.resolvedAt ?? null) ?? now) * 1000).toISOString();
-      const { error } = await db.from("paper_ledger").update({ status: pnl > 0 ? "RESOLVED_WIN" : "RESOLVED_LOSS", final_price: r.finalPrice, final_pnl: pnl, final_return: ret, resolved: true, payout: r.finalPrice, pnl_per_100: pnl, resolved_at: r.resolvedAt ? resolvedIso : null, settled_at: new Date(now * 1000).toISOString(), updated_at: new Date(now * 1000).toISOString() }).eq("signal_id", p.signal_id).eq("status", "OPEN");
+      const { error } = await db.from("paper_ledger").update({ status: settledStatus(pnl, r.won), final_price: r.finalPrice, final_pnl: pnl, final_return: ret, resolved: true, payout: r.finalPrice, pnl_per_100: pnl, resolved_at: r.resolvedAt ? resolvedIso : null, settled_at: new Date(now * 1000).toISOString(), updated_at: new Date(now * 1000).toISOString() }).eq("signal_id", p.signal_id).eq("status", "OPEN");
       if (!error) { res.settled++; await db.from("paper_marks").upsert({ signal_id: p.signal_id, horizon: "resolution", observed_at: resolvedIso, price: r.finalPrice, pnl, return_pct: ret, source: r.source }, { onConflict: "signal_id,horizon", ignoreDuplicates: true }); }
     } else if (r.state === "unknown") {
       res.unresolved++;
@@ -196,7 +206,7 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
   }
   // Stamp every visited position so the next run moves on to the least-recently-checked ones.
   const ids = rows.map((r) => r.signal_id); const stamp = new Date(now * 1000).toISOString();
-  for (let i = 0; i < ids.length; i += 200) await db.from("paper_ledger").update({ mark_checked_at: stamp }).in("signal_id", ids.slice(i, i + 200));
+  await selectIn(ids, (c) => db.from("paper_ledger").update({ mark_checked_at: stamp }).in("signal_id", c as string[]));
   const head = issues.slice(0, MAX_ISSUES_PER_RUN);
   if (issues.length > MAX_ISSUES_PER_RUN) head.push({ kind: "mark_failed", ref_type: "worker", ref_id: `run:${now}`, detail: { summary: true, total_issues: issues.length, by_kind: issues.reduce<Record<string, number>>((a, i) => { a[i.kind] = (a[i.kind] ?? 0) + 1; return a; }, {}) } });
   await logIssues(db, head);

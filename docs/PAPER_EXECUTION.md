@@ -43,13 +43,6 @@ These parameters were set before looking at any simulated result and are frozen 
 dashboard). Change them only with a written reason unrelated to P&L, and keep the old hash's results for comparison.
 
 ## Coverage states (Phase 2.5)
-Every signal has one record per mode. `coverage_state`: **SIMULATED** (filled or partially filled), **PENDING_DATA**
-(price not fetched yet — not a result), **UNAVAILABLE_DATA** (no usable trade existed at the fill time, or the fetch
-failed permanently — not a trading failure), **INVALID**, **UNFILLED** (includes EXPIRED). REJECTED exists only in the
-Phase 3 portfolio. Coverage % = records whose outcome is determined ÷ all records. Latency is labelled OBSERVED or
-ESTIMATED per record. Reports are computed by Postgres (`paper_exec_report`, `data_quality_report`).
-
-## Coverage states (Phase 2.5)
 Every signal has one record per mode. Only **SIMULATED** rows carry P&L.
 
 | Coverage | Meaning | In P&L? |
@@ -61,7 +54,8 @@ Every signal has one record per mode. Only **SIMULATED** rows carry P&L.
 | UNFILLED | liquidity cap, ≥ $1 ask, no bid, expired | no — a trading outcome |
 | REJECTED | portfolio limits (Phase 3) | — |
 
-Coverage % = (all − pending − unavailable) ÷ all. Fill rate is shown both over decided rows and over all rows.
+Coverage % = (all − pending − unavailable) ÷ all. Fill rate is shown both over decided rows and over all rows. Latency is
+labelled OBSERVED or ESTIMATED per record. Reports are computed by Postgres (`paper_exec_report`, `data_quality_report`).
 
 ## Memory model (Phase 2.5)
 The worker never loads history. The simulation sweeps non-final signals in keyset batches of **500**: large enough to

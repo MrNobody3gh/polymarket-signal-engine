@@ -63,6 +63,15 @@ export function monthsUp(curve: Curve[], now: number, days = 90): { up: number; 
   return { up, total: months.length };
 }
 
+/** Lifetime fill count. The current API nests it in `all_time_pnl`; the older shape had it at the top level. null = not provided. */
+export function statTradeCount(stats: UserStats | null): number | null {
+  const v = Number(stats?.all_time_pnl?.trade_count ?? stats?.trade_count); return Number.isFinite(v) && v >= 0 ? v : null;
+}
+/** Lifetime traded notional in USDC (NOT the share-denominated `volume`). Same nesting as `statTradeCount`. null = not provided. */
+export function statVolumeUsd(stats: UserStats | null): number | null {
+  const v = Number(stats?.all_time_pnl?.volume_usdc ?? stats?.volume_usdc); return Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 export function programShare(stats: UserStats | null): number | null {
   const a = stats?.all_time_pnl; if (!a) return null;
   const prog = (a.maker_rebate ?? 0) + (a.taker_rebate ?? 0) + (a.reward_income ?? 0) + (a.referral_income ?? 0) + (a.yield_income ?? 0);
@@ -122,11 +131,11 @@ export function buildProfile(address: string, name: string | null, stats: UserSt
   const a = stats?.all_time_pnl ?? null;
   const realized = (a?.realized_market_pnl ?? 0) + (a?.realized_combo_pnl ?? 0);
   const curveDays = curve.length ? Math.max(1, Math.round((curve[curve.length - 1].ts - curve[0].ts) / DAY) + 1) : 0;
-  const tradeCount = stats?.trade_count ?? null;
+  const tradeCount = statTradeCount(stats);
   const measured = activity && activity.status !== "INSUFFICIENT_DATA" && activity.fillsPerDay != null;
   // Measured activity wins. An explicit INSUFFICIENT_DATA stays unknown (null) — never replaced by a weaker proxy or by 0.
   const fillsPerDay = measured ? activity!.fillsPerDay : activity == null && tradeCount != null && curveDays > 0 ? tradeCount / curveDays : null;
-  const volume = stats?.volume_usdc ?? 0;
+  const volume = statVolumeUsd(stats) ?? 0;
   const edgePerDollar = volume > 0 ? realized / volume : null;
   const lastMove = [...curve].reverse().find((p, idx, arr) => idx < arr.length - 1 && p.pnl !== arr[idx + 1].pnl);
   const daysIdle = curve.length ? Math.max(0, Math.round((now - (lastMove?.ts ?? curve[0].ts)) / DAY)) : null;

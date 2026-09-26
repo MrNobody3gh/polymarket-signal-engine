@@ -16,6 +16,7 @@ import { PolymarketClient } from "../../polymarket/client";
 import { MODES, configHash, type ExecConfig, type ModeName } from "./config";
 import { lifecycle, simulateEntry, timeline, type EntryInput, type ExitInput, type MarketCfg, type PriceObs } from "./execute";
 import type { SimRow } from "./report";
+import { IN_CHUNK, selectIn } from "../../chunk";
 
 /** 500: large enough that per-batch round trips (≈8 queries) are amortised, small enough that a batch's inputs
  *  (≤500 signals, their exits/marks/markets/observations) stay well under ~10 MB. */
@@ -148,9 +149,7 @@ export function recordHash(r: Record<string, unknown>): string {
   const s = JSON.stringify(r, Object.keys(r).sort()); let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(16);
 }
 
-/** PostgREST puts `in.(…)` lists in the URL. 500 uuids ≈ 19 KB and 300 token ids ≈ 23 KB — past common URL limits.
- *  Every IN list is therefore split into chunks of IN_CHUNK values (≈ 4–8 KB), and every chunk's error is surfaced. */
-export const IN_CHUNK = 100;
+export { IN_CHUNK, selectIn }; // shared with the marker and dashboard queries (src/lib/chunk.ts)
 /** Rows for exact (token, as_of) pairs, fetched in chunks of IN_CHUNK pairs (both columns filtered in the database). */
 export async function selectPairs<T = Record<string, any>>(pairs: { tokenId: string; asOf: number }[], run: (tokens: string[], asOfs: number[]) => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
   const wanted = new Set(pairs.map((p) => `${p.tokenId}@${p.asOf}`)); const sorted = [...pairs].sort((a, b) => a.tokenId.localeCompare(b.tokenId) || a.asOf - b.asOf); const out: T[] = [];
@@ -159,15 +158,6 @@ export async function selectPairs<T = Record<string, any>>(pairs: { tokenId: str
     const { data, error } = await run([...new Set(chunk.map((p) => p.tokenId))], [...new Set(chunk.map((p) => p.asOf))]);
     if (error) throw new Error(`query failed: ${(error as { message?: string }).message ?? String(error)}`);
     for (const r of (data ?? []) as any[]) if (wanted.has(`${r.token_id}@${Number(r.as_of)}`)) out.push(r as T);
-  }
-  return out;
-}
-export async function selectIn<T = Record<string, any>>(values: unknown[], run: (chunk: unknown[]) => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
-  const out: T[] = [];
-  for (let i = 0; i < values.length; i += IN_CHUNK) {
-    const { data, error } = await run(values.slice(i, i + IN_CHUNK));
-    if (error) throw new Error(`query failed: ${(error as { message?: string }).message ?? String(error)}`);
-    out.push(...((data ?? []) as T[]));
   }
   return out;
 }

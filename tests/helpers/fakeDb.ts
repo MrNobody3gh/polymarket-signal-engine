@@ -14,7 +14,7 @@ export function fakeDb() {
     const b: any = {
       select(_c?: string, o?: any) { if (op === "select") { if (o?.head) head = true; } else returning = true; return b; },
       eq: (k: string, v: any) => (filters.push((r) => r[k] === v), b), neq: (k: string, v: any) => (filters.push((r) => r[k] !== v), b),
-      gt: (k: string, v: any) => (filters.push((r) => r[k] > v), b), gte: (k: string, v: any) => (filters.push((r) => r[k] >= v), b), lt: (k: string, v: any) => (filters.push((r) => r[k] < v), b),
+      gt: (k: string, v: any) => (filters.push((r) => r[k] > v), b), gte: (k: string, v: any) => (filters.push((r) => r[k] >= v), b), lt: (k: string, v: any) => (filters.push((r) => r[k] < v), b), lte: (k: string, v: any) => (filters.push((r) => r[k] <= v), b),
       is: (k: string, v: any) => (filters.push((r) => (r[k] ?? null) === v), b), in: (k: string, vs: any[]) => (filters.push((r) => vs.includes(r[k])), b),
       like: (k: string, p: string) => (filters.push((r) => String(r[k]).startsWith(p.replace(/%$/, ""))), b),
       order: () => b, limit: (n: number) => ((lim = n), b), maybeSingle: () => ((single = true), b),

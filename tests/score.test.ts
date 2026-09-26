@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { windowPnl, maxDrawdown, monthsUp, copyScore, classifyStyle, buildProfile, programShare, concentration, DAY } from "@/lib/scoring/score";
+import { windowPnl, maxDrawdown, monthsUp, copyScore, classifyStyle, buildProfile, programShare, concentration, statTradeCount, statVolumeUsd, DAY } from "@/lib/scoring/score";
 
 const NOW = 1_789_658_160; // 2026-09-17
 const curve = (vals: number[], endTs = NOW) => vals.map((pnl, i) => ({ ts: endTs - (vals.length - 1 - i) * DAY, pnl }));
@@ -56,5 +56,35 @@ describe("programShare / concentration / buildProfile", () => {
     const pts = Array.from({ length: 200 }, (_, i) => ({ timestamp: NOW - (199 - i) * DAY, position_pnl: i * 1000 }));
     const p = buildProfile("0xABC", "test", stats, pts, NOW, ["lb:overall:month"]);
     expect(p.address).toBe("0xabc"); expect(p.pnl90d).toBe(90_000); expect(p.monthsTotal).toBeGreaterThanOrEqual(3); expect(p.fillsPerDay).toBeCloseTo(15); expect(p.copyScore).toBeGreaterThan(50); expect(p.style).toBe("Selective directional"); expect(p.daysIdle).toBe(0);
+  });
+});
+
+// Captured from GET /v2/user-stats on 2026-09-26 (crckr). The fill count and USD volume are nested in all_time_pnl; the top
+// level carries only `trades` (distinct markets). Reading the top level silently cost every wallet 20 points.
+const LIVE_STATS = { proxy_wallet: "0x2b3d1e9bdf941d435dc91a8b974b86f7064c8db7", trades: 5443, biggest_win: 3418.350714, views: 907, join_date: 1722406784,
+  all_time_pnl: { realized_market_pnl: 45848.737706, realized_lp_pnl: 0, realized_combo_pnl: 139.289063, unrealized_pnl: 260640.932301, maker_rebate: 249.6391, taker_rebate: 318.631,
+    reward_income: 11548.64454, yield_income: 1.0669, referral_income: 0, position_pnl: 306628.95907, volume: 6870783.31732, volume_usdc: 650107.67891, trade_count: 29257 } };
+
+describe("user-stats shape (current API nests trade_count / volume_usdc)", () => {
+  const pts = Array.from({ length: 200 }, (_, i) => ({ timestamp: NOW - (199 - i) * DAY, position_pnl: i * 1000 + (i % 3) * 50 }));
+  const measured = { status: "OK" as const, fillsPerDay: 36 };
+  it("reads the nested fields, falls back to the old top-level shape, and never invents a value", () => {
+    expect(statTradeCount(LIVE_STATS)).toBe(29257); expect(statVolumeUsd(LIVE_STATS)).toBeCloseTo(650107.68, 1);
+    expect(statTradeCount({ proxy_wallet: "0x", trades: 1, biggest_win: 0, trade_count: 12, volume_usdc: 99 })).toBe(12);
+    expect(statVolumeUsd({ proxy_wallet: "0x", trades: 1, biggest_win: 0, trade_count: 12, volume_usdc: 99 })).toBe(99);
+    expect(statTradeCount({ proxy_wallet: "0x", trades: 1, biggest_win: 0, all_time_pnl: {} })).toBeNull(); expect(statVolumeUsd(null)).toBeNull();
+  });
+  it("a live-shaped wallet is rankable and earns the copyable-edge bonus — the same score as the flat shape", () => {
+    const flat = { ...LIVE_STATS, trade_count: 29257, volume_usdc: 650107.67891, all_time_pnl: { ...LIVE_STATS.all_time_pnl, trade_count: undefined, volume_usdc: undefined } };
+    const live = buildProfile(LIVE_STATS.proxy_wallet, "crckr", LIVE_STATS, pts, NOW, [], measured);
+    expect(live.tradeCount).toBe(29257);
+    expect(live.copyScore).toBe(buildProfile(LIVE_STATS.proxy_wallet, "crckr", flat, pts, NOW, [], measured).copyScore);
+    // Remove the two fields entirely: −10 (unrankable) and no +10 edge bonus. This is exactly the gap the bug opened.
+    const blind = { ...LIVE_STATS, all_time_pnl: { ...LIVE_STATS.all_time_pnl, trade_count: undefined, volume_usdc: undefined } };
+    expect(live.copyScore - buildProfile(LIVE_STATS.proxy_wallet, "crckr", blind, pts, NOW, [], measured).copyScore).toBeCloseTo(20, 5);
+  });
+  it("an unmeasured (newly discovered) wallet gets a fills/day estimate from the nested lifetime count again", () => {
+    const p = buildProfile(LIVE_STATS.proxy_wallet, "crckr", LIVE_STATS, pts, NOW, [], null);
+    expect(p.fillsPerDay).toBeCloseTo(29257 / 200, 5);
   });
 });

@@ -72,6 +72,20 @@ export async function refresh(db: SupabaseClient, client = new PolymarketClient(
   return { scored: profiles.length, tracked: track.size };
 }
 
+/** Daily re-score slot: 04:15 UTC (the time the Vercel cron used). */
+export const REFRESH_SLOT_UTC = { hour: 4, minute: 15 };
+/** After a failed run, wait this long before trying again (the job makes ~4,000 API calls). */
+export const REFRESH_RETRY_SEC = 2 * 3600;
+/** Pure: should the worker start a re-score now? Due when the last successful run predates the most recent 04:15 UTC slot
+ *  (or never ran), and no attempt was made within REFRESH_RETRY_SEC. A restart therefore never re-runs a finished day. */
+export function refreshDue(lastSuccessSec: number | null, nowSec: number, lastAttemptSec: number | null = null): boolean {
+  if (lastAttemptSec != null && nowSec - lastAttemptSec < REFRESH_RETRY_SEC) return false;
+  if (lastSuccessSec == null || !Number.isFinite(lastSuccessSec)) return true;
+  const d = new Date(nowSec * 1000); let slot = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), REFRESH_SLOT_UTC.hour, REFRESH_SLOT_UTC.minute) / 1000;
+  if (slot > nowSec) slot -= 86_400;
+  return lastSuccessSec < slot;
+}
+
 /** One-off bootstrap from config/watchlist.json (the published snapshot), so the
  *  engine is useful before the first full refresh has run. */
 export async function seedFromSnapshot(db: SupabaseClient, snapshot: { wallets: { wallet: string; name: string | null; copy_score: number; pnl_90d: number; style: string; fills_per_day: number | null; program_share: number | null; concentration: number | null; net_dd: number | null; months_up: number; months_total: number }[] }) {

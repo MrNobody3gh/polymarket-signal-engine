@@ -1,6 +1,6 @@
 # Going live — step by step
 
-Total time: about 45 minutes. You need a laptop with Node 20+ and Git, and the
+Total time: about 45 minutes. You need a laptop with Node 22+ and Git, and the
 unzipped project open in Cursor (or a terminal in the project folder).
 
 Cost: Supabase free, Vercel free (Hobby), Railway ~$5/month, Telegram free.
@@ -19,7 +19,7 @@ Cost: Supabase free, Vercel free (Hobby), Railway ~$5/month, Telegram free.
 1. Go to supabase.com → **New project**. Name it `polymarket-signals`, choose a strong DB password (save it), region **London**. Wait ~2 minutes for it to provision.
 2. Left sidebar → **SQL Editor** → **New query**.
 3. Open `supabase/migrations/0001_init.sql` in Cursor, copy **all** of it, paste into the editor, click **Run**. You should see "Success".
-4. New query again → paste **all** of `supabase/migrations/0002_telegram.sql` → **Run**.
+4. Repeat for **every other file** in `supabase/migrations/`, in order: `0002_telegram.sql`, `0003_v2_paper.sql`, `0004_retention.sql`, `0005_signal_correctness.sql`, `0006_execution_sim.sql`, `0007_stabilise.sql`. Each should say "Success". Skipping any of them breaks the worker (missing tables, columns and database functions).
 5. Left sidebar → **Project Settings** → **API**. Copy two things:
    - **Project URL** (`https://xxxx.supabase.co`) → `NEXT_PUBLIC_SUPABASE_URL`
    - **service_role** key (click Reveal; it's the long secret one, *not* anon) → `SUPABASE_SERVICE_ROLE_KEY`
@@ -44,7 +44,7 @@ In the terminal, in the project folder:
 
 ```bash
 npm install
-npm test                      # expect: 54 passed
+npm test                      # expect: all passed (the 5 real-Postgres tests are skipped without PG_TEST_URL)
 npm run refresh -- --seed     # loads the 180-wallet watchlist → "seeded 180"
 npm run dev                   # open http://localhost:3000/wallets — 180 wallets listed
 ```
@@ -85,7 +85,7 @@ On github.com → **New repository** → name `polymarket-signal-engine`, **Priv
 4. Check it: open `https://<your-url>/wallets` — the same 180 wallets.
 5. Check the poller works from Vercel: open `https://<your-url>/api/cron/poll-trades?secret=<your CRON_SECRET>` — you should see `{"ok":true,"wallets":180,…}`.
 
-**About Vercel crons:** the free Hobby plan only allows crons to run once a day, and caps functions at 60 seconds. That's fine — the daily re-score cron will run, and the every-minute poll is also done by the Railway worker (Step 7), so you don't need Vercel Pro. If you later upgrade to Pro, the minute cron in `vercel.json` starts working automatically as a second backstop.
+**About Vercel crons:** there are none. The Hobby plan caps functions at 60 seconds, and the daily re-score takes about 5 minutes and saves only at the end — as a Vercel cron it would be killed every day without saving anything. Every scheduled job (the minute poll, the 04:15 UTC re-score, paper marking, the simulation) runs in the Railway worker (Step 7), so you don't need Vercel Pro. The `/api/cron/*` routes stay as manual entry points.
 
 ## Step 7 — Run the worker on Railway (7 min)
 
@@ -122,7 +122,7 @@ The seed is the 17 Sep snapshot. To re-score every wallet from the live API with
 ```bash
 npm run refresh
 ```
-Runs ~4,000 API calls, takes about 5 minutes, prints `scored 1400, tracking 180`. After this, the 04:15 UTC Vercel cron repeats it every day. (Don't trigger the refresh through the Vercel URL on the Hobby plan — 60-second limit; run it locally or add a second Railway service with start command `npm run refresh` and a daily cron schedule.)
+Runs ~4,000 API calls, takes about 5 minutes, prints `scored 1400, tracking 180`. You usually don't need to: the Railway worker runs this automatically on its first start and then every day at 04:15 UTC (look for `[rescore]` lines in its logs). Don't trigger the refresh through the Vercel URL on the Hobby plan — it will hit the 60-second limit.
 
 ## Step 10 — Optional extras
 
@@ -138,13 +138,13 @@ Runs ~4,000 API calls, takes about 5 minutes, prints `scored 1400, tracking 180`
 - [ ] `https://<vercel-url>/board` shows fills from the last few minutes
 - [ ] Railway logs show `connected to wss://…`
 - [ ] Bot answers `/status` with your laptop closed
-- [ ] Vercel → Project → **Cron Jobs** shows `refresh-wallets` scheduled
+- [ ] Railway logs show `[rescore] scored …, tracking …` (first start, then daily after 04:15 UTC)
 
 ## If something's wrong
 
 | Symptom | Fix |
 |---|---|
-| `npm test` fails | Node version — run `node -v`, needs 20+. |
+| `npm test` fails | Node version — run `node -v`, needs 22+. |
 | `/wallets` empty | Step 4 seed didn't run, or env vars missing on Vercel. Re-run `npm run refresh -- --seed`. |
 | Bot doesn't reply | Run `npm run tg:setup -- <url>` again and check `ok: true`. Make sure `TELEGRAM_WEBHOOK_SECRET` on Vercel matches `.env.local`. |
 | No alerts for hours | Normal-ish: rules only fire on $2k+ new positions by score ≥ 40 wallets. Send `/severity 1` and `/min 500` to loosen. Check Railway logs are still scrolling. |

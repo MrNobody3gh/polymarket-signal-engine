@@ -89,10 +89,14 @@ export interface Signal {
 export type RawFill = Record<string, unknown>;
 
 export interface UserPnlPoint { timestamp: number; position_pnl?: number; realized_pnl?: number; [k: string]: unknown }
+/** `/v2/user-stats`. `trades` at the top level is DISTINCT MARKETS, not fills. The fill count (`trade_count`) and USD volume
+ *  (`volume_usdc`) live inside `all_time_pnl` in the current API; the top-level copies are the older shape. Read both via
+ *  `statTradeCount` / `statVolumeUsd` (scoring/score.ts), never directly. */
 export interface UserStats {
   proxy_wallet: string; trades: number; biggest_win: number; volume_usdc?: number; trade_count?: number; join_date?: number | null;
   all_time_pnl?: { position_pnl?: number; realized_market_pnl?: number; realized_combo_pnl?: number; realized_lp_pnl?: number;
-    maker_rebate?: number; taker_rebate?: number; reward_income?: number; referral_income?: number; yield_income?: number; fees_paid?: number; unrealized_pnl?: number; [k: string]: unknown } | null;
+    maker_rebate?: number; taker_rebate?: number; reward_income?: number; referral_income?: number; yield_income?: number; fees_paid?: number; unrealized_pnl?: number;
+    trade_count?: number; volume_usdc?: number; [k: string]: unknown } | null;
   [k: string]: unknown;
 }
 export interface LeaderboardRow { rank: number; user_id: string; pnl: number; volume: number; user_name: string; [k: string]: unknown }

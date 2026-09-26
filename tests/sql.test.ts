@@ -9,6 +9,7 @@ import { MODES } from "@/lib/paper/sim/config";
 import { simulateMode, buildSignals, recordHash, type SimInputs } from "@/lib/paper/sim/run";
 import { execReport } from "@/lib/paper/sim/report";
 import { computeStats, byKind, type PaperRowLite, type MarkLite } from "@/lib/paper/analytics";
+import { uuidPrefixRange } from "@/lib/paper/queries";
 
 const URL = process.env.PG_TEST_URL; const d = URL ? describe : describe.skip;
 let c: pg.Client; let c2: pg.Client;
@@ -20,6 +21,17 @@ d("SQL (real Postgres)", () => {
   beforeAll(async () => { c = new pg.Client({ connectionString: URL }); c2 = new pg.Client({ connectionString: URL }); await c.connect(); await c2.connect();
     await c.query("truncate paper_executions, paper_marks, paper_ledger, price_observations, signals cascade"); });
   afterAll(async () => { await c?.end(); await c2?.end(); });
+
+  it("/signal prefix lookup: ILIKE on uuid is an error; the uuid range returns exactly the text-prefix matches", async () => {
+    await expect(c.query("select 1 from paper_ledger where signal_id::uuid ilike 'ab%'")).rejects.toThrow(/operator does not exist/);
+    await c.query("create temp table u (id uuid primary key)"); await c.query("insert into u select gen_random_uuid() from generate_series(1, 3000)");
+    const ids = (await c.query("select id::text from u")).rows.map((r) => r.id as string);
+    for (const len of [1, 2, 3, 8, 11, 13]) for (const id of ids.slice(0, 40)) {
+      const prefix = id.slice(0, len); const r = uuidPrefixRange(prefix)!;
+      const got = (await c.query("select id::text from u where id between $1 and $2 order by id", [r.lo, r.hi])).rows.map((x) => x.id);
+      expect(got).toEqual(ids.filter((x) => x.startsWith(prefix)).sort());
+    }
+  });
 
   it("claim_price_backlog: claims pending, never double-claims concurrently, reclaims abandoned work, honours back-off", async () => {
     for (let i = 0; i < 50; i++) await c.query("insert into price_observations (token_id, as_of) values ($1, $2)", [`t${i}`, T0 + i]);
