@@ -10,6 +10,8 @@ import { simulateMode, buildSignals, recordHash, type SimInputs } from "@/lib/pa
 import { execReport } from "@/lib/paper/sim/report";
 import { computeStats, byKind, type PaperRowLite, type MarkLite } from "@/lib/paper/analytics";
 import { uuidPrefixRange } from "@/lib/paper/queries";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 const URL = process.env.PG_TEST_URL; const d = URL ? describe : describe.skip;
 let c: pg.Client; let c2: pg.Client;
@@ -90,5 +92,118 @@ d("SQL (real Postgres)", () => {
     const dq = (await c.query("select data_quality_report() r")).rows[0].r;
     expect(dq.signals).toBe(400); expect(dq.simulation.REALISTIC.PENDING_DATA + dq.simulation.REALISTIC.SIMULATED + (dq.simulation.REALISTIC.UNAVAILABLE_DATA ?? 0) + (dq.simulation.REALISTIC.INVALID ?? 0) + (dq.simulation.REALISTIC.UNFILLED ?? 0)).toBe(400);
     expect(dq.prices).toHaveProperty("PROCESSING"); expect(dq.marks["1h"]).toBeGreaterThan(0); expect(dq).toHaveProperty("fees.signalMarketsWithoutMetadata");
+  });
+});
+
+// ───────────────────────── Phase 3.1: migration 0008 (portfolio schema) ─────────────────────────
+// Same file as the tests above on purpose: vitest runs files in parallel, and those tests truncate shared tables.
+d("SQL Phase 3.1 — migration 0008", () => {
+  let a: pg.Client; let b: pg.Client;
+  const MIG = readFileSync(path.resolve(__dirname, "../supabase/migrations/0008_portfolio.sql"), "utf8");
+  const P = "p31test0001"; let sigN = 0;
+  const sig = async (token = "tok-p31") => { const id = `31000000-0000-4000-8000-${String(++sigN).padStart(12, "0")}`;
+    await a.query("insert into signals (id, kind, severity, wallet, condition_id, token_id, dedupe_key, created_at) values ($1,'NEW_POSITION',2,'0xw','c-p31',$2,$3,now())", [id, token, `p31:${id}`]); return id; };
+  const decision = (id: string, o: Record<string, unknown> = {}) => { const r = { outcome: "FILLED", reason: null, requested_usd: 100, filled_usd: 100, filled_shares: 250, ...o };
+    return a.query("insert into portfolio_decisions (portfolio_id, signal_id, kind, source_key, event_ts, outcome, reason, requested_usd, filled_usd, filled_shares, input_hash, record_hash) values ($1,$2,'NEW_POSITION','k',now(),$3,$4,$5,$6,$7,'i','r')",
+      [P, id, r.outcome, r.reason, r.requested_usd, r.filled_usd, r.filled_shares]); };
+  const lot = (id: string, o: Record<string, unknown> = {}) => { const r = { state: "OPEN", shares_open: 250, closed_ts: null, ...o };
+    return a.query("insert into portfolio_lots (portfolio_id, signal_id, wallet, token_id, condition_id, opened_ts, shares_filled, cost_usd, shares_open, cost_open, state, closed_ts, record_hash) values ($1,$2,'0xw','tok-p31','c-p31',now(),250,100,$3,100,$4,$5,'r')",
+      [P, id, r.shares_open, r.state, r.closed_ts]); };
+  beforeAll(async () => {
+    a = new pg.Client({ connectionString: URL }); b = new pg.Client({ connectionString: URL }); await a.connect(); await b.connect();
+    await a.query(MIG); await a.query(MIG); // applies cleanly, and a second run is a no-op (idempotent)
+    await a.query("delete from portfolios where id like 'p31test%'"); await a.query("delete from signals where dedupe_key like 'p31:%'"); await a.query("delete from token_resolution_obs where token_id like 'tok-p31%'");
+    await a.query("insert into portfolios (id, mode, exec_config_hash, config, config_hash, start_ts) values ($1,'REALISTIC','e1','{}','c1','2026-09-27T04:26:41Z')", [P]);
+  });
+  afterAll(async () => { await a?.query("delete from portfolios where id like 'p31test%'"); await a?.query("delete from signals where dedupe_key like 'p31:%'"); await a?.query("delete from token_resolution_obs where token_id like 'tok-p31%'"); await a?.end(); await b?.end(); });
+
+  it("creates every table, index and function, with RLS on and public read only where intended", async () => {
+    const tables = (await a.query("select tablename, rowsecurity from pg_tables where schemaname='public' and tablename in ('portfolios','portfolio_runs','portfolio_checkpoints','portfolio_decisions','portfolio_lots','portfolio_equity','token_resolution_obs')")).rows;
+    expect(tables).toHaveLength(7); expect(tables.every((t) => t.rowsecurity)).toBe(true);
+    const idx = (await a.query("select indexname from pg_indexes where indexname in ('paper_executions_mode_fill_idx','paper_executions_mode_computed_idx','portfolio_decisions_event_idx','portfolio_lots_open_idx')")).rows;
+    expect(idx).toHaveLength(4);
+    const pol = (await a.query("select tablename from pg_policies where tablename like 'portfolio%' or tablename = 'token_resolution_obs' order by 1")).rows.map((r) => r.tablename);
+    expect(pol).toEqual(["portfolio_decisions", "portfolio_equity", "portfolio_lots", "portfolios", "token_resolution_obs"]); // no policy on runs / checkpoints
+    for (const fn of ["claim_portfolio_lease(text,text,integer)", "release_portfolio_lease(text,text)"]) {
+      expect((await a.query("select has_function_privilege('anon', $1, 'execute') x", [fn])).rows[0].x).toBe(false);
+      expect((await a.query("select has_function_privilege('service_role', $1, 'execute') x", [fn])).rows[0].x).toBe(true);
+    }
+  });
+
+  it("the stream query walks paper_executions by (mode, fill_ts, signal_id) through the new index", async () => {
+    // Tiny test tables make a sort look cheap; forbid seq scans and sorts so the plan shows whether an index can serve the ordered walk.
+    await a.query("set enable_seqscan = off"); await a.query("set enable_sort = off");
+    const plan = (await a.query("explain select signal_id from paper_executions where mode = 'REALISTIC' and (fill_ts, signal_id) > ('2026-09-27T00:00:00Z', '00000000-0000-0000-0000-000000000000') order by fill_ts, signal_id limit 500")).rows.map((r) => r["QUERY PLAN"]).join("\n");
+    await a.query("reset enable_seqscan"); await a.query("reset enable_sort");
+    expect(plan).toMatch(/paper_executions_mode_fill_idx/); expect(plan).not.toMatch(/Sort/);
+  });
+
+  it("lease: exactly one of many concurrent claimants wins; renew, expiry, release and bad input behave", async () => {
+    const clients = await Promise.all(Array.from({ length: 8 }, async () => { const x = new pg.Client({ connectionString: URL }); await x.connect(); return x; }));
+    try {
+      const wins = await Promise.all(clients.map((x, i) => x.query("select claim_portfolio_lease($1, $2, 60) ok", [P, `owner-${i}`]).then((r) => r.rows[0].ok)));
+      expect(wins.filter(Boolean)).toHaveLength(1);
+      const owner = `owner-${wins.indexOf(true)}`; const other = owner === "owner-0" ? "owner-1" : "owner-0";
+      expect((await a.query("select claim_portfolio_lease($1, $2, 60) ok", [P, owner])).rows[0].ok).toBe(true);   // renew
+      expect((await a.query("select claim_portfolio_lease($1, $2, 60) ok", [P, other])).rows[0].ok).toBe(false);  // still held
+      expect((await a.query("select release_portfolio_lease($1, $2) ok", [P, other])).rows[0].ok).toBe(false);    // not yours
+      await a.query("update portfolio_runs set lease_until = now() - interval '1 second' where portfolio_id = $1", [P]);
+      expect((await a.query("select claim_portfolio_lease($1, $2, 60) ok", [P, other])).rows[0].ok).toBe(true);   // expired → takeover
+      expect((await a.query("select release_portfolio_lease($1, $2) ok", [P, other])).rows[0].ok).toBe(true);
+      expect((await a.query("select lease_owner, lease_until from portfolio_runs where portfolio_id = $1", [P])).rows[0]).toEqual({ lease_owner: null, lease_until: null });
+      await expect(a.query("select claim_portfolio_lease($1, 'x', 0)", [P])).rejects.toThrow(/1\.\.3600/);
+      await expect(a.query("select claim_portfolio_lease($1, '', 60)", [P])).rejects.toThrow(/owner required/);
+      await expect(a.query("select claim_portfolio_lease('p31test-missing', 'x', 60)")).rejects.toThrow(/foreign key/);
+    } finally { await Promise.all(clients.map((x) => x.end())); }
+  });
+
+  it("token_resolutions: unchanged for ledger tokens, gains orphan tokens, earliest wins deterministically, conflicts surfaced", async () => {
+    const cols = (await a.query("select column_name, data_type from information_schema.columns where table_name = 'token_resolutions' order by ordinal_position")).rows;
+    expect(cols).toEqual([{ column_name: "token_id", data_type: "text" }, { column_name: "value", data_type: "numeric" }, { column_name: "resolved_ts", data_type: "timestamp with time zone" }]);
+    const ledger = async (token: string, value: number, at: string) => { const id = await sig(token);
+      await a.query("insert into paper_ledger (signal_id, entry_price, token_id, status, final_price, resolved_at, settled_at) values ($1, 0.4, $2, $3, $4, $5, now())", [id, token, value >= 0.5 ? "RESOLVED_WIN" : "RESOLVED_LOSS", value, at]); };
+    const obs = (token: string, value: number, at: string) => a.query("insert into token_resolution_obs (token_id, condition_id, value, resolved_ts, source) values ($1,'c-p31',$2,$3,'test')", [token, value, at]);
+    const row = async (token: string) => (await a.query("select value::float8 v, resolved_ts from token_resolutions where token_id = $1", [token])).rows;
+    await ledger("tok-p31-ledger", 1, "2026-09-27T10:00:00Z");
+    expect(await row("tok-p31-ledger")).toEqual([{ v: 1, resolved_ts: new Date("2026-09-27T10:00:00Z") }]);        // as before 0008
+    await obs("tok-p31-orphan", 0, "2026-09-27T11:00:00Z");
+    expect(await row("tok-p31-orphan")).toEqual([{ v: 0, resolved_ts: new Date("2026-09-27T11:00:00Z") }]);        // new: orphan token
+    await ledger("tok-p31-both", 1, "2026-09-27T12:00:00Z"); await obs("tok-p31-both", 1, "2026-09-27T09:00:00Z");
+    expect(await row("tok-p31-both")).toEqual([{ v: 1, resolved_ts: new Date("2026-09-27T09:00:00Z") }]);          // earliest wins
+    await ledger("tok-p31-tie", 1, "2026-09-27T12:00:00Z"); await obs("tok-p31-tie", 0, "2026-09-27T12:00:00Z");
+    expect((await row("tok-p31-tie"))[0].v).toBe(0);                                                                 // tie → lower value, every time
+    const conflicts = (await a.query("select token_id, values::float8[] vs from token_resolution_conflicts where token_id like 'tok-p31%' order by 1")).rows;
+    expect(conflicts).toEqual([{ token_id: "tok-p31-tie", vs: [0, 1] }]);
+    await expect(obs("tok-p31-bad", 1.5, "2026-09-27T12:00:00Z")).rejects.toThrow(/check constraint/);
+  });
+
+  it("decision and lot constraints reject impossible rows", async () => {
+    const reject = (q: Promise<unknown>, re: RegExp) => expect(q).rejects.toThrow(re);
+    await reject(decision(await sig(), { outcome: "MAYBE" }), /check constraint/);
+    await reject(decision(await sig(), { outcome: "REJECTED", reason: "too big", filled_usd: 0, filled_shares: 0 }), /rejected_reason/);
+    await reject(decision(await sig(), { filled_usd: 150 }), /filled_le_requested/);
+    await reject(decision(await sig(), { filled_shares: 0 }), /fill_needs_shares/);
+    const ok = await sig(); await decision(ok, { outcome: "REJECTED", reason: "REJECTED_MAX_OPEN_POSITIONS", filled_usd: 0, filled_shares: 0 });
+    const f = await sig(); await decision(f);
+    await reject(lot(f, { state: "EXITED", shares_open: 0, closed_ts: null }), /closed_consistent/);
+    await reject(lot(f, { state: "RESOLVED", shares_open: 10, closed_ts: "2026-09-28T00:00:00Z" }), /closed_empty/);
+    await reject(lot(f, { shares_open: 300 }), /open_le_filled/);
+    await reject(lot(await sig()), /foreign key/);                                                                   // a lot needs its decision
+    await lot(f);
+    await reject(a.query("insert into portfolios (id, mode, exec_config_hash, config, config_hash, start_ts) values ('p31test0002','LIVE','e','{}','c',now())"), /check constraint/);
+  });
+
+  it("deleting a portfolio removes everything it owns, and nothing else", async () => {
+    const Q = "p31test0003"; await a.query("insert into portfolios (id, mode, exec_config_hash, config, config_hash, start_ts) values ($1,'IDEAL','e','{}','c',now())", [Q]);
+    const id = await sig();
+    await a.query("insert into portfolio_decisions (portfolio_id, signal_id, kind, source_key, event_ts, outcome, requested_usd, filled_usd, filled_shares, input_hash, record_hash) values ($1,$2,'NEW_POSITION','k',now(),'FILLED',100,100,250,'i','r')", [Q, id]);
+    await a.query("insert into portfolio_lots (portfolio_id, signal_id, wallet, token_id, condition_id, opened_ts, shares_filled, cost_usd, shares_open, cost_open, state, record_hash) values ($1,$2,'0xw','t','c',now(),250,100,250,100,'OPEN','r')", [Q, id]);
+    await a.query("insert into portfolio_equity (portfolio_id, ts, seq, cash, exposure, equity) values ($1, now(), 0, 900, 100, 1000)", [Q]);
+    await a.query("insert into portfolio_checkpoints (portfolio_id, event_ts, event_key, state) values ($1, now(), '2|x|0', '{}')", [Q]);
+    await a.query("select claim_portfolio_lease($1, 'o', 60)", [Q]);
+    await a.query("delete from portfolios where id = $1", [Q]);
+    for (const t of ["portfolio_decisions", "portfolio_lots", "portfolio_equity", "portfolio_checkpoints", "portfolio_runs"]) expect((await a.query(`select count(*)::int n from ${t} where portfolio_id = $1`, [Q])).rows[0].n).toBe(0);
+    expect((await a.query("select count(*)::int n from signals where id = $1", [id])).rows[0].n).toBe(1);           // signals untouched
+    expect((await a.query("select count(*)::int n from portfolios where id = $1", [P])).rows[0].n).toBe(1);         // other portfolios untouched
   });
 });

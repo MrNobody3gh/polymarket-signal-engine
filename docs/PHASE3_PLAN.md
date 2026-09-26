@@ -1,6 +1,6 @@
 # Phase 3 — portfolio / risk layer: audit and plan
 
-Status: **READY** (decisions D1–D4 approved 2026-09-26; D4 revised after review the same day). Not implemented yet. Audited against `main` at `faecce7`.
+Status: **READY** (decisions D1–D4 approved 2026-09-26; D4 revised after review the same day; review 2 added B11 rehydration, the per-field rewind point and the D4 completion instant). Not implemented yet. Audited against `main` at `faecce7`.
 
 ## Measured on production (read-only, 2026-09-26)
 
@@ -26,7 +26,7 @@ Status: **READY** (decisions D1–D4 approved 2026-09-26; D4 revised after revie
 | D1 | CONVICTION_ADD / CONSENSUS on a held position | Separate lot per signal (existing tested rule). Limited by wallet, market and total caps; each lot closes on its own wallet's EXIT. Signals from the same fill share one lot, credited to the first kind in event order (NEW_POSITION before CONSENSUS) — so portfolio-level CONSENSUS attribution is understated; the duplicate is recorded as `REJECTED_DUPLICATE_POSITION` and reported per kind. |
 | D2 | When a resolution frees capital | On-chain `resolved_at`. Late discoveries rewind to a checkpoint and replay. |
 | D3 | Resolutions for tokens nobody watches | Approved: new `resolve-orphans.ts` + a union in the `token_resolutions` view; `mark.ts` untouched. Report the Phase 2 before/after. |
-| D4 | Portfolio start | **The first successful worker re-score on 27 Sep 2026** (scheduled 04:15 UTC; the exact instant is `cursors['refresh:last']` after that run). Earlier signals are excluded: 77% came from wallets now filtered as bots, and the watchlist changes at that re-score. No retroactive bot filter is applied to older history (that would use today's classification in the past). `start_ts` is part of `portfolio_id`. |
+| D4 | Portfolio start | **The first successful worker re-score on 27 Sep 2026** (scheduled 04:15 UTC; the exact instant is the **completion** of that run, `cursors['refresh:last'].updated_at`. Its `value` is the run's *start*: on 26 Sep that was 04:24:51 against a completion at 04:26:41, and the new watchlist only applies after completion). Earlier signals are excluded: 77% came from wallets now filtered as bots, and the watchlist changes at that re-score. No retroactive bot filter is applied to older history (that would use today's classification in the past). `start_ts` is part of `portfolio_id`. |
 | D5 | `PAPER_PORTFOLIO_CONFIG` values | Operator's choice, no defaults. Needed only to switch the feature on. |
 
 ## A. Current architecture
@@ -41,7 +41,7 @@ Status: **READY** (decisions D1–D4 approved 2026-09-26; D4 revised after revie
 A deterministic, streaming replay per `(mode, portfolio config)`, with checkpoints.
 
 1. **Source.** Stream `paper_executions` for one mode with `fill_ts >= start_ts`, in keyset order `(fill_ts, signal_id)`. No reorder buffer is needed: in REALISTIC and CONSERVATIVE a late signal's fill time is set after its detection, so it arrives at the frontier. (IDEAL is the exception — see B10.) Per 500-row batch, reuse `loadBatchInputs` + `buildSignals`, then **re-run `simulateEntry` / `simulateExit` at the portfolio's size** (stored P&L is at $100 and cap, impact, minimum order and fees depend on size). Fill times don't depend on size, so every needed price is already queued by the sweep. The portfolio decides entries and exits from these inputs itself, not from the stored record's status.
-2. **Restarts and change detection.** State is derived. The sweep rewrites a record whenever its latest mark or unrealised P&L changes, which does not affect any portfolio decision. So each run reads only rows with `computed_at` after the last run (bounded by recent activity), computes an **input hash over decision fields only** — entry status/fill inputs, linked exit, `exit_fill_ts`, resolution value and `resolution_ts`, coverage state; never `mark_*` or `unrealized_pnl` — and compares it with the `input_hash` stored on `portfolio_decisions`. The rewind point is the earliest event among rows whose input hash actually changed; the run loads the checkpoint at or before it and replays. `sim/run.ts` is not modified.
+2. **Restarts and change detection.** State is derived. The sweep rewrites a record whenever its latest mark or unrealised P&L changes, which does not affect any portfolio decision. So each run reads only rows with `computed_at` after the last run (bounded by recent activity), computes an **input hash over decision fields only** — entry status/fill inputs, linked exit, `exit_fill_ts`, resolution value and `resolution_ts`, coverage state; never `mark_*` or `unrealized_pnl` — and compares it with the `input_hash` stored on `portfolio_decisions`. The rewind point is the earliest *changed event* among rows whose input hash changed: entry inputs → `fill_ts`; exit → the earlier of the old and new `exit_fill_ts`; resolution → the earlier of the old and new `resolution_ts` (not the entry's `fill_ts`, which would rewind every lot to its opening). The run loads the checkpoint at or before that point, rehydrates it (B11) and replays. `sim/run.ts` is not modified.
 3. **Frontier (per event).** The frontier is the earliest event whose own inputs are missing: an entry whose entry price is not yet fetched, or an exit whose exit price is not yet fetched. A pending *exit* blocks only events after `exit_fill_ts`; it does not hold back entries in between. (The sweep marks a whole signal `PENDING_DATA` when either price is missing, so the stored coverage state alone is not used for this.) Nothing at or after the frontier is decided.
 4. **Memory.** Batch ≤ 500; open lots ≤ `maxOpenPositions`; heap holds only scheduled exits/resolutions.
 5. **Requests.** Each entry signal → `PortfolioRequest`. Duplicate key = `source_fill_id` when present, else the old `sourceKey`.
@@ -50,6 +50,7 @@ A deterministic, streaming replay per `(mode, portfolio config)`, with checkpoin
 8. **Idempotency.** `portfolio_id = hash(mode, execConfigHash, portfolioConfigHash, startTs)`; rows keyed `(portfolio_id, signal_id)`; record-hash diff writes; deterministic replay; DB lease against concurrent workers.
 9. **Ordering.** `(event_ts, KIND_ORDER, signal_id)`: RESOLUTION → EXIT → NEW_POSITION → EARLY_ENTRY → CONVICTION_ADD → CONSENSUS; insertion counter for events scheduled mid-replay.
 10. **IDEAL is not causal.** IDEAL fills at the source trade time, so its portfolio spends capital on signals before they could have been known (up to 171 h early), and a late-detected signal forces a rewind to its source time. The IDEAL portfolio is a baseline for comparison only, labelled as such; it is not a strategy that could have been run.
+11. **Checkpoint rehydration (review 2).** Two paths can otherwise hide an exit or resolution from a lot restored from a checkpoint: (a) a checkpoint only holds the exit/resolution events known when it was written, and B2 rewinds to the changed event, which is usually *after* the checkpoint; (b) the sweep marks a signal `sim_terminal` once its **$100** record is EXITED or RESOLVED and never recomputes it, but a portfolio lot of a different size can still hold shares (a larger order hits the exit liquidity cap where $100 did not), so its later resolution never shows as a changed row. Measured today at $100: 0 such rows; at larger portfolio sizes it is expected to be non-zero. Rule: after loading any checkpoint, every open lot in it (≤ `maxOpenPositions`) is re-linked to its current exit and resolution from source data, ignoring `sim_terminal`, and those events are scheduled. If any re-linked event is earlier than the checkpoint, the run falls back to the latest checkpoint before that event.
 
 ## C. Files to add
 
@@ -77,10 +78,10 @@ A deterministic, streaming replay per `(mode, portfolio config)`, with checkpoin
 - `portfolio_runs(portfolio_id pk, lease_until, last_run_started_at, last_watermark, stats)` + `claim_portfolio_lease()` (service role only)
 - `portfolio_checkpoints(pk portfolio_id, watermark_ts, watermark_key; state jsonb, built_at)`: hourly for 10 days, daily after
 - `portfolio_decisions(pk portfolio_id, signal_id; outcome, reason, requested/filled usd, fill price, fee, resized, source_key, event_ts, input_hash, record_hash)` — `input_hash` covers decision inputs only (B2)
-- `portfolio_lots(pk portfolio_id, signal_id; open shares/cost, exit and resolution details, state, realised P&L, closed_ts, record_hash)`
+- `portfolio_lots(pk portfolio_id, signal_id; wallet, token, condition, open shares/cost, `exit_signal_id` and exit details, resolution details, state, realised P&L, closed_ts, record_hash)` — `exit_signal_id` lets rehydration (B11) see when a lot's linked exit changes
 - `portfolio_equity(pk portfolio_id, ts, seq; cash, exposure, equity)`
 - Indexes on `paper_executions`: `(mode, fill_ts, signal_id)`, `(mode, computed_at)`
-- `portfolio_report(portfolio_id)` SQL function (JS parity test)
+- `portfolio_report(portfolio_id)` SQL function (JS parity test) — **moved to migration `0009` in step 7**, where the JS report it must match exists
 - D3: `token_resolution_obs` table + `create or replace view token_resolutions` with a union
 - `paper_portfolio_runs` left as is. RLS: public read on report tables; leases/checkpoints service role only.
 
@@ -114,6 +115,7 @@ Existing 211 tests untouched (especially G–L, O, S; `phase25`; `sql`; `fixes`)
 13. Config validation; config change → new id; unset → feature off
 14. Start boundary: signals with `fill_ts < start_ts` are never requested; `start_ts` taken from the 27 Sep re-score; a different start → a different `portfolio_id`
 15. IDEAL is reported as a non-causal baseline (label present in the report)
+16. Rehydration: a lot restored from a checkpoint receives an exit and a resolution that arrived after the checkpoint, including one whose $100 record is `sim_terminal`; a re-linked event earlier than the checkpoint forces an earlier checkpoint; every case equals a fresh full replay
 
 ## I. Risks
 
@@ -132,7 +134,7 @@ Existing 211 tests untouched (especially G–L, O, S; `phase25`; `sql`; `fixes`)
 ## J. Implementation order
 
 1. Decisions — done (D4 revised: start at the 27 Sep re-score).
-2. Migration `0008` + SQL tests.
+2. Migration `0008` + SQL tests (**3.1**; `portfolio_report` deferred to `0009`, step 7). **Done** — `supabase/migrations/0008_portfolio.sql`; 6 real-Postgres tests in `tests/sql.test.ts` (schema, RLS and grants, ordered index walk, lease exclusivity under 8 concurrent claimants, `token_resolutions` union and conflicts, constraints, cascade).
 3. Orphan resolver + view union + tests; re-run the sweep and report the Phase 2 before/after.
 4. Pure `PortfolioBook` + parity, restore and tie tests.
 5. `requests.ts` + tests.
