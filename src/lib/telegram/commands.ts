@@ -8,7 +8,8 @@ import { pct, usd, type PaperRowLite, type MarkLite, MIN_SAMPLE } from "../paper
 import type { PaperSnapshot } from "../paper/snapshot";
 import { assessHealth, healthHtml } from "../health/assess";
 
-export interface Subscriber { chat_id: number; username: string | null; kinds: string[]; min_severity: number; min_usd: number; min_score: number; only_wallets: string[]; muted_wallets: string[]; muted_until: string | null; active: boolean }
+export interface Subscriber { chat_id: number; username: string | null; kinds: string[]; min_severity: number; min_usd: number; min_score: number; only_wallets: string[]; muted_wallets: string[]; muted_until: string | null; active: boolean;
+  consecutive_failures?: number; next_attempt_at?: string | null; last_error?: string | null; disabled_reason?: string | null; migrated_to?: number | null }
 export interface SignalRow { id: string; kind: SignalKind; severity: number; wallet: string; wallet_name: string | null; outcome: string | null; title: string | null; slug: string | null; price: number; usd: number; payload: Record<string, unknown>; created_at: string; closed_at: string | null }
 export interface WalletRow { address: string; name: string | null; copy_score: number; pnl_90d: number; style: string; net_dd: number | null; months_up: number; months_total: number; fills_per_day: number | null; days_idle: number | null }
 export interface PositionRow { token_id: string; title: string | null; slug: string | null; outcome: string | null; size: number; avg_price: number; cost_usd: number; last_seen: string }
@@ -86,11 +87,12 @@ export async function handle(chatId: number, username: string | null, text: stri
   const sub = await store.getSub(chatId);
   switch (cmd) {
     case "start": {
-      const s = await store.upsertSub({ chat_id: chatId, username, active: true, muted_until: null });
+      // (Re)subscribing always clears any delivery back-off or disable left over from earlier failures.
+      const s = await store.upsertSub({ chat_id: chatId, username, active: true, muted_until: null, consecutive_failures: 0, next_attempt_at: null, disabled_reason: null, last_error: null });
       return { html: `Subscribed. You'll get alerts when a watchlist wallet opens, adds, or exits.\n\n${filtersHtml(s)}\n\nTry /signals, /consensus, /wallets, or /help.` };
     }
     case "help": return { html: `<b>Commands</b>\n/signals [n] — latest signals\n/consensus — markets where 2+ tracked wallets agree\n/wallets [n] — top of the watchlist\n/wallet &lt;name or 0x…&gt; — profile and open book\n/filters — your alert filters\n/kinds new consensus add early exit — choose kinds\n/severity 1–5 — minimum severity\n/min 5000 — minimum fill in USD\n/score 60 — minimum copy score\n/only 0x… 0x… — only these wallets (/only all to reset)\n/mute 6 — mute 6 hours · /mute 0x… — mute a wallet\n/unmute — clear mutes\n/stop — unsubscribe\n/status — engine health\n\n<b>Paper performance (V2)</b>\n/performance [7d|30d|all] — measured paper results\n/stats — compact overview\n/signal &lt;id&gt; — one signal, what happened after` };
-    case "stop": { await store.upsertSub({ chat_id: chatId, active: false }); return { html: "Unsubscribed. /start to resume." }; }
+    case "stop": { await store.upsertSub({ chat_id: chatId, active: false, disabled_reason: "USER_STOP" }); return { html: "Unsubscribed. /start to resume." }; }
     case "filters": return { html: sub ? filtersHtml(sub) : "Not subscribed yet — /start" };
     case "kinds": {
       if (!args.length) return { html: `Usage: /kinds new consensus add early exit\nCurrent: ${esc((sub?.kinds ?? KINDS).join(", "))}` };

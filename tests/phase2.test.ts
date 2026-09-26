@@ -25,7 +25,7 @@ describe("A–D execution prices, latency, slippage", () => {
   });
   it("B: latency moves the fill time — observed evaluation time when recorded, assumption otherwise", () => {
     expect(timeline(T0, T0 + 60, R)).toMatchObject({ evalTs: T0 + 60, submitTs: T0 + 65, fillTs: T0 + 70, latencySource: "OBSERVED" });
-    expect(timeline(T0, null, R)).toMatchObject({ evalTs: T0 + 134, fillTs: T0 + 144, latencySource: "ASSUMED" });
+    expect(timeline(T0, null, R)).toMatchObject({ evalTs: T0 + 134, fillTs: T0 + 144, latencySource: "ESTIMATED" });
     expect(timeline(T0, null, C).fillTs).toBe(T0 + 3173 + 75);
   });
   it("C: entry slippage = spread + size-scaled impact, rounded against the trader", () => {
@@ -58,19 +58,23 @@ describe("E–F fills", () => {
     expect(simulateEntry(entry({ obs: { ts: T0 + 60, price: 1, resolutionSeconds: 0 } }), R).reason).toBe("MARKET_SETTLED_BEFORE_FILL");
     expect(simulateEntry(entry({ evalTs: T0 + 7200, obs: { ts: T0 + 7200, price: 0.42, resolutionSeconds: 0 } }), C)).toMatchObject({ status: "EXPIRED", reason: "EXECUTION_TIMEOUT" });
   });
-  it("a fill priced at or above 1 is INVALID", () => { expect(simulateEntry(entry({ obs: { ts: T0 + 65, price: 0.999, resolutionSeconds: 0 } }), R).reason).toBe("FILL_PRICE_OUT_OF_RANGE"); });
+  it("a buy that would cost ≥ $1 is UNFILLED (no ask below one), with no P&L", () => {
+    const e = simulateEntry(entry({ obs: { ts: T0 + 65, price: 0.999, resolutionSeconds: 0 } }), R); expect(e).toMatchObject({ status: "UNFILLED", reason: "NO_ASK_BELOW_ONE", filledUsd: 0 });
+  });
 });
 
 describe("M–N fees and slippage cost", () => {
   it("M: taker fee = shares × rate × p × (1 − p), reducing net but not gross", () => {
     expect(takerFee(200, 0.5, 0.07)).toBeCloseTo(3.5, 9);
-    const e = simulateEntry(entry({ market: { feesEnabled: true, takerFeeRate: 0.05, tickSize: 0.01, minOrderShares: 5 } }), R);
-    expect(e.feeSource).toBe("OBSERVED"); expect(e.fee).toBeCloseTo(e.filledShares * 0.05 * e.fillPrice! * (1 - e.fillPrice!), 9);
+    const e = simulateEntry(entry({ market: { feesEnabled: true, takerFeeRate: 0.05, tickSize: 0.01, minOrderShares: 5 } }), R); expect(e.feeSource).toBe("OBSERVED_RATE");
+    expect(e.feeSource).toBe("OBSERVED_RATE"); expect(e.fee).toBeCloseTo(e.filledShares * 0.05 * e.fillPrice! * (1 - e.fillPrice!), 9);
     const life = lifecycle(e, null, { ts: T0 + 86400, value: 1 }, null, R); expect(life.grossPnl - life.netPnl).toBeCloseTo(life.fees, 9);
   });
-  it("fee flag false → zero (observed); unknown → mode fallback (assumed)", () => {
-    expect(simulateEntry(entry(), R)).toMatchObject({ fee: 0, feeSource: "OBSERVED" });
-    expect(simulateEntry(entry({ market: null }), R).feeSource).toBe("ASSUMED");
+  it("fee provenance: fee-free observed → 0; rate observed; flag-on rate unknown; no metadata", () => {
+    expect(simulateEntry(entry(), R)).toMatchObject({ fee: 0, feeSource: "OBSERVED_FEE_FREE" });
+    expect(simulateEntry(entry({ market: { feesEnabled: true, takerFeeRate: 0.03, tickSize: 0.01, minOrderShares: 5 } }), R)).toMatchObject({ feeSource: "OBSERVED_RATE", feeRate: 0.03 });
+    expect(simulateEntry(entry({ market: { feesEnabled: true, takerFeeRate: null, tickSize: 0.01, minOrderShares: 5 } }), R)).toMatchObject({ feeSource: "ASSUMED_RATE", feeRate: 0.05 });
+    expect(simulateEntry(entry({ market: null }), R)).toMatchObject({ feeSource: "ASSUMED_UNKNOWN", feeRate: 0.05 });
   });
   it("N: slippage cost is separate from market P&L and from latency cost", () => {
     const e = simulateEntry(entry(), R); const l = lifecycle(e, null, { ts: T0 + 86400, value: 1 }, null, R);

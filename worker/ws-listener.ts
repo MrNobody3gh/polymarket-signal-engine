@@ -17,6 +17,9 @@ import { runMarking, gammaSource } from "../src/lib/paper/mark";
 import { buildSnapshot, saveSnapshot } from "../src/lib/paper/snapshot";
 import { heartbeat } from "../src/lib/health/heartbeat";
 import { runSimulation } from "../src/lib/paper/sim/run";
+import { memSample, fmtMem, withMemLog, storeMem } from "../src/lib/health/memory";
+import { measureActivity, activityRow } from "../src/lib/scoring/activity";
+import { GammaMarketMeta } from "../src/lib/polymarket/markets";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
@@ -41,11 +44,29 @@ async function main() {
   poll(); setInterval(poll, 60 * 1000);
   // V2: paper price marking + settlement. Idempotent, so an overlap with a manual run is harmless.
   const markEvery = Math.max(2, Number(process.env.MARK_INTERVAL_MIN) || 10) * 60 * 1000;
-  const snapshot = () => buildSnapshot(db()).then((snap) => saveSnapshot(db(), snap)).then(() => console.log(new Date().toISOString(), "[paper] snapshot rebuilt")).catch((e) => console.error("snapshot failed", (e as Error).message));
-  // Phase 2: execution simulation (IDEAL / REALISTIC / CONSERVATIVE). Reports every run; per-signal records every 4th.
-  let simRuns = 0; let simBusy = false;
-  const simulate = async () => { if (simBusy) return; simBusy = true; try { await runSimulation(db(), { fetchBudget: 1500, persistRecords: simRuns++ % 4 === 0, log: (m) => console.log(new Date().toISOString(), "[sim]", m) }); } catch (e) { console.error("sim failed", (e as Error).message); } finally { simBusy = false; } };
+  const snapshot = () => withMemLog("snapshot", () => buildSnapshot(db())).then((snap) => saveSnapshot(db(), snap)).then(() => console.log(new Date().toISOString(), "[paper] snapshot rebuilt")).catch((e) => console.error("snapshot failed", (e as Error).message));
+  // Memory: sample every 5 minutes (log + health:memory) so growth is visible long before an OOM.
+  const memTick = () => { const s = memSample(); console.log(`${s.at} [mem] ${fmtMem(s)}`); void storeMem(db()); };
+  memTick(); setInterval(memTick, 5 * 60 * 1000);
+  // Execution simulation: bounded batches; aggregates computed in Postgres.
+  const meta = new GammaMarketMeta(db());
+  let simBusy = false;
+  const simulate = async () => { if (simBusy) return; simBusy = true; try { await withMemLog("sim", () => runSimulation(db(), { fetchBudget: 3000, metaFetcher: (c) => meta.endDate(c), log: (m) => console.log(new Date().toISOString(), "[sim]", m) })); } catch (e) { console.error("sim failed", (e as Error).message); } finally { simBusy = false; } };
   setTimeout(simulate, 90_000); setInterval(simulate, 15 * 60 * 1000);
+  // Bot detection: measure fills/day for tracked wallets daily (and now, if the last measurement is stale).
+  const measureAll = async () => {
+    const { data } = await db().from("wallets").select("address,program_share,activity_measured_at").eq("tracked", true);
+    const stale = (data ?? []).filter((w) => !w.activity_measured_at || Date.now() - Date.parse(w.activity_measured_at) > 20 * 3600 * 1000);
+    let ok = 0, lower = 0, insufficient = 0;
+    for (const w of stale) {
+      const a = await measureActivity(pm, w.address, Math.floor(Date.now() / 1000));
+      const { error } = await db().from("wallets").update(activityRow(a, w.program_share == null ? null : Number(w.program_share))).eq("address", w.address);
+      if (!error) { if (a.status === "OK") ok++; else if (a.status === "LOWER_BOUND") lower++; else insufficient++; }
+    }
+    if (stale.length) { console.log(new Date().toISOString(), `[activity] measured ${stale.length} wallets: ${ok} ok, ${lower} lower-bound, ${insufficient} insufficient`); await engine.loadWallets(); }
+  };
+  setTimeout(() => withMemLog("activity", measureAll).catch((e) => console.error("activity failed", (e as Error).message)), 45_000);
+  setInterval(() => withMemLog("activity", measureAll).catch((e) => console.error("activity failed", (e as Error).message)), 6 * 3600 * 1000);
   const mark = () => runMarking(db(), gammaSource(undefined, db()), { log: (m) => console.log(new Date().toISOString(), "[paper]", m) }).catch((e) => console.error("mark failed", (e as Error).message)).then(snapshot);
   setTimeout(snapshot, 5_000);
   // Retention: expire raw fills (7d), closed positions (30d), old data-quality rows (14d). Signals and paper results are permanent.

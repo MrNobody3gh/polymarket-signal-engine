@@ -131,6 +131,10 @@ export interface MarkRunResult { positions: number; marks: number; settled: numb
 let running = false;
 const resolutionMemo = new Map<string, { r: Resolution; at: number }>();   // unresolved/open answers are re-asked at most every 6h
 const failedMarks = new Map<string, number>();                              // (signal:horizon) → last failed attempt (retry hourly)
+/** Bounded memo: evict oldest insertions past `cap` so process memory never grows with history. */
+export const MEMO_CAP = 20_000;
+function capSet<K, V>(m: Map<K, V>, k: K, v: V) { m.delete(k); m.set(k, v); while (m.size > MEMO_CAP) { const first = m.keys().next().value as K; m.delete(first); } }
+export function _memoSizes() { return { resolutionMemo: resolutionMemo.size, failedMarks: failedMarks.size }; }
 const RESOLUTION_RECHECK_SEC = 6 * 3600, MARK_RETRY_SEC = 3600, MAX_ISSUES_PER_RUN = 25;
 export function _resetMarkGuards() { running = false; resolutionMemo.clear(); failedMarks.clear(); }
 
@@ -155,8 +159,10 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
       const fk = `${p.signal_id}:${h.key}`; const lastFail = failedMarks.get(fk);
       if (lastFail != null && now - lastFail < MARK_RETRY_SEC) continue;
       try {
-        const pt = await src.priceAsOf(p.token_id, h.at);
-        if (pt == null) { failedMarks.set(fk, now); issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: fk, detail: { reason: "no_price_returned", at: h.at } }); res.failed++; continue; }
+        let pt = await src.priceAsOf(p.token_id, h.at);
+        if (pt && pt.resolutionSeconds > 0 && pt.ts + pt.resolutionSeconds > h.at) pt = await src.priceAsOf(p.token_id, pt.ts - 1); // step back to a complete bucket
+        if (pt && (pt.ts > h.at || (pt.resolutionSeconds > 0 && pt.ts + pt.resolutionSeconds > h.at))) pt = null;
+        if (pt == null) { capSet(failedMarks, fk, now); issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: fk, detail: { reason: "no_price_returned", at: h.at } }); res.failed++; continue; }
         const price = pt.price;
         if (!(price >= 0 && price <= 1)) { issues.push({ kind: "price_out_of_bounds", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { price } }); res.failed++; continue; }
         // The observation must post-date the signal; an as_of read that falls back to a tick before entry is not a mark.
@@ -164,7 +170,7 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
         if (pt.ts < entryTs) { issues.push({ kind: "stale_market", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { reason: "latest_observation_predates_signal", observed: pt.ts, signal: entryTs } }); res.failed++; continue; }
         const { error } = await db.from("paper_marks").upsert({ signal_id: p.signal_id, horizon: h.key, observed_at: new Date(pt.ts * 1000).toISOString(), price, pnl: pnlFor(p.shares, p.entry_price, price), return_pct: returnFor(p.entry_price, price), source: pt.resolutionSeconds >= 0 ? `prices-history:${pt.resolutionSeconds}s` : "prices-history" }, { onConflict: "signal_id,horizon", ignoreDuplicates: true });
         if (error) { issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: `${p.signal_id}:${h.key}`, detail: { error: error.message } }); res.failed++; } else res.marks++;
-      } catch (e) { failedMarks.set(fk, now); issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: fk, detail: { error: (e as Error).message } }); res.failed++; }
+      } catch (e) { capSet(failedMarks, fk, now); issues.push({ kind: "mark_failed", ref_type: "paper", ref_id: fk, detail: { error: (e as Error).message } }); res.failed++; }
     }
     // 2) resolution (only once the position is at least an hour old — markets rarely resolve faster)
     const age = now - Math.floor(Date.parse(p.signal_ts) / 1000);
@@ -174,7 +180,7 @@ export async function runMarking(db: SupabaseClient, src: MarkSource, opts: { no
     if (!r) {
       const memo = resolutionMemo.get(key);
       if (memo && memo.r.state !== "resolved" && now - memo.at < RESOLUTION_RECHECK_SEC) r = memo.r;
-      else { r = await src.resolution(p.condition_id, p.token_id); resolutionMemo.set(key, { r, at: now }); }
+      else { r = await src.resolution(p.condition_id, p.token_id); capSet(resolutionMemo, key, { r, at: now }); }
       resolutionCache.set(key, r);
     }
     if (r.state === "resolved") {

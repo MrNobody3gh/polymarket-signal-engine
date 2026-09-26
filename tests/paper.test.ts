@@ -77,10 +77,10 @@ describe("marking", () => {
   it("records 1h/6h/24h marks with P&L, is idempotent, and logs a missing price instead of writing zero", async () => {
     const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });
     const prices: Record<number, number | null> = { 3600: 0.57, 21600: null, 86400: 0.63 };
-    const src: MarkSource = { priceAsOf: vi.fn(async (_t, at) => { const p = prices[at - Math.floor(Date.parse(open.signal_ts) / 1000)]; return p == null ? null : { price: p, ts: at - 30, resolutionSeconds: 60 }; }), resolution: async () => ({ state: "open" }) };
+    const src: MarkSource = { priceAsOf: vi.fn(async (_t, at) => { const p = prices[at - Math.floor(Date.parse(open.signal_ts) / 1000)]; return p == null ? null : { price: p, ts: at - 60, resolutionSeconds: 60 }; }), resolution: async () => ({ state: "open" }) }; // complete bucket ending exactly at `at`
     const r1 = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 25 * 3600 });
     expect(r1.marks).toBe(2); expect(r1.failed).toBe(1);
-    const m1 = db.tables.paper_marks.find((m) => m.horizon === "1h")!; expect(Number(m1.price)).toBe(0.57); expect(m1.source).toBe("prices-history:60s"); expect(m1.observed_at).toBe(new Date((Math.floor(Date.parse(open.signal_ts) / 1000) + 3600 - 30) * 1000).toISOString()); expect(Number(m1.pnl)).toBeCloseTo(sharesFor(100, 0.56) * 0.01, 6);
+    const m1 = db.tables.paper_marks.find((m) => m.horizon === "1h")!; expect(Number(m1.price)).toBe(0.57); expect(m1.source).toBe("prices-history:60s"); expect(m1.observed_at).toBe(new Date((Math.floor(Date.parse(open.signal_ts) / 1000) + 3600 - 60) * 1000).toISOString()); expect(Number(m1.pnl)).toBeCloseTo(sharesFor(100, 0.56) * 0.01, 6);
     expect(db.tables.data_quality_issues.some((i) => i.kind === "mark_failed")).toBe(true);
     const r2 = await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 25 * 3600 });
     expect(r2.marks).toBe(0); expect(db.tables.paper_marks).toHaveLength(2); // second run adds nothing
@@ -104,6 +104,12 @@ describe("marking", () => {
     const src: MarkSource = { priceAsOf: async (_t, at) => ({ price: 0.5, ts: at, resolutionSeconds: 60 }), resolution: async () => ({ state: "unknown", reason: "market_not_found" }) };
     await runMarking(db, src, { now: Math.floor(Date.parse(open.signal_ts) / 1000) + 31 * 86400 });
     expect(db.tables.paper_ledger[0].status).toBe("UNRESOLVED"); expect(db.tables.paper_ledger[0].status_reason).toBe("market_not_found");
+  });
+  it("never records a mark from a bucket that is still open at the horizon (no look-ahead)", async () => {
+    const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] }); const t0 = Math.floor(Date.parse(open.signal_ts) / 1000);
+    const src: MarkSource = { priceAsOf: async (_t, at) => (at >= t0 + 3600 - 30 ? { price: 0.99, ts: t0 + 3600 - 30, resolutionSeconds: 60 } : { price: 0.57, ts: t0 + 3600 - 90, resolutionSeconds: 60 }), resolution: async () => ({ state: "open" }) };
+    await runMarking(db, src, { now: t0 + 2 * 3600 });
+    expect(Number(db.tables.paper_marks.find((m) => m.horizon === "1h")!.price)).toBe(0.57);
   });
   it("rejects an as_of read whose latest tick predates the signal (stale, not a mark)", async () => {
     const db = fakeDb({ paper_ledger: [{ ...open, status: "OPEN" }] });

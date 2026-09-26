@@ -90,7 +90,7 @@ describe("broadcast", () => {
     }) } as never;
     const f = vi.fn(async (url: string, init?: RequestInit) => { const b = JSON.parse(String(init?.body)); return new Response(JSON.stringify(b.chat_id === 3 ? { ok: false, description: "Forbidden: bot was blocked by the user" } : { ok: true }), { status: 200 }); });
     const r = await broadcast(db, new TelegramApi("t", f as unknown as typeof fetch), sig(), { sleep: async () => {} });
-    expect(r).toEqual({ sent: 1, failed: 1, skipped: 2 }); expect(f).toHaveBeenCalledTimes(2);
+    expect(r).toEqual({ sent: 1, failed: 1, skipped: 2, migrated: 0, disabled: 1 }); // result now also reports migrations/disables expect(f).toHaveBeenCalledTimes(2);
     expect(writes.some((w) => (w as unknown[])[0] === "update" && (w as unknown[])[1] === "tg_subscribers")).toBe(true);
   });
 });

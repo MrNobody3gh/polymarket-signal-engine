@@ -48,6 +48,7 @@ export const MODES: Record<ModeName, ExecConfig> = {
 /** Where each assumption comes from. Rendered into docs and the dashboard. */
 export const ASSUMPTIONS: { key: string; provenance: Provenance; note: string }[] = [
   { key: "source trade time", provenance: "OBSERVED", note: "Block timestamp of the wallet's fill from the Polymarket trade feed." },
+  { key: "latency label", provenance: "OBSERVED", note: "Each record carries latency_source = OBSERVED (evaluation time recorded) or ESTIMATED (median/p90 fallback). Estimated latency is never reported as measured." },
   { key: "evaluation time", provenance: "OBSERVED", note: "signals.evaluated_at (new) or paper_ledger.created_at for signals evaluated live; unavailable for the 470 V1 signals back-filled on 18 Sep." },
   { key: "assumedDetectionLatencySec", provenance: "DERIVED", note: "Only when evaluation time is missing. REALISTIC = median (134 s) and CONSERVATIVE = 90th percentile (3,173 s) of observed source→evaluation latency over 36,197 live signals, 18–26 Sep 2026." },
   { key: "decision/execution latency", provenance: "CONFIGURED", note: "Reading the alert and submitting/matching an order. Not observable — no orders were placed." },
@@ -56,7 +57,7 @@ export const ASSUMPTIONS: { key: string; provenance: Provenance; note: string }[
   { key: "impact", provenance: "APPROXIMATED", note: "Linear in order notional ÷ source-trade notional. No depth data exists to calibrate it." },
   { key: "liquidity / participation", provenance: "APPROXIMATED", note: "The source wallet's own fill proves at least that notional traded at that time; the follower may take up to 1× (REALISTIC) or 0.5× (CONSERVATIVE) of it. Orders beyond that are partially filled." },
   { key: "tick size / min order", provenance: "OBSERVED", note: "Gamma orderPriceMinTickSize / orderMinSize when present; else 0.01 and 5 shares (Polymarket defaults). Tick drops to 0.001 below 0.04 / above 0.96 (DERIVED from Polymarket tick rules)." },
-  { key: "fees", provenance: "OBSERVED", note: "Taker fee = shares × feeRate × p × (1 − p) (docs.polymarket.com/trading/fees). feesEnabled=false → 0 (OBSERVED). Rate from market metadata when present; otherwise fallbackFeeRate: 0.05 REALISTIC (published 'Other/General'), 0.07 CONSERVATIVE (highest published) — APPROXIMATED." },
+  { key: "fees", provenance: "OBSERVED", note: "Taker fee = shares × feeRate × p × (1 − p) (docs.polymarket.com/trading/fees). Per trade the provenance is recorded: OBSERVED_FEE_FREE (feesEnabled=false), OBSERVED_RATE, ASSUMED_RATE (fees on, rate not provided → 0.05 REALISTIC / 0.07 CONSERVATIVE), ASSUMED_UNKNOWN (no metadata). The flag is read today and applied to past trades: DERIVED, because Polymarket sets fee status per market at deployment ('fees apply only to markets deployed on or after the activation date'); fee_observed_at records when it was read." },
   { key: "resolution value", provenance: "OBSERVED", note: "/v2/resolutions payouts (micro-USDC per share) with resolved_at; settlement is not an execution (no slippage, no fee)." },
   { key: "marks (1h/6h/24h)", provenance: "OBSERVED", note: "Observations only. Never used as execution prices." },
 ];

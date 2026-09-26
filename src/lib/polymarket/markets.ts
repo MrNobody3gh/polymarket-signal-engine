@@ -49,7 +49,8 @@ export class GammaMarketMeta implements MarketMetaSource {
       const meta = parseGammaExecMeta(key, m); v = meta.endDate;
       if (m && this.db) await this.db.from("markets").upsert(execMetaRow(meta, this.now()), { onConflict: "condition_id" });
     } catch { v = null; }
-    this.mem.set(key, { v, at: this.now() });
+    this.mem.delete(key); this.mem.set(key, { v, at: this.now() });
+    while (this.mem.size > 20_000) this.mem.delete(this.mem.keys().next().value as string); // bounded
     return v;
   }
 }

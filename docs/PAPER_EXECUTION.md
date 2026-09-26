@@ -26,9 +26,9 @@ Three modes run over the same signals. **IDEAL** is the original ledger and is k
 ## Fill states
 - **FILLED** — full requested notional within the liquidity cap and above the minimum order.
 - **PARTIALLY_FILLED** — the cap binds; P&L uses only the filled shares.
-- **UNFILLED** — below the minimum order after the cap (INSUFFICIENT_LIQUIDITY), or no bid after exit slippage.
+- **UNFILLED** — below the minimum order after the cap (INSUFFICIENT_LIQUIDITY), a buy that would have to pay ≥ $1 (NO_ASK_BELOW_ONE), or no bid after exit slippage.
 - **EXPIRED** — fill time later than `maxSignalAgeSec` after the source trade (CONSERVATIVE: 1 h).
-- **INVALID** — signal price outside (0,1), market settled before the fill (settlement tick at/before fill time), fill price ≥ 1, or an observation that would be look-ahead.
+- **INVALID** — signal price outside (0,1), market settled before the fill (settlement tick at/before fill time), or an observation that would be look-ahead.
 - **UNKNOWN** — no observation at/before the fill time, or the latest one is older than `maxQuoteAgeSec`. Not guessed.
 - Portfolio only: **REJECTED** with a reason — duplicate source trade, max open positions, per-wallet allocation, per-market exposure, insufficient cash (after reserve), total exposure, or below minimum order after a resize.
 
@@ -41,3 +41,31 @@ Three modes run over the same signals. **IDEAL** is the original ledger and is k
 ## Do not overfit
 These parameters were set before looking at any simulated result and are frozen (`configHash` is shown on the
 dashboard). Change them only with a written reason unrelated to P&L, and keep the old hash's results for comparison.
+
+## Coverage states (Phase 2.5)
+Every signal has one record per mode. `coverage_state`: **SIMULATED** (filled or partially filled), **PENDING_DATA**
+(price not fetched yet — not a result), **UNAVAILABLE_DATA** (no usable trade existed at the fill time, or the fetch
+failed permanently — not a trading failure), **INVALID**, **UNFILLED** (includes EXPIRED). REJECTED exists only in the
+Phase 3 portfolio. Coverage % = records whose outcome is determined ÷ all records. Latency is labelled OBSERVED or
+ESTIMATED per record. Reports are computed by Postgres (`paper_exec_report`, `data_quality_report`).
+
+## Coverage states (Phase 2.5)
+Every signal has one record per mode. Only **SIMULATED** rows carry P&L.
+
+| Coverage | Meaning | In P&L? |
+|---|---|---|
+| SIMULATED | filled or partially filled | yes |
+| PENDING_DATA | the price it needs has not been fetched yet | no — and not a loss |
+| UNAVAILABLE_DATA | no trade existed at/before the fill time, the latest was too old, or the fetch failed 6 times | no — not a trading failure |
+| INVALID | bad signal data, settled market, look-ahead observation | no |
+| UNFILLED | liquidity cap, ≥ $1 ask, no bid, expired | no — a trading outcome |
+| REJECTED | portfolio limits (Phase 3) | — |
+
+Coverage % = (all − pending − unavailable) ÷ all. Fill rate is shown both over decided rows and over all rows.
+
+## Memory model (Phase 2.5)
+The worker never loads history. The simulation sweeps non-final signals in keyset batches of **500**: large enough to
+amortise the ~8 queries per batch, small enough that a batch's inputs stay around 10 MB. Only changed records are
+written (hash compare); signals whose outcome can no longer change are flagged `sim_terminal` and skipped thereafter.
+All aggregates (percentiles, drawdown, robustness, per-kind, per-wallet) are computed by Postgres functions
+(`paper_exec_report`, `paper_group_stats`, `data_quality_report`). Memory is sampled every 5 minutes (`health:memory`).

@@ -24,12 +24,12 @@ export interface EntryInput {
   obs: PriceObs | null;      // last trade at/before the fill time (fetched with as_of = fillTs)
   market: MarketCfg | null;
 }
-export interface Timing { sourceTs: number; evalTs: number; submitTs: number; fillTs: number; latencySource: "OBSERVED" | "ASSUMED" | "NONE" }
+export interface Timing { sourceTs: number; evalTs: number; submitTs: number; fillTs: number; latencySource: "OBSERVED" | "ESTIMATED" | "NONE" }
 export interface ExecResult {
   status: FillStatus; reason: string | null; timing: Timing;
   requestedUsd: number; filledUsd: number; filledShares: number; fillPct: number;
   marketPrice: number | null; marketObsTs: number | null; fillPrice: number | null; tick: number | null; slippageTicks: number;
-  fee: number; feeRate: number; feeSource: "NONE" | "OBSERVED" | "ASSUMED";
+  fee: number; feeRate: number; feeSource: FeeSource;
   latencyCost: number; slippageCost: number;
 }
 
@@ -40,7 +40,7 @@ export function timeline(sourceTs: number, evalTs: number | null, cfg: ExecConfi
   const observed = evalTs != null && evalTs >= sourceTs;
   const ev = observed ? (evalTs as number) : sourceTs + cfg.assumedDetectionLatencySec;
   const submit = ev + cfg.decisionLatencySec; const fill = submit + cfg.executionLatencySec;
-  return { sourceTs, evalTs: ev, submitTs: submit, fillTs: fill, latencySource: observed ? "OBSERVED" : "ASSUMED" };
+  return { sourceTs, evalTs: ev, submitTs: submit, fillTs: fill, latencySource: observed ? "OBSERVED" : "ESTIMATED" };
 }
 
 /** Polymarket tick: the market's tick, dropping to 0.001 in the tails (below 0.04 / above 0.96). */
@@ -53,11 +53,19 @@ const roundDown = (p: number, t: number) => Math.round(Math.floor(p / t + 1e-9) 
 
 /** Taker fee in USDC: shares × rate × p × (1 − p). */
 export function takerFee(shares: number, price: number, rate: number): number { return rate > 0 ? shares * rate * price * (1 - price) : 0; }
-export function feeRateFor(market: MarketCfg | null, cfg: ExecConfig): { rate: number; source: "NONE" | "OBSERVED" | "ASSUMED" } {
+/** Fee provenance, most → least certain:
+ *  OBSERVED_FEE_FREE    market reports feesEnabled=false → 0
+ *  OBSERVED_RATE        market reports feesEnabled=true and a rate
+ *  ASSUMED_RATE         market reports feesEnabled=true, rate not provided → mode fallback rate
+ *  ASSUMED_UNKNOWN      no fee metadata for this market → mode fallback rate (may overstate fees on fee-free markets)
+ *  NONE                 IDEAL: fees not modelled */
+export type FeeSource = "NONE" | "OBSERVED_FEE_FREE" | "OBSERVED_RATE" | "ASSUMED_RATE" | "ASSUMED_UNKNOWN";
+export function feeRateFor(market: MarketCfg | null, cfg: ExecConfig): { rate: number; source: FeeSource } {
   if (cfg.feeModel === "none") return { rate: 0, source: "NONE" };
-  if (market?.feesEnabled === false) return { rate: 0, source: "OBSERVED" };
-  if (market?.feesEnabled === true && market.takerFeeRate != null) return { rate: market.takerFeeRate, source: "OBSERVED" };
-  return { rate: cfg.fallbackFeeRate, source: "ASSUMED" };
+  if (market?.feesEnabled === false) return { rate: 0, source: "OBSERVED_FEE_FREE" };
+  if (market?.feesEnabled === true && market.takerFeeRate != null) return { rate: market.takerFeeRate, source: "OBSERVED_RATE" };
+  if (market?.feesEnabled === true) return { rate: cfg.fallbackFeeRate, source: "ASSUMED_RATE" };
+  return { rate: cfg.fallbackFeeRate, source: "ASSUMED_UNKNOWN" };
 }
 
 /** Is this observation usable for a decision at time t? Guards look-ahead and stale data. */
@@ -71,7 +79,7 @@ export function usableObs(obs: PriceObs | null, t: number, cfg: ExecConfig): { o
 }
 
 function empty(status: FillStatus, reason: string | null, timing: Timing, requestedUsd: number): ExecResult {
-  return { status, reason, timing, requestedUsd, filledUsd: 0, filledShares: 0, fillPct: 0, marketPrice: null, marketObsTs: null, fillPrice: null, tick: null, slippageTicks: 0, fee: 0, feeRate: 0, feeSource: "NONE", latencyCost: 0, slippageCost: 0 };
+  return { status, reason, timing, requestedUsd, filledUsd: 0, filledShares: 0, fillPct: 0, marketPrice: null, marketObsTs: null, fillPrice: null, tick: null, slippageTicks: 0, fee: 0, feeRate: 0, feeSource: "NONE" as FeeSource, latencyCost: 0, slippageCost: 0 };
 }
 
 /** Simulate a BUY of `requestedUsd` for one signal. */
@@ -88,7 +96,9 @@ export function simulateEntry(inp: EntryInput, cfg: ExecConfig, requestedUsd: nu
   const ratio = inp.sourceUsd > 0 ? Math.min(1, requestedUsd / inp.sourceUsd) : 1;
   const slipTicks = cfg.spreadTicks + cfg.impactTicksAtFullParticipation * ratio;
   const fill = slipTicks > 0 ? roundUp(market + slipTicks * tick, tick) : market;
-  if (!(fill > 0 && fill < 1)) return { ...empty("INVALID", "FILL_PRICE_OUT_OF_RANGE", timing, requestedUsd), marketPrice: market, marketObsTs: obsTs, tick };
+  // A buy that would have to pay ≥ $1 has no ask to fill against: an execution outcome (UNFILLED), not bad data.
+  if (!(fill < 1)) return { ...empty("UNFILLED", "NO_ASK_BELOW_ONE", timing, requestedUsd), marketPrice: market, marketObsTs: obsTs, tick };
+  if (!(fill > 0)) return { ...empty("INVALID", "FILL_PRICE_OUT_OF_RANGE", timing, requestedUsd), marketPrice: market, marketObsTs: obsTs, tick };
   const filledUsd = Math.min(requestedUsd, cap); const shares = filledUsd / fill;
   const minShares = cfg.fillAtSignalPrice ? 0 : inp.market?.minOrderShares ?? cfg.defaultMinOrderShares;
   if (!(shares > 0) || shares < minShares) return { ...empty("UNFILLED", "INSUFFICIENT_LIQUIDITY", timing, requestedUsd), marketPrice: market, marketObsTs: obsTs, fillPrice: fill, tick };

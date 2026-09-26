@@ -1,14 +1,17 @@
 /** Minimal Telegram Bot API wrapper. HTML parse mode everywhere. */
 export interface TgButton { text: string; url?: string; callback_data?: string }
 export interface TgUpdate { update_id: number; message?: TgMessage; callback_query?: { id: string; from: TgUser; message?: TgMessage; data?: string } }
-export interface TgMessage { message_id: number; chat: { id: number; type: string; username?: string; title?: string }; from?: TgUser; text?: string }
+export interface TgMessage { message_id: number; chat: { id: number; type: string; username?: string; title?: string }; from?: TgUser; text?: string; migrate_to_chat_id?: number; migrate_from_chat_id?: number }
+export interface TgResult<T = unknown> { ok: boolean; result?: T; description?: string; error_code?: number; parameters?: { migrate_to_chat_id?: number; retry_after?: number } }
 export interface TgUser { id: number; username?: string; first_name?: string }
 
 export class TelegramApi {
   constructor(private token: string, private f: typeof fetch = fetch) {}
-  private async call<T = unknown>(method: string, body: Record<string, unknown>): Promise<{ ok: boolean; result?: T; description?: string }> {
-    const r = await this.f(`https://api.telegram.org/bot${this.token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    try { return (await r.json()) as { ok: boolean; result?: T; description?: string }; } catch { return { ok: false, description: `HTTP ${r.status}` }; }
+  private async call<T = unknown>(method: string, body: Record<string, unknown>): Promise<TgResult<T>> {
+    let r: Response;
+    try { r = await this.f(`https://api.telegram.org/bot${this.token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
+    catch (e) { return { ok: false, description: `NETWORK: ${(e as Error).message}` }; }
+    try { return (await r.json()) as TgResult<T>; } catch { return { ok: false, error_code: r.status, description: `HTTP ${r.status}` }; }
   }
   send(chatId: number | string, html: string, buttons?: TgButton[][]) {
     return this.call("sendMessage", { chat_id: chatId, text: html, parse_mode: "HTML", disable_web_page_preview: true, ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}) });

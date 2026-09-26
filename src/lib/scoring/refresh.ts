@@ -9,7 +9,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { PolymarketClient } from "../polymarket/client";
-import { buildProfile } from "./score";
+import { buildProfile, type MeasuredActivity } from "./score";
 import type { WalletProfile } from "../polymarket/types";
 
 export const CATEGORIES = ["overall", "politics", "sports", "esports", "crypto", "culture", "mentions", "weather", "economics", "tech", "finance"];
@@ -36,9 +36,9 @@ export async function discover(client: PolymarketClient, perBoard = 100, log: (m
   return found;
 }
 
-export async function scoreWallet(client: PolymarketClient, address: string, name: string | null, sources: string[], now: number): Promise<WalletProfile> {
+export async function scoreWallet(client: PolymarketClient, address: string, name: string | null, sources: string[], now: number, activity: MeasuredActivity | null = null): Promise<WalletProfile> {
   const [stats, points] = await Promise.all([client.userStats(address), client.userPnl(address, "max")]);
-  return buildProfile(address, name ?? (stats?.["name"] as string | undefined) ?? null, stats, points, now, sources);
+  return buildProfile(address, name ?? (stats?.["name"] as string | undefined) ?? null, stats, points, now, sources, activity);
 }
 
 export async function refresh(db: SupabaseClient, client = new PolymarketClient(), opts: { concurrency?: number; limit?: number; minCopyScore?: number; topByPnl?: number; log?: (m: string) => void } = {}) {
@@ -49,12 +49,15 @@ export async function refresh(db: SupabaseClient, client = new PolymarketClient(
   const { data: tracked } = await db.from("wallets").select("address,name,sources").eq("tracked", true);
   for (const t of tracked ?? []) if (!found.has(t.address)) found.set(t.address, { name: t.name, sources: t.sources ?? [] });
   const list = [...found.entries()].slice(0, opts.limit ?? 5000);
+  // Activity is measured by the worker (scoring/activity.ts); use it, never re-derive or overwrite it here.
+  const activity = new Map<string, MeasuredActivity>();
+  for (let i = 0; ; i += 1000) { const { data } = await db.from("wallets").select("address,activity_status,fills_per_day").not("activity_status", "is", null).range(i, i + 999); for (const r of data ?? []) activity.set(r.address, { status: r.activity_status, fillsPerDay: r.fills_per_day == null ? null : Number(r.fills_per_day) }); if (!data || data.length < 1000) break; }
   log(`scoring ${list.length} wallets`);
   const profiles: WalletProfile[] = []; let i = 0; const conc = opts.concurrency ?? 8;
   await Promise.all(Array.from({ length: conc }, async () => {
     while (i < list.length) {
       const [addr, meta] = list[i++];
-      try { profiles.push(await scoreWallet(client, addr, meta.name, meta.sources, now)); } catch (e) { log(`score ${addr}: ${(e as Error).message}`); }
+      try { profiles.push(await scoreWallet(client, addr, meta.name, meta.sources, now, activity.get(addr) ?? null)); } catch (e) { log(`score ${addr}: ${(e as Error).message}`); }
     }
   }));
   const minScore = opts.minCopyScore ?? 40; const topN = opts.topByPnl ?? 50;
@@ -62,7 +65,7 @@ export async function refresh(db: SupabaseClient, client = new PolymarketClient(
   const byScore = [...human].sort((a, b) => b.copyScore - a.copyScore || b.pnl90d - a.pnl90d);
   const byPnl = [...human].sort((a, b) => b.pnl90d - a.pnl90d);
   const track = new Set<string>([...byScore.filter((p) => p.copyScore >= minScore).slice(0, 150).map((p) => p.address), ...byPnl.slice(0, topN).map((p) => p.address)]);
-  const rows = profiles.map((p) => ({ address: p.address, name: p.name, copy_score: p.copyScore, pnl_90d: p.pnl90d, style: p.style, fills_per_day: p.fillsPerDay, program_share: p.programShare, concentration: p.concentration, net_dd: p.netDd, months_up: p.monthsUp, months_total: p.monthsTotal, days_idle: p.daysIdle, trade_count: p.tradeCount, sources: p.sources, tracked: track.has(p.address), scored_at: new Date().toISOString() }));
+  const rows = profiles.map((p) => ({ address: p.address, name: p.name, copy_score: p.copyScore, pnl_90d: p.pnl90d, style: p.style, program_share: p.programShare, concentration: p.concentration, net_dd: p.netDd, months_up: p.monthsUp, months_total: p.monthsTotal, days_idle: p.daysIdle, trade_count: p.tradeCount, sources: p.sources, tracked: track.has(p.address), scored_at: new Date().toISOString() }));
   for (let j = 0; j < rows.length; j += 500) { const { error } = await db.from("wallets").upsert(rows.slice(j, j + 500), { onConflict: "address" }); if (error) throw error; }
   await db.from("cursors").upsert({ key: "refresh:last", value: String(now), updated_at: new Date().toISOString() });
   log(`scored ${profiles.length}, tracking ${track.size}`);

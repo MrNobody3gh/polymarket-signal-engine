@@ -111,7 +111,10 @@ export function copyScore(i: ScoreInput): number {
 }
 
 /** Full profile from the three API reads the refresh job makes per wallet. */
-export function buildProfile(address: string, name: string | null, stats: UserStats | null, points: UserPnlPoint[], now: number, sources: string[] = []): WalletProfile {
+/** Measured activity (from scoring/activity.ts). When absent or INSUFFICIENT_DATA, fills/day is unknown — never 0 — and the
+ *  wallet cannot be "rankable" (the existing −10 penalty), so missing data can never score better than measured data. */
+export interface MeasuredActivity { status: "OK" | "LOWER_BOUND" | "INSUFFICIENT_DATA" | null; fillsPerDay: number | null }
+export function buildProfile(address: string, name: string | null, stats: UserStats | null, points: UserPnlPoint[], now: number, sources: string[] = [], activity: MeasuredActivity | null = null): WalletProfile {
   const curve = curveFromPoints(points);
   const pnl90d = windowPnl(curve, now, 90);
   const dd = maxDrawdown(curve);
@@ -120,14 +123,16 @@ export function buildProfile(address: string, name: string | null, stats: UserSt
   const realized = (a?.realized_market_pnl ?? 0) + (a?.realized_combo_pnl ?? 0);
   const curveDays = curve.length ? Math.max(1, Math.round((curve[curve.length - 1].ts - curve[0].ts) / DAY) + 1) : 0;
   const tradeCount = stats?.trade_count ?? null;
-  const fillsPerDay = tradeCount != null && curveDays > 0 ? tradeCount / curveDays : null;
+  const measured = activity && activity.status !== "INSUFFICIENT_DATA" && activity.fillsPerDay != null;
+  // Measured activity wins. An explicit INSUFFICIENT_DATA stays unknown (null) — never replaced by a weaker proxy or by 0.
+  const fillsPerDay = measured ? activity!.fillsPerDay : activity == null && tradeCount != null && curveDays > 0 ? tradeCount / curveDays : null;
   const volume = stats?.volume_usdc ?? 0;
   const edgePerDollar = volume > 0 ? realized / volume : null;
   const lastMove = [...curve].reverse().find((p, idx, arr) => idx < arr.length - 1 && p.pnl !== arr[idx + 1].pnl);
   const daysIdle = curve.length ? Math.max(0, Math.round((now - (lastMove?.ts ?? curve[0].ts)) / DAY)) : null;
   const netDd = dd.maxDdUsd > 0 ? realized / dd.maxDdUsd : null;
   const ps = programShare(stats); const conc = concentration(stats);
-  const rankable = (tradeCount ?? 0) >= 100 && curveDays >= 60 && dd.moves >= 10;
+  const rankable = (tradeCount ?? 0) >= 100 && curveDays >= 60 && dd.moves >= 10 && fillsPerDay != null;
   const score = copyScore({ pnl90d, netDd, monthsUp: mu.up, monthsTotal: mu.total, fillsPerDay, programShare: ps, concentration: conc, edgePerDollar, daysIdle, rankable });
   return {
     address: address.toLowerCase(), name, copyScore: score, pnl90d: Math.round(pnl90d * 100) / 100,
