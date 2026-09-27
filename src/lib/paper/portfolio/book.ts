@@ -10,8 +10,8 @@
  *    earliest time the caller must rewind to when that is no longer possible;
  *  - richer outputs (fill price, fee, per-lot exit/resolution detail) for portfolio_decisions / portfolio_lots.
  *
- * Kept exactly as in the reference, including one quirk: a resized order that ends UNFILLED for a reason other than
- * liquidity (e.g. NO_ASK_BELOW_ONE) is recorded with outcome UNFILLED and reason REJECTED_BELOW_MIN_ORDER.
+ * Kept exactly as in the reference. REJECTED_BELOW_MIN_ORDER is used only with outcome REJECTED (an order resized
+ * below the minimum order); any other unfilled order keeps its own execution reason (decision D10, step 8).
  */
 import type { ExecConfig, PortfolioConfig } from "../sim/config";
 import { simulateEntry, simulateExit, timeline, type ExitInput } from "../sim/execute";
@@ -85,9 +85,9 @@ export class PortfolioBook {
     for (const [room, reason] of checks) { if (room >= size) continue; if (!pc.allowResize || room <= 0) return decide("REJECTED", reason); size = room; }
     const e = simulateEntry(sig.entry, exec, size); const resized = size < pc.positionUsd;
     if (e.filledShares <= 0) {
-      // Reference behaviour, quirk included (see file header).
-      const outcome = e.status === "UNFILLED" && e.reason === "INSUFFICIENT_LIQUIDITY" && resized ? "REJECTED" : e.status;
-      return decide(outcome, e.status === "UNFILLED" && resized ? "REJECTED_BELOW_MIN_ORDER" : e.reason, { resized });
+      // D10: resized below the minimum order → REJECTED; anything else keeps its execution outcome and reason.
+      const belowMin = e.status === "UNFILLED" && e.reason === "INSUFFICIENT_LIQUIDITY" && resized;
+      return decide(belowMin ? "REJECTED" : e.status, belowMin ? "REJECTED_BELOW_MIN_ORDER" : e.reason, { resized });
     }
     this.s.cash -= e.filledUsd + e.fee; this.s.fees += e.fee; this.s.slippage += e.slippageCost; this.s.realized -= e.fee;
     const lot: BookLot = { signalId: sig.signalId, kind: sig.kind, wallet: sig.wallet, conditionId: sig.conditionId, tokenId: sig.tokenId, openedTs: e.timing.fillTs,

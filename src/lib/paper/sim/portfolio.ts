@@ -47,7 +47,9 @@ export function simulatePortfolio(signals: PortfolioSignal[], exec: ExecConfig, 
     const checks: [number, RejectReason][] = [[room(pc.maxWalletAllocationUsd, walletUsed), "REJECTED_MAX_WALLET_ALLOCATION"], [room(pc.maxMarketExposureUsd, marketUsed), "REJECTED_MAX_MARKET_EXPOSURE"], [cashRoom, "REJECTED_INSUFFICIENT_CASH"], [totalRoom, "REJECTED_MAX_PORTFOLIO_EXPOSURE"]];
     for (const [r, reason] of checks) { if (r >= size) continue; if (!pc.allowResize || r <= 0) return d("REJECTED", reason, pc.positionUsd); size = r; }
     const e = simulateEntry(s.entry, exec, size);
-    if (e.filledShares <= 0) return d(e.status === "UNFILLED" && e.reason === "INSUFFICIENT_LIQUIDITY" && size < pc.positionUsd ? "REJECTED" : e.status, e.status === "UNFILLED" && size < pc.positionUsd ? "REJECTED_BELOW_MIN_ORDER" : e.reason, pc.positionUsd);
+    // D10: REJECTED_BELOW_MIN_ORDER only with outcome REJECTED (resized below the minimum order); other unfilled orders keep their own reason.
+    const belowMin = e.status === "UNFILLED" && e.reason === "INSUFFICIENT_LIQUIDITY" && size < pc.positionUsd;
+    if (e.filledShares <= 0) return d(belowMin ? "REJECTED" : e.status, belowMin ? "REJECTED_BELOW_MIN_ORDER" : e.reason, pc.positionUsd);
     const cost = e.filledUsd + e.fee; cash -= cost; fees += e.fee; slip += e.slippageCost; realized -= e.fee;
     lots.set(s.signalId, { signalId: s.signalId, wallet: s.wallet, conditionId: s.conditionId, shares: e.filledShares, cost: e.filledUsd, mark: s.mark && s.mark.ts >= e.timing.fillTs ? s.mark : null });
     taken.add(s.sourceKey); d(e.status as PortfolioOutcome, size < pc.positionUsd ? `RESIZED:${e.reason ?? "LIMIT"}` : e.reason, pc.positionUsd, e.filledUsd); snap(ts);

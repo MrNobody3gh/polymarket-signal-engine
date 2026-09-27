@@ -23,6 +23,7 @@ import { GammaMarketMeta } from "../src/lib/polymarket/markets";
 import { refresh, refreshDue } from "../src/lib/scoring/refresh";
 import { resolveOrphans } from "../src/lib/paper/resolve-orphans";
 import { ensureTokenOrder } from "../src/lib/polymarket/token-order";
+import { portfolioJobSetup, runPortfolioJob, makeSimCycle } from "../src/lib/paper/portfolio/job";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
@@ -53,9 +54,14 @@ async function main() {
   memTick(); setInterval(memTick, 5 * 60 * 1000);
   // Execution simulation: bounded batches; aggregates computed in Postgres.
   const meta = new GammaMarketMeta(db());
-  let simBusy = false;
-  const simulate = async () => { if (simBusy) return; simBusy = true; try { await withMemLog("orphans", () => resolveOrphans(db(), gammaSource(pm, db()), { prepare: (c) => ensureTokenOrder(db(), c, { client: pm }), log: (m) => console.log(new Date().toISOString(), "[orphans]", m) })); } catch (e) { console.error("orphans failed", (e as Error).message); }
-    try { await withMemLog("sim", () => runSimulation(db(), { fetchBudget: 3000, metaFetcher: (c) => meta.endDate(c), log: (m) => console.log(new Date().toISOString(), "[sim]", m) })); } catch (e) { console.error("sim failed", (e as Error).message); } finally { simBusy = false; } };
+  // Phase 3 portfolio (§G): after the sweep, in the same busy guard. PAPER_PORTFOLIO_CONFIG is read once here; unset or
+  // invalid → off (one line), and the cycle is exactly orphans → sim as before.
+  const portfolio = portfolioJobSetup(process.env, Math.floor(Date.now() / 1000), (m) => console.log(new Date().toISOString(), m));
+  const simulate = makeSimCycle({
+    orphans: () => withMemLog("orphans", () => resolveOrphans(db(), gammaSource(pm, db()), { prepare: (c) => ensureTokenOrder(db(), c, { client: pm }), log: (m) => console.log(new Date().toISOString(), "[orphans]", m) })),
+    sim: () => withMemLog("sim", () => runSimulation(db(), { fetchBudget: 3000, metaFetcher: (c) => meta.endDate(c), log: (m) => console.log(new Date().toISOString(), "[sim]", m) })),
+    portfolio: portfolio.config ? () => withMemLog("portfolio", () => runPortfolioJob(db(), { ...portfolio, log: (m) => console.log(new Date().toISOString(), m) })) : null,
+  });
   setTimeout(simulate, 90_000); setInterval(simulate, 15 * 60 * 1000);
   // Bot detection: measure fills/day for tracked wallets daily (and now, if the last measurement is stale).
   const measureAll = async () => {

@@ -57,7 +57,12 @@ export interface RunOptions {
 export interface PortfolioRunStats {
   portfolioId: string; mode: ModeName; skipped?: "LEASE_HELD"; nonCausalBaseline?: string; dryRun: boolean;
   rowsRead: number; batches: number; staleRows: number; decisions: Record<string, number>;
+  /** Price observations the portfolio is waiting for that nothing had queued (see enqueueMissing). */
+  enqueued: number;
   rewind: { to: number | null; restoredFrom: number | null; reasons: string[] };
+  /** R4 (step 8): the previous run's watermark, how far this run went back from it (seconds, 0 without a rewind), and
+   *  how many of the last 20 finished runs rewound (a rolling counter kept in portfolio_runs.stats). */
+  previousWatermark: number | null; rewindDistanceSec: number; rewindsLast20: number;
   frontier: EventKey | null; watermark: number | null;
   writes: Record<string, number>; deletes: Record<string, number>;
   durationMs: number; memory: { before: MemSample; after: MemSample } | null;
@@ -79,7 +84,7 @@ export async function runPortfolios(db: SupabaseClient, opts: RunOptions = {}): 
 async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: PortfolioRunConfig, opts: RunOptions & { now: () => number; owner: string }): Promise<PortfolioRunStats> {
   const t0 = Date.now(); const before = memSample(); const exec = MODES[def.mode]; const pc = cfg.portfolio; const dry = !!opts.dryRun;
   const log = opts.log ?? (() => {}); const leaseSec = opts.leaseSec ?? LEASE_SEC; const B = opts.batchSize ?? SIM_BATCH_SIZE;
-  const st: PortfolioRunStats = { portfolioId: def.id, mode: def.mode, dryRun: dry, rowsRead: 0, batches: 0, staleRows: 0, decisions: {}, rewind: { to: null, restoredFrom: null, reasons: [] }, frontier: null, watermark: null, writes: {}, deletes: {}, durationMs: 0, memory: null, summary: null,
+  const st: PortfolioRunStats = { portfolioId: def.id, mode: def.mode, dryRun: dry, rowsRead: 0, batches: 0, staleRows: 0, enqueued: 0, decisions: {}, rewind: { to: null, restoredFrom: null, reasons: [] }, previousWatermark: null, rewindDistanceSec: 0, rewindsLast20: 0, frontier: null, watermark: null, writes: {}, deletes: {}, durationMs: 0, memory: null, summary: null,
     ...(def.mode === "IDEAL" ? { nonCausalBaseline: IDEAL_LABEL } : {}) };
   const w = writer(db, def.id, dry, st);
 
@@ -96,7 +101,7 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
     if (pe) throw new Error(`portfolio_runs read: ${pe.message}`);
     const prevStarted = prev?.last_run_started_at ? sec(prev.last_run_started_at) : null, prevFinished = prev?.last_run_finished_at ? sec(prev.last_run_finished_at) : null;
     const W0 = prev?.last_watermark_ts ? sec(prev.last_watermark_ts) : null;
-    const prevStats = (prev?.stats ?? {}) as { equityDownsampledTo?: number; runStartedAt?: number };
+    const prevStats = (prev?.stats ?? {}) as { equityDownsampledTo?: number; runStartedAt?: number; rewindHistory?: boolean[] };
     let equityCursor: number = prevStats.equityDownsampledTo ?? def.startTs;
     if (!dry) await must(db.from("portfolio_runs").update({ last_run_started_at: iso(now), updated_at: iso(now) }).eq("portfolio_id", def.id), "portfolio_runs start");
     opts.fault?.("afterStart", def.mode);
@@ -125,17 +130,18 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
       S = restored ? sec(restored.event_ts) : def.startTs - 1;
       const lots = book.openLots(); let rewindTo = Infinity; lotFrontier = null;
       if (lots.length) {
-        const ids = lots.map((l) => l.signalId); const reqs = await requestsFor(db, exec, cfg, ids);
+        const ids = lots.map((l) => l.signalId); const reqs = await requestsFor(db, exec, cfg, ids); await enqueueMissing(db, dry, [...reqs.values()], st);
         const stored = new Map((await selectIn<{ signal_id: string; input_hash: string }>(ids, (c) => db.from("portfolio_decisions").select("signal_id,input_hash").eq("portfolio_id", def.id).in("signal_id", c as string[]))).map((d) => [d.signal_id, d.input_hash]));
         for (const l of lots) {
           const r = reqs.get(l.signalId); if (!r) continue;
           const rp = stored.has(l.signalId) ? rewindPoint(stored.get(l.signalId)!, r) : null;
           if (rp != null && rp <= S) { rewindTo = Math.min(rewindTo, rp); continue; }             // e.g. its entry inputs changed
-          if (r.exitPendingTs != null && r.exitPendingTs <= S) { rewindTo = Math.min(rewindTo, r.exitPendingTs); continue; } // the book already passed an exit it could not price
+          const xw = exitWait(r);
+          if (xw != null && xw <= S) { rewindTo = Math.min(rewindTo, xw); continue; } // the book already passed an exit it could not price
           const res = book.relink(l.signalId, { exit: r.signal.exit, exitId: r.signal.exitId ?? null, resolution: r.signal.resolution, mark: r.signal.mark });
           if (!res.ok) { rewindTo = Math.min(rewindTo, res.rewindTo); continue; }
           hashFixes.set(l.signalId, r.fingerprint);
-          if (r.exitPendingTs != null) { const k: EventKey = { ts: r.exitPendingTs, order: KIND_ORDER.EXIT, id: l.signalId }; if (!lotFrontier || cmpKey(k, lotFrontier) < 0) lotFrontier = k; }
+          if (xw != null) { const k: EventKey = { ts: xw, order: KIND_ORDER.EXIT, id: l.signalId }; if (!lotFrontier || cmpKey(k, lotFrontier) < 0) lotFrontier = k; }
         }
       }
       if (rewindTo === Infinity) break;
@@ -144,6 +150,8 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
     }
     const rewound = crashed || (W0 != null && S < W0);
     st.rewind = { to: rewound ? (T === Infinity ? null : T) : null, restoredFrom: restored ? S : null, reasons: rewound ? reasons : [] };
+    const rewindHistory = [...(Array.isArray(prevStats.rewindHistory) ? prevStats.rewindHistory : []), rewound].slice(-20);
+    st.previousWatermark = W0; st.rewindDistanceSec = rewound && W0 != null ? W0 - S : 0; st.rewindsLast20 = rewindHistory.filter(Boolean).length;
 
     // 4. rewind: remove what came after S, and put back the lots that are open in the restored state
     if (rewound) {
@@ -171,7 +179,8 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
       const streamedAt = new Map(rows.map((r) => [r.signal_id, sec(r.fill_ts)]));
       const all = [...(await requestsFor(db, exec, cfg, rows.map((r) => r.signal_id))).values()];
       const reqs = orderRequests(all.filter((r) => r.key.ts === streamedAt.get(r.signal.signalId))); st.staleRows += all.length - reqs.length;
-      const f = frontierOf(reqs); if (f && (!F || cmpKey(f, F) < 0)) F = f;
+      await enqueueMissing(db, dry, reqs, st);
+      const f = frontierOf(reqs.map((r) => (r.exitPendingTs != null && exitWait(r) == null ? { ...r, exitPendingTs: null } : r))); if (f && (!F || cmpKey(f, F) < 0)) F = f;
       for (const r of reqs) {
         if (F && r.key.ts >= F.ts) { stop = true; break; }         // nothing in the frontier's second or later
         if (r.key.ts > lastDone) {                                   // lastDone's second is complete
@@ -200,7 +209,7 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
 
     st.summary = book.summary(); st.durationMs = Date.now() - t0; st.memory = { before, after: memSample() };
     if (!dry) await must(db.from("portfolio_runs").update({ last_run_finished_at: iso(opts.now()), last_watermark_ts: st.watermark == null ? null : iso(st.watermark), last_watermark_key: st.watermark == null ? null : CK_KEY,
-      stats: { ...st, equityDownsampledTo: equityCursor, runStartedAt: now }, updated_at: iso(opts.now()) }).eq("portfolio_id", def.id), "portfolio_runs finish");
+      stats: { ...st, equityDownsampledTo: equityCursor, runStartedAt: now, rewindHistory }, updated_at: iso(opts.now()) }).eq("portfolio_id", def.id), "portfolio_runs finish");
     log(`${def.mode}: ${st.rowsRead} rows in ${st.batches} batches · watermark ${st.watermark == null ? "—" : iso(st.watermark)} · frontier ${F ? iso(F.ts) : "none"}${rewound ? ` · rewound to ${iso(S)} (${reasons.join("; ")})` : ""} · wrote ${JSON.stringify(st.writes)} · heap ${before.heapUsedMb}→${st.memory.after.heapUsedMb} MB`);
     return st;
   } finally {
@@ -233,6 +242,27 @@ export async function nextBatch(db: SupabaseClient, mode: ModeName, cursor: stri
   if (te) throw new Error(`paper_executions same-second tail: ${te.message}`);
   const have = new Set(rows.map((r) => r.signal_id));
   return [...rows, ...((tail ?? []) as typeof rows).filter((r) => !have.has(r.signal_id)).sort((a, b) => (a.signal_id < b.signal_id ? -1 : 1))];
+}
+
+/** A linked exit still waiting for its price matters only if the book would schedule it: not when the lot's resolution
+ *  comes at or before the exit's fill (book.eventsFor). Such an exit never holds the frontier. */
+const exitWait = (r: PortfolioRequest): number | null => (r.exitPendingTs != null && !(r.signal.resolution && r.signal.resolution.ts <= r.exitPendingTs) ? r.exitPendingTs : null);
+
+/**
+ * Queue the prices this portfolio is waiting for (entry prices, exit prices that matter), exactly as the Phase 2 sweep
+ * queues its own: PENDING rows in price_observations, existing rows untouched. Needed because the sweep stops looking
+ * at a signal once its $100 record is terminal, so an exit that arrives later is never priced for the portfolio, and a
+ * replay would wait for it for ever. The backlog fetches them on the next cycle. Dry run: counted, not written.
+ */
+async function enqueueMissing(db: SupabaseClient, dry: boolean, reqs: PortfolioRequest[], st: PortfolioRunStats) {
+  const need = new Map<string, { token_id: string; as_of: number; state: string }>();
+  for (const r of reqs) {
+    if (r.pendingEntry) need.set(`${r.signal.tokenId}@${r.key.ts}`, { token_id: r.signal.tokenId, as_of: r.key.ts, state: "PENDING" });
+    const xw = exitWait(r); if (xw != null) need.set(`${r.signal.tokenId}@${xw}`, { token_id: r.signal.tokenId, as_of: xw, state: "PENDING" });
+  }
+  if (!need.size) return; st.enqueued += need.size; if (dry) return;
+  const rows = [...need.values()];
+  for (let i = 0; i < rows.length; i += 500) await must(db.from("price_observations").upsert(rows.slice(i, i + 500), { onConflict: "token_id,as_of", ignoreDuplicates: true }), "price_observations enqueue");
 }
 
 /** Current requests for these signals (the sweep's own loaders, plus source_fill_id which they do not select). */
@@ -270,7 +300,9 @@ async function detectChanges(db: SupabaseClient, def: PortfolioDefinition, exec:
       const rp = rewindPoint(old, r);
       if (rp == null) continue;                                     // mark-only (or no) change
       if (rp <= W) { if (rp < rewindTs) rewindTs = rp; reasons.push(`${old == null ? "late signal" : "inputs changed"} ${r.signal.signalId.slice(0, 8)} at ${iso(rp)}`); }
-      else hashFixes.set(r.signal.signalId, r.fingerprint);        // change after W: no rewind, but keep input_hash current
+      // Keep input_hash current either way: a decision before the restored checkpoint is not replayed by the rewind, and
+      // a stale hash would make every later change look like this one again.
+      hashFixes.set(r.signal.signalId, r.fingerprint);
     }
     if (ids.length < size) break;
   }

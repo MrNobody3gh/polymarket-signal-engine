@@ -18,7 +18,7 @@ const INDEX: Record<string, string[]> = {
   signals: ["id", "token_id"], paper_ledger: ["signal_id"], paper_marks: ["signal_id"], markets: ["condition_id"], price_observations: ["token_id"], paper_executions: ["signal_id", "fill_ts"], token_resolutions: ["token_id"],
   portfolio_decisions: ["signal_id"], portfolio_lots: ["signal_id"], portfolio_checkpoints: ["portfolio_id"], portfolio_runs: ["portfolio_id"], portfolios: ["id"],
 };
-const SORTED: Record<string, string[]> = { paper_executions: ["fill_ts", "signal_id"], portfolio_equity: ["ts", "seq"] };
+const SORTED: Record<string, string[]> = { paper_executions: ["fill_ts", "signal_id"], portfolio_equity: ["ts", "seq"], paper_ledger: ["signal_id"] };
 type Range = [string, "gt" | "gte" | "lt" | "lte", any];
 const cmpv = (a: any, b: any) => (a === b ? 0 : a == null ? -1 : b == null ? 1 : a < b ? -1 : 1);
 
