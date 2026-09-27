@@ -302,11 +302,7 @@ function writer(db: SupabaseClient, pid: string, dry: boolean, st: PortfolioRunS
     await put(table, rows.filter((r) => have.get(r.signal_id) !== r.record_hash), "portfolio_id,signal_id");
   }
   return {
-    async del(table: string, where: (q: any) => any) {
-      if (dry) { const { data } = await where(db.from(table).select(table === "portfolio_equity" ? "ts" : "portfolio_id").eq("portfolio_id", pid)); count(st.deletes, table, (data ?? []).length); return; }
-      const { data } = await where(db.from(table).select("portfolio_id").eq("portfolio_id", pid)); count(st.deletes, table, (data ?? []).length);
-      await must(where(db.from(table).delete().eq("portfolio_id", pid)), `${table} delete`);
-    },
+    async del(table: string, where: (q: any) => any) { count(st.deletes, table, await countAndDelete(db, table, pid, where, dry)); },
     async lots(lots: BookLot[]) { await diff("portfolio_lots", lots.map((l) => lotRow(pid, l))); },
     async output(o: BookOutput, fps: Map<string, string>, eq: { ts: number; seq: number }) {
       await diff("portfolio_decisions", o.decisions.map((d) => decisionRow(pid, d, fps.get(d.signalId) ?? "")));
@@ -334,6 +330,15 @@ function writer(db: SupabaseClient, pid: string, dry: boolean, st: PortfolioRunS
   };
 }
 type Writer = ReturnType<typeof writer>;
+
+/** Delete this portfolio's rows matching `where` (unless dry) and return how many there were. The count is a head count:
+ *  exact however many rows match (a plain read is capped at 1,000 rows by Supabase, so it would undercount). */
+export async function countAndDelete(db: SupabaseClient, table: string, pid: string, where: (q: any) => any, dry: boolean): Promise<number> {
+  const { count, error } = await where(db.from(table).select("portfolio_id", { count: "exact", head: true }).eq("portfolio_id", pid));
+  if (error) throw new Error(`${table} count: ${error.message}`);
+  if (!dry && count) await must(where(db.from(table).delete().eq("portfolio_id", pid)), `${table} delete`);
+  return count ?? 0;
+}
 
 /** R10: one checkpoint per hour for the last 10 days, one per day before that; the watermark's is always kept. */
 async function pruneCheckpoints(w: Writer, db: SupabaseClient, pid: string, now: number, W: number) {

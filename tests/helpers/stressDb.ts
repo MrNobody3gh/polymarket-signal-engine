@@ -3,8 +3,9 @@
  * runner use. It records how many rows each call materialises, so tests can assert that a working set is bounded no
  * matter how large the table is.
  *
- * Supported: select / insert / upsert (onConflict, ignoreDuplicates) / update / delete; eq, neq, in, is, gt, gte, lt,
- * lte; order (multi-column) + limit; maybeSingle; rpc via `opts.rpc`. Tables in SORTED keep a sorted array so a range
+ * Supported: select (incl. { count: "exact", head: true }) / insert / upsert (onConflict, ignoreDuplicates) / update /
+ * delete; eq, neq, in, is, gt, gte, lt, lte; order (multi-column) + limit; maybeSingle; rpc via `opts.rpc`; an optional
+ * `maxRows` read cap like Supabase's. Tables in SORTED keep a sorted array so a range
  * scan on the first sort column (the portfolio stream, equity ranges) is a binary search, not a table scan.
  */
 type Row = Record<string, any>;
@@ -21,7 +22,7 @@ const SORTED: Record<string, string[]> = { paper_executions: ["fill_ts", "signal
 type Range = [string, "gt" | "gte" | "lt" | "lte", any];
 const cmpv = (a: any, b: any) => (a === b ? 0 : a == null ? -1 : b == null ? 1 : a < b ? -1 : 1);
 
-export function stressDb(opts: { slimExecutions?: boolean; rpc?: Record<string, (args: any) => any> } = {}) {
+export function stressDb(opts: { slimExecutions?: boolean; rpc?: Record<string, (args: any) => any>; maxRows?: number } = {}) {
   const tables: Record<string, Row[]> = {}; const idx: Record<string, Map<string, Map<unknown, Row[]>>> = {}; const pkMap: Record<string, Map<string, Row>> = {}; const sorted: Record<string, Row[]> = {};
   const stats = { maxRowsPerCall: 0, maxWritePerCall: 0, calls: 0, writes: {} as Record<string, number>, deletes: {} as Record<string, number> };
   const T = (t: string) => (tables[t] ??= []);
@@ -42,9 +43,9 @@ export function stressDb(opts: { slimExecutions?: boolean; rpc?: Record<string, 
   }
   function q(t: string) {
     let op = "select"; let payload: any; let o: any = {}; const eq: [string, any][] = []; const neq: [string, any][] = []; const ins: [string, any[]][] = []; const ranges: Range[] = []; const orders: [string, boolean][] = [];
-    let lim = Infinity; let single = false;
+    let lim = Infinity; let single = false; let head = false; let wantCount = false;
     const b: any = {
-      select: () => b, limit: (n: number) => ((lim = n), b), maybeSingle: () => ((single = true), b), single: () => ((single = true), b),
+      select: (_c?: string, x?: { count?: string; head?: boolean }) => { if (x?.head) head = true; if (x?.count) wantCount = true; return b; }, limit: (n: number) => ((lim = n), b), maybeSingle: () => ((single = true), b), single: () => ((single = true), b),
       order: (c: string, x?: { ascending?: boolean }) => (orders.push([c, x?.ascending !== false]), b),
       eq: (k: string, v: any) => (eq.push([k, v]), b), neq: (k: string, v: any) => (neq.push([k, v]), b), is: (k: string, v: any) => (eq.push([k, v]), b), in: (k: string, v: any[]) => (ins.push([k, v]), b),
       gt: (k: string, v: any) => (ranges.push([k, "gt", v]), b), gte: (k: string, v: any) => (ranges.push([k, "gte", v]), b), lt: (k: string, v: any) => (ranges.push([k, "lt", v]), b), lte: (k: string, v: any) => (ranges.push([k, "lte", v]), b),
@@ -75,6 +76,8 @@ export function stressDb(opts: { slimExecutions?: boolean; rpc?: Record<string, 
       stats.calls++;
       if (op === "select") {
         const { rows, ordered } = candidates(); let out: Row[] = [];
+        if (head || wantCount) { const n = rows.filter(match).length; if (head) return { data: null, count: n, error: null }; }
+        lim = Math.min(lim, opts.maxRows ?? Infinity);                  // Supabase caps every read (1,000 rows by default)
         const early = ordered || !orders.length;
         for (const r of rows) { if (match(r)) { out.push(r); if (early && out.length >= lim) break; } }
         if (!early) { out.sort((a, b) => { for (const [c, asc] of orders) { const x = cmpv(a[c], b[c]); if (x) return asc ? x : -x; } return 0; }); out = out.slice(0, lim); }
