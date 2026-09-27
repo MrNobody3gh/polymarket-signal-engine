@@ -21,7 +21,7 @@ Three modes run over the same signals. **IDEAL** is the original ledger and is k
 | Fees | OBSERVED formula `shares × rate × p × (1−p)` (taker only). `feesEnabled=false` → 0. Rate from market metadata when present, else 0.05 / 0.07 (published "Other/General" and highest category rates) — APPROXIMATED |
 | Resolution | OBSERVED `/v2/resolutions` payouts and `resolved_at`. Settlement is not an execution: no slippage, no fee |
 | Marks at 1h / 6h / 24h | OBSERVED. **Observations only**; never used as execution prices |
-| Portfolio limits | CONFIGURED by the operator — **no defaults** (`PAPER_PORTFOLIO_CONFIG`) |
+| Portfolio limits | CONFIGURED by the operator — **no defaults** (`PAPER_PORTFOLIO_CONFIG`, see [`PORTFOLIO.md`](PORTFOLIO.md) §7) |
 
 ## Fill states
 - **FILLED** — full requested notional within the liquidity cap and above the minimum order.
@@ -30,7 +30,11 @@ Three modes run over the same signals. **IDEAL** is the original ledger and is k
 - **EXPIRED** — fill time later than `maxSignalAgeSec` after the source trade (CONSERVATIVE: 1 h).
 - **INVALID** — signal price outside (0,1), market settled before the fill (settlement tick at/before fill time), or an observation that would be look-ahead.
 - **UNKNOWN** — no observation at/before the fill time, or the latest one is older than `maxQuoteAgeSec`. Not guessed.
-- Portfolio only: **REJECTED** with a reason — duplicate source trade, max open positions, per-wallet allocation, per-market exposure, insufficient cash (after reserve), total exposure, or below minimum order after a resize.
+- Portfolio only (Phase 3): **REJECTED** with a reason — `REJECTED_DUPLICATE_POSITION`, `REJECTED_MAX_OPEN_POSITIONS`,
+  `REJECTED_MAX_WALLET_ALLOCATION`, `REJECTED_MAX_MARKET_EXPOSURE`, `REJECTED_INSUFFICIENT_CASH` (after the reserve),
+  `REJECTED_MAX_PORTFOLIO_EXPOSURE`, or `REJECTED_BELOW_MIN_ORDER` (a resized order below the minimum order; only ever
+  with outcome REJECTED, decision D10). The per-signal Phase 2 records above never carry REJECTED. See
+  [`PORTFOLIO.md`](PORTFOLIO.md) §4.
 
 ## Look-ahead rules
 1. The only price used to decide or price an execution at time *t* is "last trade at or before *t*", from a complete bucket.
@@ -52,7 +56,12 @@ Every signal has one record per mode. Only **SIMULATED** rows carry P&L.
 | UNAVAILABLE_DATA | no trade existed at/before the fill time, the latest was too old, or the fetch failed 6 times | no — not a trading failure |
 | INVALID | bad signal data, settled market, look-ahead observation | no |
 | UNFILLED | liquidity cap, ≥ $1 ask, no bid, expired | no — a trading outcome |
-| REJECTED | portfolio limits (Phase 3) | — |
+| REJECTED | portfolio limits — exists only in the Phase 3 portfolio (`portfolio_decisions`), never in `paper_executions` | not a Phase 2 state |
+
+In the Phase 3 portfolio the same fill states apply at the portfolio's own order size (a larger order is more often
+PARTIALLY_FILLED; impact grows with size), plus REJECTED. Its fill rate excludes UNKNOWN and duplicate rejections, and
+nothing at or after the first event still waiting for a price is decided (the frontier). Details:
+[`PORTFOLIO.md`](PORTFOLIO.md) §4–§6.
 
 Coverage % = (all − pending − unavailable) ÷ all. Fill rate is shown both over decided rows and over all rows. Latency is
 labelled OBSERVED or ESTIMATED per record. Reports are computed by Postgres (`paper_exec_report`, `data_quality_report`).

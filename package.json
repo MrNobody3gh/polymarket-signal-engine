@@ -14,6 +14,7 @@
     "refresh": "tsx scripts/refresh.ts",
     "bot": "tsx scripts/bot-poll.ts",
     "tg:setup": "tsx scripts/telegram-setup.ts",
+    "portfolio:audit": "tsx scripts/portfolio-audit.ts",
     "db:push": "supabase db push"
   },
   "dependencies": {

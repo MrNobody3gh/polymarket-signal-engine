@@ -19,7 +19,7 @@ Cost: Supabase free, Vercel free (Hobby), Railway ~$5/month, Telegram free.
 1. Go to supabase.com → **New project**. Name it `polymarket-signals`, choose a strong DB password (save it), region **London**. Wait ~2 minutes for it to provision.
 2. Left sidebar → **SQL Editor** → **New query**.
 3. Open `supabase/migrations/0001_init.sql` in Cursor, copy **all** of it, paste into the editor, click **Run**. You should see "Success".
-4. Repeat for **every other file** in `supabase/migrations/`, in order: `0002_telegram.sql`, `0003_v2_paper.sql`, `0004_retention.sql`, `0005_signal_correctness.sql`, `0006_execution_sim.sql`, `0007_stabilise.sql`. Each should say "Success". Skipping any of them breaks the worker (missing tables, columns and database functions).
+4. Repeat for **every other file** in `supabase/migrations/`, in order: `0002_telegram.sql`, `0003_v2_paper.sql`, `0004_retention.sql`, `0005_signal_correctness.sql`, `0006_execution_sim.sql`, `0007_stabilise.sql`, `0008_portfolio.sql`, `0009_orphan_resolutions.sql`, `0010_portfolio_report.sql`, `0011_portfolio_report_access.sql`. Each should say "Success". Skipping any of them breaks the worker (missing tables, columns and database functions).
 5. Left sidebar → **Project Settings** → **API**. Copy two things:
    - **Project URL** (`https://xxxx.supabase.co`) → `NEXT_PUBLIC_SUPABASE_URL`
    - **service_role** key (click Reveal; it's the long secret one, *not* anon) → `SUPABASE_SERVICE_ROLE_KEY`
@@ -44,7 +44,7 @@ In the terminal, in the project folder:
 
 ```bash
 npm install
-npm test                      # expect: all passed (the 5 real-Postgres tests are skipped without PG_TEST_URL)
+npm test                      # expect: all passed (the real-Postgres tests are skipped without PG_TEST_URL)
 npm run refresh -- --seed     # loads the 180-wallet watchlist → "seeded 180"
 npm run dev                   # open http://localhost:3000/wallets — 180 wallets listed
 ```
@@ -124,7 +124,21 @@ npm run refresh
 ```
 Runs ~4,000 API calls, takes about 5 minutes, prints `scored 1400, tracking 180`. You usually don't need to: the Railway worker runs this automatically on its first start and then every day at 04:15 UTC (look for `[rescore]` lines in its logs). Don't trigger the refresh through the Vercel URL on the Hobby plan — it will hit the 60-second limit.
 
-## Step 10 — Optional extras
+## Step 10 — Optional: the portfolio simulation (Phase 3)
+
+A paper-only portfolio with finite capital, one per execution mode, shown on `/execution`. It is **off** unless you set
+it on the Railway worker. Two variables, both read once when the worker starts:
+
+| Variable | Value |
+|---|---|
+| `PAPER_PORTFOLIO_CONFIG` | One JSON object with every limit and the start time; no defaults. Unset = off. Every field and rule: `docs/PORTFOLIO.md` §7. |
+| `PAPER_PORTFOLIO_DRY_RUN` | `1` = compute and log only, write nothing. Unset, empty or `0` = real runs. Anything else turns the feature off. |
+
+Switch it on **only by following the runbook**, `docs/PORTFOLIO.md` §8 (migrations `0010`–`0011`, a dry run first,
+the read-only check `railway run npm run portfolio:audit`, then real runs). Switching off: delete the variables and
+redeploy; nothing is deleted (§9).
+
+## Step 11 — Optional extras
 
 - **Fill the position book faster:** the engine only knows positions it has seen fills for. It fills in naturally over the first day.
 - **Discord / email:** add `DISCORD_WEBHOOK_URL` or `RESEND_API_KEY` + `ALERT_EMAIL_TO` to Vercel *and* Railway env, redeploy.
@@ -150,3 +164,4 @@ Runs ~4,000 API calls, takes about 5 minutes, prints `scored 1400, tracking 180`
 | No alerts for hours | Normal-ish: rules only fire on $2k+ new positions by score ≥ 40 wallets. Send `/severity 1` and `/min 500` to loosen. Check Railway logs are still scrolling. |
 | Railway shows `socket closed; reconnect` repeatedly | Polymarket hiccup; it backs off and reconnects. Fills are still caught by the minute poll. |
 | Supabase "permission denied" | You pasted the anon key instead of service_role. |
+| Portfolio section says "off", or a `portfolio:` line in the Railway logs | See `docs/PORTFOLIO.md` §10 (troubleshooting). |

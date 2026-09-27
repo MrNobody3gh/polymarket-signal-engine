@@ -32,9 +32,9 @@ entry points (`/api/cron/*`, protected by `CRON_SECRET`).
 ## Setup (15 minutes)
 
 1. **Supabase** — create a project, then apply **every** migration in
-   `supabase/migrations/` in order, `0001` through `0007` (`npm run db:push`,
+   `supabase/migrations/` in order, `0001` through `0011` (`npm run db:push`,
    or paste each file into the SQL editor and run it). All are additive; the
-   code needs all seven.
+   code needs all of them.
 2. **Env** — `cp .env.example .env.local` and fill in the Supabase URL + service
    role key, a `CRON_SECRET`, and whichever alert channels you want
    (Telegram: create a bot with @BotFather, message it once, get your chat id
@@ -42,7 +42,7 @@ entry points (`/api/cron/*`, protected by `CRON_SECRET`).
 3. **Install + test**
    ```bash
    npm install
-   npm test          # ~200 tests; the 5 real-Postgres tests run when PG_TEST_URL is set
+   npm test          # the real-Postgres tests run only when PG_TEST_URL is set
    npm run typecheck
    ```
 4. **Seed the watchlist** from the snapshot so it works before the first full
@@ -164,7 +164,7 @@ src/lib/telegram/              bot: api, commands (pure), store, broadcast, webh
 scripts/telegram-setup.ts      register webhook + command menu
 scripts/bot-poll.ts            local long-polling mode
 src/app/                       dashboard + API routes
-src/lib/paper/                 paper ledger, marking/settlement, execution simulator (sim/)
+src/lib/paper/                 paper ledger, marking/settlement, execution simulator (sim/), portfolio (portfolio/)
 src/lib/chunk.ts               IN-list chunking for PostgREST (URL length)
 worker/ws-listener.ts          the worker: websocket, poller, re-score, marking, simulation, retention
 tests/                         vitest
@@ -180,3 +180,16 @@ Every signal is also recorded as a **paper experiment**: a $100 hypothetical lon
 - Health heartbeats live in `cursors` under `health:*`.
 
 Paper only. Win rates are computed on settled positions; samples under 10 are flagged "Insufficient data".
+
+## Portfolio (Phase 3)
+
+A simulated portfolio with finite capital on top of the Phase 2 paper records: one per execution mode, replayed signal
+by signal under operator-set limits (cash, open positions, per-wallet and per-market caps, total exposure), each
+position held until its own wallet exits or the market resolves. Paper only; IDEAL is shown as a non-causal baseline.
+It is **off** until `PAPER_PORTFOLIO_CONFIG` is set on the worker (no defaults); results appear on `/execution`.
+
+- How it works, how to read the numbers, configuration, the switch-on runbook and troubleshooting:
+  **[`docs/PORTFOLIO.md`](docs/PORTFOLIO.md)**. Design and decisions: `docs/PHASE3_PLAN.md`.
+- `npm run portfolio:audit` — read-only check of stored decisions against their current inputs (decision D13), part
+  of the switch-on runbook.
+- Code: `src/lib/paper/portfolio/`; migrations `0008`–`0011`.
