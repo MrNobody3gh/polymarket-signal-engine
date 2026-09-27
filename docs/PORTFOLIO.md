@@ -260,7 +260,7 @@ worker logs one line naming the problem and the feature stays off (the rest of t
 | `maxWalletAllocationUsd` | Cap on open cost from one source wallet | USD | number > 0 |
 | `minCashReserveUsd` | Cash that entries may not spend | USD | number ≥ 0 and < `startingCapitalUsd` |
 | `allowResize` | Shrink an order to fit a limit instead of rejecting it | — | `true` or `false` |
-| `startTs` | First fill time the portfolio considers | ISO time with a timezone | e.g. `"2026-09-27T04:26:41Z"`; not in the future |
+| `startTs` | First fill time the portfolio considers | ISO time with a timezone | for this deployment `"2026-09-27T04:28:38.593Z"` (below); not in the future |
 
 The validator does **not** check that the caps are at least `positionUsd`: with `allowResize: false` and, say,
 `maxMarketExposureUsd` below `positionUsd`, every order is rejected. Choose caps ≥ `positionUsd`.
@@ -287,6 +287,11 @@ select value, updated_at from cursors where key = 'refresh:last';
 and use `updated_at`, in UTC with a `Z`, as `startTs` (seconds are enough). If the row has already moved on, the
 Railway log line `[rescore] scored …, tracking …` of 27 Sep is printed immediately after that write; use its timestamp.
 The value is never derived at runtime.
+
+**Recorded value (read from production on 27 Sep 2026 at 22:33 UTC):** the 27 Sep re-score started at 04:26:18 and
+finished at **`2026-09-27T04:28:38.593Z`**; it scored 3,958 wallets and left 179 tracked. Use exactly that as
+`startTs`. The worker keeps whole seconds, so its boot line shows `start 2026-09-27T04:28:38.000Z`; that is expected.
+The database row has since been overwritten by later re-scores, so this document is now the record.
 
 **Changing any field creates a new portfolio.** The portfolio id is a hash of the mode, the execution configuration,
 the portfolio configuration and `startTs` (`portfolioIdFor`, `config.ts`). Change anything — a limit, `allowResize`, the
@@ -315,8 +320,8 @@ The variable has no effect while `PAPER_PORTFOLIO_CONFIG` is unset.
 This is the step 10 checklist. Do the steps in order; each one says what you should see and what means *stop*. The
 feature stays paper-only throughout.
 
-**Step 0 — note the start time (today, 27 Sep).** Run the `refresh:last` query in §7 after the 27 Sep re-score has
-finished (it starts at 04:15 UTC and takes about 5 minutes) and write `updated_at` down.
+**Step 0 — the start time.** Done: `2026-09-27T04:28:38.593Z`, recorded in §7. (For a future re-launch from a
+different date, run the `refresh:last` query in §7 after that day's re-score has finished and use `updated_at`.)
 
 **Step 1 — apply migrations `0010` and `0011`.** Supabase → SQL Editor → paste
 `supabase/migrations/0010_portfolio_report.sql` → Run; then the same for `0011_portfolio_report_access.sql`. Both
@@ -338,6 +343,16 @@ lines *in the same edit* (so there is never a moment with the config and no dry-
 PAPER_PORTFOLIO_DRY_RUN=1
 PAPER_PORTFOLIO_CONFIG={"startingCapitalUsd": …, …, "startTs": "2026-09-27T04:…Z"}
 ```
+
+**Configuration chosen by the owner for the first launch (27 Sep 2026).** $1,000 in positions of $25, so 30 can be open
+at once: all 30 fit under both the 80% exposure cap and the $150 reserve including entry fees, so every mode gets the
+same number of slots. At most 2 positions per market and 4 per wallet; no resizing.
+
+```
+PAPER_PORTFOLIO_CONFIG={"startingCapitalUsd": 1000, "positionUsd": 25, "maxMarketExposureUsd": 50, "maxWalletAllocationUsd": 100, "maxTotalExposurePct": 80, "maxOpenPositions": 30, "minCashReserveUsd": 150, "allowResize": false, "startTs": "2026-09-27T04:28:38.593Z"}
+```
+
+With it, the boot line reads `… · capital $1000 · $25/position`.
 
 Deploy. At boot the log shows (timestamp prefix omitted here and below):
 
