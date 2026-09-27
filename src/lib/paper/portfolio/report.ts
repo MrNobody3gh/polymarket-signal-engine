@@ -161,13 +161,16 @@ export async function portfolioReport(db: SupabaseClient, portfolioId: string): 
  * Every configured portfolio's report in one cursor row (`cursors['paper:portfolio']`), for the dashboard and bot.
  * One RPC per portfolio, no row reads in JS. Unset config → writes nothing and returns null. Not wired into the worker.
  */
-export async function savePortfolioSnapshot(db: SupabaseClient, opts: { config?: PortfolioRunConfig | null; now?: () => number } = {}) {
+/** This cycle's per-mode outcome, carried into the snapshot so a mode that failed or was skipped is visible on the page
+ *  (its report still shows the last successful run's figures). */
+export interface PortfolioJobOutcome { at: string; modes: { mode: string; failed: string | null; skipped: string | null }[] }
+export async function savePortfolioSnapshot(db: SupabaseClient, opts: { config?: PortfolioRunConfig | null; now?: () => number; job?: PortfolioJobOutcome } = {}) {
   const now = opts.now ?? (() => Math.floor(Date.now() / 1000));
   const cfg = opts.config === undefined ? portfolioRunConfigFromEnv(process.env, now()) : opts.config;
   if (!cfg) return null;
   const portfolios = [];
   for (const def of portfolioDefinitions(cfg)) portfolios.push({ portfolioId: def.id, mode: def.mode, report: await portfolioReport(db, def.id) });
-  const snapshot = { generatedAt: new Date(now() * 1000).toISOString(), portfolios };
+  const snapshot = { generatedAt: new Date(now() * 1000).toISOString(), portfolios, lastJob: opts.job ?? null };
   const { error } = await db.from("cursors").upsert({ key: PORTFOLIO_SNAPSHOT_KEY, value: JSON.stringify(snapshot), updated_at: snapshot.generatedAt });
   if (error) throw new Error(`cursors write: ${error.message}`);
   return snapshot;

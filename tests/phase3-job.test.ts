@@ -176,6 +176,42 @@ describe("runner: prices it waits for (found by the R4 world)", () => {
     const [d] = await runPortfolios(dry as never, { config: cfg(START + DAY), modes: ["REALISTIC"], owner: "t", dryRun: true, now: () => START + DAY });
     expect(d.enqueued).toBe(1); expect(dry.T("price_observations").some((r) => r.as_of === xFill)).toBe(false);                  // dry run: counted, not written
   });
+  // Review (step 8): the tests above stop once the price is queued. Replay correctness needs the other half.
+  const inputsOnly = (db: Db) => { const fresh = leaseDb(); for (const t of ["signals", "paper_ledger", "paper_executions", "price_observations", "token_resolutions", "markets", "paper_marks"]) for (const r of db.T(t)) fresh.insertRow(t, { ...r }); return fresh; };
+  const laterSignal = (db: Db, src: number) => { const id = "00000000-0000-4000-a000-000000000009"; const ev = src + 40; const fill = timeline(src, ev, MODES.REALISTIC).fillTs;
+    db.insertRow("signals", { id, kind: "NEW_POSITION", wallet: "w2", condition_id: "c2", token_id: "tk2", price: 0.3, usd: 3000, created_at: iso(src), evaluated_at: iso(ev), source_fill_id: "f9" });
+    db.insertRow("paper_ledger", { signal_id: id, created_at: iso(ev), sim_terminal: true, side: "LONG" });
+    db.insertRow("paper_executions", { signal_id: id, mode: "REALISTIC", fill_ts: iso(fill), computed_at: iso(START + DAY + 1), state: "OPEN", coverage_state: "SIMULATED", record_hash: "y" });
+    db.insertRow("price_observations", { token_id: "tk2", as_of: fill, state: "COMPLETE", obs_ts: fill - 10, price: 0.31, resolution_seconds: 0 }); return fill; };
+  const outputs = (db: Db) => JSON.stringify(["portfolio_decisions", "portfolio_lots", "portfolio_equity"].map((t) => db.T(t).map(({ computed_at: _c, ...r }) => r).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))));
+  it("review: when the queued exit price arrives, the next run applies the exit, releases the frontier, and equals a fresh replay", async () => {
+    const { db, xFill } = await world(false);
+    Object.assign(db.T("price_observations").find((r) => r.as_of === xFill)!, { state: "COMPLETE", obs_ts: xFill - 5, price: 0.55, resolution_seconds: 0 }); // the backlog fetched it
+    const later = laterSignal(db, xFill + 7200); // D12: the watermark moves past the exit only when a later entry is decided
+    const now = START + DAY + 900; setClock(now);
+    const [s2] = await runPortfolios(db as never, { config: cfg(START + DAY), modes: ["REALISTIC"], owner: "t", now: () => now });
+    expect(s2.frontier).toBeNull(); expect(s2.enqueued).toBe(0); expect(s2.watermark).toBe(later);
+    const lot = db.T("portfolio_lots")[0]; expect(lot.state).toBe("EXITED"); expect(Number(lot.exit_proceeds)).toBeGreaterThan(0); expect(Number(lot.shares_open)).toBeCloseTo(0, 9);
+    const fresh = inputsOnly(db); const [f] = await runPortfolios(fresh as never, { config: cfg(START + DAY), modes: ["REALISTIC"], owner: "t", now: () => now });
+    expect(outputs(db)).toBe(outputs(fresh)); expect(JSON.stringify(s2.summary)).toBe(JSON.stringify(f.summary));
+  });
+  it("review: an exit price that never existed (UNAVAILABLE) releases the frontier; the lot is held to its resolution, and equals a fresh replay", async () => {
+    const { db, xFill } = await world(false);
+    Object.assign(db.T("price_observations").find((r) => r.as_of === xFill)!, { state: "UNAVAILABLE", price: null, obs_ts: null });
+    laterSignal(db, xFill + 7200); // past the resolution (fill + 3600), so the resolution is applied
+    const now = START + DAY + 900; setClock(now);
+    const [s2] = await runPortfolios(db as never, { config: cfg(START + DAY), modes: ["REALISTIC"], owner: "t", now: () => now });
+    expect(s2.frontier).toBeNull();
+    const lot = db.T("portfolio_lots")[0]; expect(lot.state).toBe("RESOLVED"); expect(Number(lot.resolution_value)).toBe(1); expect(lot.exit_ts ?? null).toBeNull();
+    const fresh = inputsOnly(db); await runPortfolios(fresh as never, { config: cfg(START + DAY), modes: ["REALISTIC"], owner: "t", now: () => now });
+    expect(outputs(db)).toBe(outputs(fresh));
+  });
+  it("review: while the exit price is still PENDING nothing after it is decided, and a retry that is still pending changes nothing", async () => {
+    const { db, s, xFill } = await world(false); laterSignal(db, xFill + 7200); const before = outputs(db); // a later entry exists, yet must not be decided
+    const now = START + DAY + 900; setClock(now);
+    const [s2] = await runPortfolios(db as never, { config: cfg(START + DAY), modes: ["REALISTIC"], owner: "t", now: () => now });
+    expect(s2.frontier).toEqual(s.frontier); expect(s2.watermark).toBe(s.watermark); expect(outputs(db)).toBe(before); expect(db.T("portfolio_lots")[0].state).toBe("OPEN");
+  });
 });
 
 describe("runner: a rewind keeps input_hash current for decisions it does not replay", () => {
@@ -410,6 +446,84 @@ d("D15 and migrations 0001–0011 (real Postgres, own database)", () => {
       expect((await as("anon", "select paper_exec_report('REALISTIC') is not null as ok")).rows[0].ok).toBe(true);
       const acl = (await c.query("select proname, proacl::text from pg_proc where proname in ('portfolio_report','portfolio_pending_ahead') order by proname")).rows;
       for (const r of acl) { expect(r.proacl).toContain("service_role=X"); expect(r.proacl).not.toMatch(/(^|[{,])=X|anon=X|authenticated=X/); }
+    } finally { await c.end(); }
+  }, 120_000);
+});
+
+
+// ───────────────────────────── Step 8 review: partial-mode reporting, strict dry-run switch ─────────────────────────────
+describe("review: partial-mode failures are visible on the page", () => {
+  it("a mode that fails while the others complete is reported per mode in the snapshot and the view", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); const w = cycleWorld({ hours: 3, perHour: 20, seed: 11 }); w.arriveAll();
+    const now = START + 6 * 3600; const conf = cfg(now);
+    await w.cycle(now, (t) => runPortfolios(w.db as never, { config: conf, owner: "t", now: () => t })); // a first successful run for every mode
+    const real = runPortfolios; const logs: string[] = [];
+    const r = await runPortfolioJob(w.db as never, { config: conf, now: () => now + 900, log: (m) => logs.push(m),
+      run: (async (db: unknown, o: any) => { if (o.modes[0] === "CONSERVATIVE") throw new Error("lease RPC timed out"); return real(db as never, o); }) as never });
+    if (r.off) throw new Error("unexpected"); expect(r.snapshotSaved).toBe(true);
+    expect(r.modes.map((m) => [m.mode, m.failed ?? null])).toEqual([["IDEAL", null], ["REALISTIC", null], ["CONSERVATIVE", "lease RPC timed out"]]);
+    const snap = JSON.parse(w.db.T("cursors").find((c) => c.key === PORTFOLIO_SNAPSHOT_KEY)!.value);
+    expect(snap.lastJob.modes.find((m: any) => m.mode === "CONSERVATIVE")).toEqual({ mode: "CONSERVATIVE", failed: "lease RPC timed out", skipped: null });
+    const v = portfolioView(snap, now + 900); const row = v.sections.flatMap((x) => x.rows).find((x) => x.label === "This cycle")!;
+    expect(row.values[0]).toBe("completed"); expect(row.values[1]).toBe("completed"); expect(row.values[2]).toMatch(/^FAILED this cycle — lease RPC timed out/);
+  });
+  it("a run that started and never finished is flagged on that mode only", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); const w = cycleWorld({ hours: 3, perHour: 20, seed: 12 }); w.arriveAll();
+    const now = START + 6 * 3600; const conf = cfg(now);
+    await w.cycle(now, (t) => runPortfolios(w.db as never, { config: conf, owner: "t", now: () => t }));
+    const ideal = portfolioDefinitions(conf).find((d) => d.mode === "IDEAL")!;
+    const run = w.db.T("portfolio_runs").find((x) => x.portfolio_id === ideal.id)!; run.last_run_started_at = iso(now + 600); // started, crashed before finishing
+    const snap = await savePortfolioSnapshot(w.db as never, { config: conf, now: () => now + 900 });
+    const warn = portfolioView(snap, now + 900).sections.flatMap((x) => x.rows).find((x) => x.label === "Warnings")!;
+    expect(warn.values[0]).toContain("did not finish"); expect(warn.values[1]).not.toContain("did not finish"); expect(warn.values[2]).not.toContain("did not finish");
+  });
+  it("if no mode has finished a run yet and the job failed, the empty state says so", () => {
+    const v = portfolioView({ generatedAt: iso(START), portfolios: [], lastJob: { at: iso(START), modes: [{ mode: "REALISTIC", failed: "boom", skipped: null }] } }, START + 60);
+    expect(v.state).toBe("no-run"); expect(v.message).toContain("The last job failed: REALISTIC — boom");
+  });
+});
+
+describe("review: invalid configuration — the dry-run switch is strict", () => {
+  const conf = JSON.stringify({ ...PC, startTs: iso(START) });
+  it("a dry-run value other than 0 or 1 turns the feature off (never silently writes), with one line", () => {
+    for (const bad of ["true", "yes", "2", " 1", "on"]) {
+      const logs: string[] = []; const s = portfolioJobSetup({ PAPER_PORTFOLIO_CONFIG: conf, PAPER_PORTFOLIO_DRY_RUN: bad }, START + DAY, (m) => logs.push(m));
+      expect(s.config, bad).toBeNull(); expect(logs).toHaveLength(1); expect(logs[0]).toMatch(/^portfolio: off \(invalid configuration\) — PAPER_PORTFOLIO_DRY_RUN must be 0 or 1/);
+    }
+  });
+  it("0, empty and unset mean real runs; 1 means dry run", () => {
+    for (const [v, dry] of [["0", false], ["", false], [undefined, false], ["1", true]] as const) {
+      const s = portfolioJobSetup({ PAPER_PORTFOLIO_CONFIG: conf, ...(v === undefined ? {} : { PAPER_PORTFOLIO_DRY_RUN: v }) }, START + DAY, () => {});
+      expect(s.config, String(v)).not.toBeNull(); expect(s.dryRun, String(v)).toBe(dry);
+    }
+  });
+  it("with the config unset, a bad dry-run value changes nothing (still one 'off' line)", () => {
+    const logs: string[] = []; expect(portfolioJobSetup({ PAPER_PORTFOLIO_DRY_RUN: "true" }, START, (m) => logs.push(m)).config).toBeNull();
+    expect(logs).toEqual(["portfolio: off (PAPER_PORTFOLIO_CONFIG unset)"]);
+  });
+});
+
+// ───────────────────────────── Step 8 review: D15 under Supabase-style default privileges ─────────────────────────────
+d("review: D15 holds where new functions are granted to the API roles by default (as on Supabase)", () => {
+  const name = `step8dp_${process.pid}_${Date.now()}`; let url = "";
+  beforeAll(async () => {
+    const admin = new pg.Client({ connectionString: PGURL }); await admin.connect(); await admin.query(`create database ${name}`); await admin.end();
+    const u = new URL(PGURL!); u.pathname = `/${name}`; url = u.toString();
+  });
+  afterAll(async () => { const admin = new pg.Client({ connectionString: PGURL }); await admin.connect(); await admin.query(`drop database if exists ${name} with (force)`); await admin.end(); });
+  it("every signature of portfolio_report / portfolio_pending_ahead denies anon and authenticated; service_role may execute", async () => {
+    const c = new pg.Client({ connectionString: url }); await c.connect();
+    try {
+      // Supabase grants EXECUTE on new public functions to the API roles directly, not only via PUBLIC.
+      await c.query("alter default privileges in schema public grant execute on functions to anon, authenticated, service_role");
+      for (const f of readdirSync(MIG).filter((x) => /^\d{4}_.*\.sql$/.test(x)).sort()) await c.query(readFileSync(path.join(MIG, f), "utf8"));
+      const rows = (await c.query(`select p.oid::regprocedure::text as sig,
+          has_function_privilege('anon', p.oid, 'execute') as anon, has_function_privilege('authenticated', p.oid, 'execute') as auth,
+          has_function_privilege('service_role', p.oid, 'execute') as svc
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname in ('portfolio_report', 'portfolio_pending_ahead') order by 1`)).rows;
+      expect(rows.map((r) => r.sig)).toEqual(["portfolio_pending_ahead(text,timestamp with time zone)", "portfolio_report(text)"]); // exactly the signatures 0011 names
+      for (const r of rows) { expect(r.anon, r.sig).toBe(false); expect(r.auth, r.sig).toBe(false); expect(r.svc, r.sig).toBe(true); }
     } finally { await c.end(); }
   }, 120_000);
 });

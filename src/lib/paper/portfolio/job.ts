@@ -41,6 +41,12 @@ export function portfolioJobSetup(env: Record<string, string | undefined> = proc
   try {
     const config = portfolioRunConfigFromEnv(env, now);
     if (!config) { log("portfolio: off (PAPER_PORTFOLIO_CONFIG unset)"); return { config: null, dryRun }; }
+    // A dry-run switch that is set but not exactly "0" or "1" (e.g. "true") must never mean "write for real".
+    const rawDry = env.PAPER_PORTFOLIO_DRY_RUN;
+    if (rawDry !== undefined && rawDry !== "" && rawDry !== "0" && rawDry !== "1") {
+      log(`portfolio: off (invalid configuration) — PAPER_PORTFOLIO_DRY_RUN must be 0 or 1, got ${JSON.stringify(rawDry)}`);
+      return { config: null, dryRun: false };
+    }
     log(`portfolio: on${dryRun ? " (dry run: nothing written)" : ""} · start ${config.startIso} · capital $${config.portfolio.startingCapitalUsd} · $${config.portfolio.positionUsd}/position`);
     return { config, dryRun };
   } catch (e) {
@@ -81,7 +87,7 @@ export async function runPortfolioJob(db: SupabaseClient, deps: PortfolioJobDeps
   let snapshotSaved = false;
   if (dryRun) log(`[portfolio] dry run: nothing written; snapshot and heartbeat not saved`);
   else {
-    await snap(db, { config: deps.config, now }); snapshotSaved = true;
+    await snap(db, { config: deps.config, now, job: { at: new Date(now() * 1000).toISOString(), modes: modes.map((m) => ({ mode: m.mode, failed: m.failed ?? null, skipped: m.skipped ?? null })) } }); snapshotSaved = true;
     await beat(db, JSON.stringify({ at: new Date(now() * 1000).toISOString(), modes: modes.map((m) => ({ mode: m.mode, watermark: m.watermark, rewound: m.rewound, failed: m.failed ?? null, skipped: m.skipped ?? null })) }));
   }
   return { dryRun, modes, snapshotSaved, durationMs: Date.now() - t0 };

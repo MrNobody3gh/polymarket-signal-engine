@@ -644,8 +644,10 @@ describe("runner", () => {
         portfolio_lots: await ins("portfolio_lots", w.db.T("portfolio_lots")), portfolio_equity: await ins("portfolio_equity", w.db.T("portfolio_equity")), token_resolution_obs: await ins("token_resolution_obs", w.db.T("token_resolution_obs")),
       };
       for (const [k, v] of Object.entries(counts)) expect(v, k).toBeGreaterThan(0);
-      expect(Number((await c.query("select count(*) from portfolio_lots l join portfolio_decisions d using (portfolio_id, signal_id) where d.outcome in ('FILLED','PARTIALLY_FILLED')")).rows[0].count)).toBe(counts.portfolio_lots);
-      const ck = (await c.query("select state from portfolio_checkpoints order by event_ts desc limit 1")).rows[0].state as BookState; expect(ck.v).toBe(1);
+      // Only this test's portfolios: the database is shared with other files running in parallel (and may hold their rows).
+      const mine = w.db.T("portfolios").map((p) => p.id);
+      expect(Number((await c.query("select count(*) from portfolio_lots l join portfolio_decisions d using (portfolio_id, signal_id) where d.outcome in ('FILLED','PARTIALLY_FILLED') and l.portfolio_id = any($1)", [mine])).rows[0].count)).toBe(counts.portfolio_lots);
+      const ck = (await c.query("select state from portfolio_checkpoints where portfolio_id = any($1) order by event_ts desc limit 1", [mine])).rows[0].state as BookState; expect(ck.v).toBe(1);
       expect(() => new PortfolioBook(MODES.IDEAL, PCS.tight, ck)).not.toThrow();                    // a checkpoint survives jsonb
     } finally { await c.query("rollback"); await c.end(); }
   });

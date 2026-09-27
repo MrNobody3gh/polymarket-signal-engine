@@ -25,7 +25,18 @@ export const IDEAL_COLUMN_NOTE = "non-causal baseline — not a strategy that co
 export const INSUFFICIENT = "insufficient data";
 const STALE_AFTER_SEC = 45 * 60;
 
-type Snap = { generatedAt?: string; portfolios?: { portfolioId: string; mode: string; report: PortfolioReport | null }[] };
+type Snap = { generatedAt?: string; portfolios?: { portfolioId: string; mode: string; report: PortfolioReport | null }[];
+  lastJob?: { at: string; modes: { mode: string; failed: string | null; skipped: string | null }[] } | null };
+export const MODE_FAILED = "FAILED this cycle";
+export const RUN_UNFINISHED = "the last run for this mode did not finish";
+/** This cycle's outcome for one mode, independent of whether the mode has ever finished a run. */
+const jobCell = (snap: Snap, mode: string) => {
+  const j = snap.lastJob?.modes?.find((m) => m.mode === mode);
+  if (!j) return "—";
+  if (j.failed) return `${MODE_FAILED} — ${j.failed} (figures shown are from the last completed run)`;
+  if (j.skipped) return "skipped this cycle — another runner holds the lease";
+  return "completed";
+};
 const utc = (t: number | null | undefined) => (t == null ? "—" : `${new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`);
 const money = (v: number | null | undefined) => (v == null || !Number.isFinite(Number(v)) ? "—" : `${Number(v) < 0 ? "−" : ""}$${Math.abs(Number(v)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
 const pct = (v: number | null | undefined, d = 1) => (v == null || !Number.isFinite(Number(v)) ? "—" : `${(Number(v) * 100).toFixed(d)}%`);
@@ -41,7 +52,10 @@ export function portfolioView(snapshot: unknown, now: number): PortfolioView {
   const gen = snap.generatedAt ?? null; const genTs = gen ? Date.parse(gen) / 1000 : null;
   const reports = PORTFOLIO_MODES.map((m) => snap.portfolios!.find((p) => p.mode === m)?.report ?? null);
   const decided = reports.map((r) => (r && r.asOf?.ts != null ? r : null));
-  if (!decided.some(Boolean)) return empty("no-run", NO_RUN_MESSAGE, gen);
+  if (!decided.some(Boolean)) {
+    const failed = (snap.lastJob?.modes ?? []).filter((m) => m.failed);
+    return empty("no-run", failed.length ? `${NO_RUN_MESSAGE} The last job failed: ${failed.map((m) => `${m.mode} — ${m.failed}`).join("; ")}.` : NO_RUN_MESSAGE, gen);
+  }
 
   const cell = (f: (r: PortfolioReport) => string, none = "—") => decided.map((r) => (r ? f(r) : none));
   const row = (label: string, f: (r: PortfolioReport) => string, none = "—"): ViewRow => ({ label, values: cell(f, none) });
@@ -109,7 +123,10 @@ export function portfolioView(snapshot: unknown, now: number): PortfolioView {
       row("Largest gain / loss", (r) => `${money(r.robustness.largestWin)} / ${money(r.robustness.largestLoss)}`), row("Median lot return", (r) => pct(r.robustness.medianReturn, 2)),
     ] },
     { title: "Health", rows: [
-      row("Warnings", (r) => (r.health.warnings.length ? r.health.warnings.join(" · ") : "none")),
+      { label: "This cycle", values: PORTFOLIO_MODES.map((m) => jobCell(snap, m)) },
+      row("Warnings", (r) => { const w = [...r.health.warnings];
+        const st = r.health.lastRunStartedAt, fin = r.asOf.lastRunFinishedAt; if (st != null && (fin == null || st > fin)) w.push(RUN_UNFINISHED);
+        return w.length ? w.join(" · ") : "none"; }),
       row("Execution rows after the as-of time (waiting)", (r) => int(r.health.pendingAhead)), row("Rows skipped as stale in the last run", (r) => int(r.health.staleRows)),
       row("Lease", (r) => (r.health.lease.held ? `held by ${r.health.lease.owner ?? "?"} until ${utc(r.health.lease.until)}` : "free")),
       row("Last rewind", (r) => { const w = r.health.lastRewind as { to: number | null; reasons?: string[] } | null; return w && w.to != null ? `to ${utc(w.to)}${w.reasons?.[0] ? ` — ${w.reasons[0]}` : ""}` : "none in the last run"; }),
