@@ -369,6 +369,24 @@ describe("PortfolioBook", () => {
       expect(book.relink(s.signalId, { exit: s.exit, exitId: "x-1", resolution: { ts: xTs - 10, value: 1 } })).toEqual({ ok: false, rewindTo: xTs - 10 });
       book.advance(null); expect(book.take().lots.at(-1)).toMatchObject({ signalId: s.signalId, state: "RESOLVED", resolutionValue: 1 });
     });
+    it("an exit that was applied but sold nothing (no price) is not re-scheduled after a restore; a different exit asks for a rewind", () => {
+      // Found by the step 6 runner (resume test): such a lot still names its exit but has no exit time, so it looked
+      // exactly like a lot whose exit was still pending, and every restore rewound.
+      const exitAt = T0 + 500;
+      const s: BookSignal = { ...history(1)[0], sourceKey: "solo", exitId: "x-1", exit: { triggerTs: exitAt, triggerEvalTs: exitAt + 5, triggerPrice: 0.5, triggerUsd: 2000, obs: null, market: null }, resolution: null, entry: { sourceTs: T0, evalTs: T0 + 5, signalPrice: 0.4, sourceUsd: 2000, obs: { ts: T0, price: 0.4, resolutionSeconds: 0 }, market: null } };
+      const next = (i: number, at: number): BookSignal => ({ ...history(1)[0], signalId: `s7777${i}`, sourceKey: `n${i}`, exit: null, exitId: null, resolution: null, entry: { ...s.entry, sourceTs: at, evalTs: at + 5 } });
+      const whole = new PortfolioBook(exec, PCS.roomy); whole.submit(s); whole.submit(next(1, exitAt + 1000));
+      const lot = whole.openLots().find((l) => l.signalId === s.signalId)!; expect(lot).toMatchObject({ state: "OPEN", exitId: "x-1", exitTs: null });
+      const restored = new PortfolioBook(exec, PCS.roomy, JSON.parse(JSON.stringify(whole.snapshot())));
+      expect(restored.relink(s.signalId, { exit: s.exit, exitId: "x-1", resolution: null })).toEqual({ ok: true });
+      expect(restored.openLots().find((l) => l.signalId === s.signalId)).toMatchObject({ exitId: "x-1", exitTs: null });
+      expect(restored.snapshot().heap.filter((e) => e.id === s.signalId)).toEqual([]);           // not scheduled again
+      expect(restored.relink(s.signalId, { exit: s.exit, exitId: "x-2", resolution: null })).toEqual({ ok: false, rewindTo: lot.openedTs });
+      const res = { ts: exitAt + 5000, value: 1 };
+      expect(restored.relink(s.signalId, { exit: s.exit, exitId: "x-1", resolution: res })).toEqual({ ok: true }); // a resolution learned later still attaches
+      for (const b of [whole, restored]) { b.submit(next(2, exitAt + 9000)); b.take(); }
+      expect(restored.openLots().some((l) => l.signalId === s.signalId)).toBe(false);
+    });
   });
 });
 

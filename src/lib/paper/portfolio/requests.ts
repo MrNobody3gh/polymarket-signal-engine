@@ -77,16 +77,25 @@ function stable(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
   return `{${Object.keys(v as object).sort().filter((k) => (v as Record<string, unknown>)[k] !== undefined).map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`).join(",")}}`;
 }
-const h = (v: unknown) => createHash("sha256").update(stable(v)).digest("hex").slice(0, 16);
+/** Short, stable content hash (sorted-key JSON → sha256). Also used by the runner for record hashes. */
+export const stableHash = (v: unknown, len = 16) => createHash("sha256").update(stable(v)).digest("hex").slice(0, len);
+const h = (v: unknown) => stableHash(v);
+
+/** Market metadata as a decision input: `observedAt` (when it was fetched) is provenance, so a re-fetch with unchanged
+ *  values must not look like a change (step 6 review, R8). Applies to the entry and to the exit, which reuses it. */
+function decisionMarket(m: unknown): unknown {
+  if (!m || typeof m !== "object") return m ?? null;
+  const { observedAt: _fetched, ...rest } = m as Record<string, unknown>; return rest;
+}
 
 /**
  * `entry|exit@exitTs|resolution@resolutionTs`. Each part hashes only what can change that part of the decision; the
  * mark (unrealised value only) is never included, so a new 1h/6h/24h mark never causes a rewind or a write.
  */
 export function fingerprint(s: BookSignal, exec: ExecConfig, pendingEntry: boolean, exitPendingTs: number | null): string {
-  const entry = h({ kind: s.kind, wallet: s.wallet, conditionId: s.conditionId, tokenId: s.tokenId, sourceKey: s.sourceKey, entry: s.entry, pending: pendingEntry });
+  const entry = h({ kind: s.kind, wallet: s.wallet, conditionId: s.conditionId, tokenId: s.tokenId, sourceKey: s.sourceKey, entry: { ...s.entry, market: decisionMarket(s.entry.market) }, pending: pendingEntry });
   const exitTs = s.exit ? timeline(s.exit.triggerTs, s.exit.triggerEvalTs, exec).fillTs : exitPendingTs;
-  const exit = s.exit || exitPendingTs != null ? h({ id: s.exitId, exit: s.exit, pendingAt: exitPendingTs }) : "-";
+  const exit = s.exit || exitPendingTs != null ? h({ id: s.exitId, exit: s.exit ? { ...s.exit, market: decisionMarket(s.exit.market) } : null, pendingAt: exitPendingTs }) : "-";
   const res = s.resolution ? h(s.resolution) : "-";
   return `${entry}|${exit}@${exitTs ?? "-"}|${res}@${s.resolution?.ts ?? "-"}`;
 }

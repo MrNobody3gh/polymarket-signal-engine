@@ -96,8 +96,8 @@ export class PortfolioBook {
       resolutionTs: null, resolutionValue: null, resolutionProceeds: null, state: "OPEN", realizedPnl: -e.fee, closedTs: null };
     this.lots.set(lot.signalId, lot); this.taken.set(sig.sourceKey, ts);
     const d = decide(e.status, resized ? `RESIZED:${e.reason ?? "LIMIT"}` : e.reason, { filledUsd: e.filledUsd, filledShares: e.filledShares, fillPrice: e.fillPrice, fee: e.fee, resized });
+    this.scheduleFor(lot, sig.exit, sig.exitId ?? null, sig.resolution); // first, so the emitted lot names its linked exit
     this.emitLot(lot); this.snap(ts);
-    this.scheduleFor(lot, sig.exit, sig.exitId ?? null, sig.resolution);
     return d;
   }
 
@@ -146,12 +146,16 @@ export class PortfolioBook {
       if (link.exitId !== lot.exitId) return { ok: false, rewindTo: Math.min(lot.exitTs, link.exit ? timeline(link.exit.triggerTs, link.exit.triggerEvalTs, this.exec).fillTs : lot.exitTs) };
       if (link.resolution && link.resolution.ts <= lot.exitTs) return { ok: false, rewindTo: link.resolution.ts };
     }
-    const evs = this.eventsFor(lot, lot.exitTs != null ? null : link.exit, link.resolution);
+    // Nor can an exit that was applied but sold nothing (no price, no liquidity): the lot still names it, but it is no
+    // longer scheduled. Its time is not kept, so a different exit replays from the lot's own fill.
+    const consumed = lot.exitTs == null && lot.exitId != null && !this.s.heap.some((e) => e.id === signalId && e.type === "EXIT");
+    if (consumed && link.exitId !== lot.exitId) return { ok: false, rewindTo: lot.openedTs };
+    const evs = this.eventsFor(lot, lot.exitTs != null || consumed ? null : link.exit, link.resolution);
     const last = this.s.last;
     const late = evs.filter((e) => last && cmpKey(e, last) <= 0);
     if (late.length) return { ok: false, rewindTo: Math.min(...late.map((e) => e.ts)) };
     this.s.heap = this.s.heap.filter((e) => e.id !== signalId); this.heapify();
-    if (lot.exitTs == null) lot.exitId = null;
+    if (lot.exitTs == null && !consumed) lot.exitId = null;
     for (const ev of evs) { this.push({ ...ev, seq: this.s.seq++ }); if (ev.type === "EXIT") lot.exitId = link.exitId; }
     if (link.mark !== undefined) lot.mark = link.mark && link.mark.ts >= lot.openedTs ? link.mark : null;
     return { ok: true };
