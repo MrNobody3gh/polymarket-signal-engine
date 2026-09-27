@@ -4,7 +4,9 @@
 --
 -- Rules the numbers follow:
 --  - Everything is "as of the watermark" (portfolio_runs.last_watermark_ts, the last second the runner fully decided):
---    rows timestamped after it are ignored (decisions by event_ts, lots by opened_ts, equity by ts, marks by observed_at).
+--    rows timestamped after it are ignored (decisions by event_ts, lots by opened_ts, equity by ts, marks by observed_at),
+--    and a lot's exit / resolution counts only if it happened by then: its state, open shares and cost, cash and realised
+--    P&L are rebuilt as of the watermark (a lot exited after it is reported open).
 --  - Two bases, never mixed (plan B8 / R8): cost basis (cash + open lots at cost) and, separately, market value (open
 --    lots at their latest 1h/6h/24h mark observed between the lot's fill and the watermark; unmarked lots at cost, and
 --    counted).
@@ -28,9 +30,24 @@ create or replace function portfolio_report(p_portfolio_id text) returns jsonb l
   a as (select (select last_watermark_ts from r) as as_of, (p.config->>'startingCapitalUsd')::numeric as cap0,
                coalesce((p.config->>'minCashReserveUsd')::numeric, 0) as reserve from p),
   d as (select * from portfolio_decisions where portfolio_id = p_portfolio_id and event_ts <= (select as_of from a)),
-  l as (select lt.*, d.kind, lt.state in ('OPEN','PARTIALLY_EXITED') as is_open, lt.state in ('EXITED','RESOLVED') as is_settled
-          from portfolio_lots lt left join d on d.signal_id = lt.signal_id
-         where lt.portfolio_id = p_portfolio_id and lt.opened_ts <= (select as_of from a)),
+  -- Lots as of the watermark: a lot has at most one exit and one resolution, each applied only if it happened by asOf.
+  -- xa / ra: exit / resolution applied; cpart: the cost the exit took (the book's cost × sold / shares).
+  l0 as (select lt.*, d.kind, (lt.exit_ts is not null and lt.exit_ts <= (select as_of from a)) as xa,
+                (lt.resolution_ts is not null and lt.resolution_ts <= (select as_of from a)) as ra,
+                lt.cost_usd * (coalesce(lt.exit_shares, 0) / lt.shares_filled) as cpart
+           from portfolio_lots lt left join d on d.signal_id = lt.signal_id
+          where lt.portfolio_id = p_portfolio_id and lt.opened_ts <= (select as_of from a)),
+  l1 as (select signal_id, kind, wallet, condition_id, opened_ts, cost_usd, entry_fee,
+                case when ra then 'RESOLVED' when xa and state = 'EXITED' then 'EXITED' when xa then 'PARTIALLY_EXITED' else 'OPEN' end as state,
+                case when ra or (xa and state = 'EXITED') then 0 when xa then shares_filled - exit_shares else shares_filled end as shares_open,
+                case when ra or (xa and state = 'EXITED') then 0 when xa then cost_usd - cpart else cost_usd end as cost_open,
+                case when xa then exit_proceeds end as exit_proceeds, case when xa then exit_fee end as exit_fee,
+                case when ra then resolution_proceeds end as resolution_proceeds, case when ra then resolution_ts end as resolution_ts,
+                case when ra then resolution_ts when xa and state = 'EXITED' then exit_ts end as closed_ts,
+                - entry_fee + case when xa then exit_proceeds - cpart - exit_fee else 0 end
+                  + case when ra then resolution_proceeds - (cost_usd - case when xa then cpart else 0 end) else 0 end as realized_pnl
+           from l0),
+  l as (select *, state in ('OPEN','PARTIALLY_EXITED') as is_open, state in ('EXITED','RESOLVED') as is_settled from l1),
   lo as (select * from l where is_open),
   ls as (select * from l where is_settled),
   om as (select lo.signal_id, lo.shares_open, lo.cost_open, m.price

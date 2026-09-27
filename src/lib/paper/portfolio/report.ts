@@ -3,7 +3,7 @@
  *
  * `portfolio_report(id)` (supabase/migrations/0010_portfolio_report.sql) computes it in Postgres; `buildPortfolioReport`
  * below is the pure JS reference with the identical shape, used by the parity test (tests/phase3-report.test.ts). The
- * rules are in the migration's header: everything as of the watermark, cost basis and market value kept apart, cash
+ * rules are in the migration's header: everything as of the watermark (each lot rebuilt as of it), cost basis and market value kept apart, cash
  * derived from the lots, measured results only (no rankings), `insufficient` under 10 settled lots.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -44,6 +44,25 @@ const cmpC = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0); // code-uni
 const isoZ = (s: number) => new Date(s * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
 const countBy = (rows: Row[], key: (r: Row) => string) => { const o: Record<string, number> = {}; for (const r of rows) { const k = key(r); o[k] = (o[k] ?? 0) + 1; } return o; };
 
+/**
+ * A stored lot as it stood at `asOf`: its (single) exit and resolution count only if they happened by then, and state,
+ * open shares and cost, exit / resolution cash and realised P&L are rebuilt from the stored amounts, exactly as the book
+ * booked them (the exit takes cost × sold / shares). A lot exited after asOf is open, at full cost, with only its entry
+ * fee realised.
+ */
+export function lotAsOf(x: Row, asOf: number): Row {
+  const xa = x.exit_ts != null && ts(x.exit_ts)! <= asOf, ra = x.resolution_ts != null && ts(x.resolution_ts)! <= asOf;
+  const cost = num(x.cost_usd), cpart = cost * (num(x.exit_shares) / num(x.shares_filled)); const full = xa && x.state === "EXITED";
+  const state = ra ? "RESOLVED" : full ? "EXITED" : xa ? "PARTIALLY_EXITED" : "OPEN";
+  return { ...x, state,
+    shares_open: ra || full ? 0 : xa ? num(x.shares_filled) - num(x.exit_shares) : num(x.shares_filled),
+    cost_open: ra || full ? 0 : xa ? cost - cpart : cost,
+    exit_proceeds: xa ? x.exit_proceeds : null, exit_fee: xa ? x.exit_fee : null,
+    resolution_proceeds: ra ? x.resolution_proceeds : null, resolution_ts: ra ? x.resolution_ts : null,
+    closed_ts: ra ? x.resolution_ts : full ? x.exit_ts : null,
+    realized_pnl: -num(x.entry_fee) + (xa ? num(x.exit_proceeds) - cpart - num(x.exit_fee) : 0) + (ra ? num(x.resolution_proceeds) - (cost - (xa ? cpart : 0)) : 0) };
+}
+
 /** Pure: the report from stored rows. Same shape and numbers as `portfolio_report` (up to float rounding). */
 export function buildPortfolioReport(inp: ReportInput) {
   const p = inp.portfolio; if (!p) return null;
@@ -53,7 +72,7 @@ export function buildPortfolioReport(inp: ReportInput) {
 
   const d = inp.decisions.filter((x) => within(x.event_ts));
   const kindOf = new Map(d.map((x) => [String(x.signal_id), x.kind as string]));
-  const l: Row[] = inp.lots.filter((x) => within(x.opened_ts)).map((x) => ({ ...x, kind: kindOf.get(String(x.signal_id)) ?? null, isOpen: x.state === "OPEN" || x.state === "PARTIALLY_EXITED", isSettled: x.state === "EXITED" || x.state === "RESOLVED" }));
+  const l: Row[] = inp.lots.filter((x) => within(x.opened_ts)).map((x) => { const y = lotAsOf(x, asOf!); return { ...y, kind: kindOf.get(String(x.signal_id)) ?? null, isOpen: y.state === "OPEN" || y.state === "PARTIALLY_EXITED", isSettled: y.state === "EXITED" || y.state === "RESOLVED" }; });
   const lo = l.filter((x) => x.isOpen), ls = l.filter((x) => x.isSettled);
 
   const cash = cap0 - sum(l.map((x) => num(x.cost_usd) + num(x.entry_fee))) + sum(l.map((x) => num(x.exit_proceeds) - num(x.exit_fee))) + sum(l.map((x) => num(x.resolution_proceeds)));

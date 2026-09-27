@@ -10,7 +10,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { stressDb } from "./helpers/stressDb";
 import { pgDb } from "./helpers/pgDb";
-import { buildPortfolioReport, savePortfolioSnapshot, portfolioReport, PORTFOLIO_SNAPSHOT_KEY, LOCKED_RULE, staleWarning, NO_WATERMARK, type ReportInput } from "@/lib/paper/portfolio/report";
+import { buildPortfolioReport, lotAsOf, savePortfolioSnapshot, portfolioReport, PORTFOLIO_SNAPSHOT_KEY, LOCKED_RULE, staleWarning, NO_WATERMARK, type ReportInput } from "@/lib/paper/portfolio/report";
 import { runPortfolios, countAndDelete } from "@/lib/paper/portfolio/run";
 import { validatePortfolioConfig, portfolioDefinitions, IDEAL_LABEL } from "@/lib/paper/portfolio/config";
 import type { ModeName, PortfolioConfig } from "@/lib/paper/sim/config";
@@ -31,7 +31,7 @@ function base(mode: ModeName = "REALISTIC", W: number | null = B + 40 * DAY, sta
 }
 const dec = (id: string, t: number, o: Row = {}): Row => ({ signal_id: id, kind: "NEW_POSITION", source_key: `k-${id}`, event_ts: iso(t), outcome: "FILLED", reason: null, requested_usd: 100, filled_usd: 100, filled_shares: 200, fill_price: 0.5, fee: 1, resized: false, input_hash: "i", record_hash: "r", ...o });
 /** A lot and its (filled) decision. state: OPEN | PARTIALLY_EXITED | EXITED | RESOLVED; net = realised P&L for settled lots. */
-function lotPair(id: string, t: number, o: { state?: string; cost?: number; wallet?: string; cond?: string; net?: number; closedAt?: number; kind?: string; sold?: number } = {}): [Row, Row] {
+function lotPair(id: string, t: number, o: { state?: string; cost?: number; wallet?: string; cond?: string; net?: number; closedAt?: number; kind?: string; sold?: number; exitAt?: number } = {}): [Row, Row] {
   const cost = o.cost ?? 100, shares = cost / 0.5, fee = 1, state = o.state ?? "OPEN";
   const l: Row = { portfolio_id: "x", signal_id: id, wallet: o.wallet ?? "w1", token_id: `t-${id}`, condition_id: o.cond ?? "c1", opened_ts: iso(t), shares_filled: shares, cost_usd: cost, entry_fee: fee,
     shares_open: shares, cost_open: cost, exit_signal_id: null, exit_ts: null, exit_shares: null, exit_proceeds: null, exit_fee: null, resolution_ts: null, resolution_value: null, resolution_proceeds: null,
@@ -39,7 +39,12 @@ function lotPair(id: string, t: number, o: { state?: string; cost?: number; wall
   const closed = o.closedAt ?? t + 3600;
   if (state === "PARTIALLY_EXITED") { const f = o.sold ?? 0.4; Object.assign(l, { exit_ts: iso(closed), exit_shares: shares * f, exit_proceeds: cost * f * 1.2, exit_fee: 0.5, shares_open: shares * (1 - f), cost_open: cost * (1 - f), realized_pnl: -fee + cost * f * 0.2 - 0.5 }); }
   if (state === "EXITED") { const net = o.net ?? 5; Object.assign(l, { exit_ts: iso(closed), exit_shares: shares, exit_proceeds: cost + net + fee + 0.5, exit_fee: 0.5, shares_open: 0, cost_open: 0, realized_pnl: net, closed_ts: iso(closed) }); }
-  if (state === "RESOLVED") { const net = o.net ?? -3; Object.assign(l, { resolution_ts: iso(closed), resolution_value: 1, resolution_proceeds: Math.max(0, cost + net + fee), shares_open: 0, cost_open: 0, realized_pnl: net, closed_ts: iso(closed) }); }
+  if (state === "RESOLVED" && o.exitAt == null) { const net = o.net ?? -3; Object.assign(l, { resolution_ts: iso(closed), resolution_value: 1, resolution_proceeds: Math.max(0, cost + net + fee), shares_open: 0, cost_open: 0, realized_pnl: net, closed_ts: iso(closed) }); }
+  if (state === "RESOLVED" && o.exitAt != null) { // partly exited at exitAt, the rest resolved (value 1) at closedAt
+    const f = o.sold ?? 0.4, cpart = cost * f, proceeds = cost * f * 1.2, rest = shares * (1 - f);
+    Object.assign(l, { exit_ts: iso(o.exitAt), exit_shares: shares * f, exit_proceeds: proceeds, exit_fee: 0.5, resolution_ts: iso(closed), resolution_value: 1, resolution_proceeds: rest,
+      shares_open: 0, cost_open: 0, realized_pnl: -fee + (proceeds - cpart - 0.5) + (rest - (cost - cpart)), closed_ts: iso(closed) });
+  }
   return [dec(id, t, { kind: o.kind ?? "NEW_POSITION", filled_usd: cost, filled_shares: shares }), l];
 }
 function withLots(inp: ReportInput, pairs: [Row, Row][]) { for (const [d, l] of pairs) { inp.decisions.push(d); inp.lots.push({ ...l, portfolio_id: inp.portfolio!.id }); } return inp; }
@@ -74,6 +79,29 @@ describe("portfolio report (JS reference)", () => {
     later.equity.push({ ts: iso(W + 1), seq: 0, cash: 10, exposure: 5, equity: 15 }); later.marks.push({ signal_id: uid(2, 1), horizon: "24h", observed_at: iso(W + 1), price: 0.99 });
     expect(rep(later)).toEqual(a);
     expect(a.asOf).toMatchObject({ basis: "watermark", ts: W, iso: iso(W).replace(".000Z", "Z") });
+  });
+
+  it("R3: a lot's exit or resolution after the watermark does not count — it is reported as it stood at asOf", async () => {
+    const W = B + 10 * DAY; const t = B + DAY;
+    // stored rows written later than asOf: exited after W; resolved after W; partly exited before W then resolved after W
+    const later = withLots(base("REALISTIC", W), [
+      lotPair(uid(8, 1), t, { state: "EXITED", net: 12, closedAt: W + 3600, cost: 100 }),
+      lotPair(uid(8, 2), t, { state: "RESOLVED", net: -9, closedAt: W + 1, cost: 60 }),
+      lotPair(uid(8, 3), t, { state: "RESOLVED", exitAt: W - DAY, closedAt: W + DAY, cost: 80, sold: 0.25 }),
+      lotPair(uid(8, 4), t, { state: "EXITED", net: 4, closedAt: W, cost: 50 })]);                 // exactly at asOf: counts
+    // the same book as it stood at asOf
+    const asStood = withLots(base("REALISTIC", W), [lotPair(uid(8, 1), t, { cost: 100 }), lotPair(uid(8, 2), t, { cost: 60 }),
+      lotPair(uid(8, 3), t, { state: "PARTIALLY_EXITED", closedAt: W - DAY, cost: 80, sold: 0.25 }), lotPair(uid(8, 4), t, { state: "EXITED", net: 4, closedAt: W, cost: 50 })]);
+    for (const i of [later, asStood]) i.marks.push({ signal_id: uid(8, 3), horizon: "24h", observed_at: iso(t + DAY), price: 0.7 }); // valued on its open shares
+    const r = rep(later), want = rep(asStood);
+    expect(r.pnl.marketValue.unrealisedAtMarks).toBeCloseTo((80 / 0.5) * 0.75 * 0.7 - 80 * 0.75, 9);
+    expect(same(r, want)).toBeNull();
+    expect(r.lots.byState).toEqual({ OPEN: 2, PARTIALLY_EXITED: 1, EXITED: 1, RESOLVED: 0 });
+    expect(r.exposure.openLots).toBe(3); expect(r.capital.investedAtCost).toBeCloseTo(100 + 60 + 80 * 0.75, 9);
+    expect(r.pnl.realized).toBeCloseTo(-1 - 1 + (-1 + 80 * 0.25 * 0.2 - 0.5) + 4, 9);                            // only what happened by asOf
+    expect(r.capital.equityAtCost - 1000).toBeCloseTo(r.pnl.realized, 9);                                          // cash identity still holds
+    expect(r.robustness.settled).toBe(1); expect(r.lots.closedByExit).toBe(1); expect(r.lots.closedByResolution).toBe(0);
+    expect(r.pnl.exitFees).toBe(1);                                                                               // lot 3's and lot 4's
   });
 
   it("R8 (test 4): locked unresolved — 29d23h is not locked, 30d and more is; settled lots never", () => {
@@ -298,8 +326,10 @@ function randomPortfolio(mode: ModeName, ns: number, seed: number, o: { lots?: n
     const kind = pick(["NEW_POSITION", "NEW_POSITION", "CONSENSUS", "CONVICTION_ADD", "EARLY_ENTRY"]); const roll = rnd();
     if (roll < 0.55) {
       const state = pick(["OPEN", "OPEN", "PARTIALLY_EXITED", "EXITED", "RESOLVED", "RESOLVED"]); const cost = 20 + Math.floor(rnd() * 80) + rnd();
-      const closedAt = Math.min(beyond ? t + DAY : W, t + 60 + Math.floor(rnd() * 20 * DAY));
-      const [dd, l] = lotPair(id, t, { kind, state, cost, wallet: `w${Math.floor(rnd() * 9)}`, cond: `c${Math.floor(rnd() * 14)}`, net: (rnd() - 0.45) * 40, closedAt, sold: 0.1 + rnd() * 0.8 });
+      const closedAt = rnd() < 0.3 ? t + 60 + Math.floor(rnd() * 20 * DAY) : Math.min(beyond ? t + DAY : W, t + 60 + Math.floor(rnd() * 20 * DAY)); // some close after W
+      // partly exited, then resolved; when the resolution falls after W, the exit usually falls before it
+      const exitAt = state === "RESOLVED" && rnd() < 0.5 ? t + Math.floor((Math.min(closedAt, W) - t) * rnd()) : undefined;
+      const [dd, l] = lotPair(id, t, { kind, state, cost, wallet: `w${Math.floor(rnd() * 9)}`, cond: `c${Math.floor(rnd() * 14)}`, net: (rnd() - 0.45) * 40, closedAt, sold: 0.1 + rnd() * 0.8, exitAt });
       if (rnd() < 0.3) Object.assign(dd, { outcome: "PARTIALLY_FILLED", resized: rnd() < 0.5, reason: "RESIZED:LIMIT" });
       withLots(inp, [[dd, l]]);
       if (rnd() < 0.2) inp.marks.push({ signal_id: id, horizon: "exit", observed_at: iso(t + 2 * DAY), price: 0.99 });          // not a valuation mark
@@ -309,6 +339,10 @@ function randomPortfolio(mode: ModeName, ns: number, seed: number, o: { lots?: n
       inp.decisions.push(dec(id, t, roll < 0.8 ? { outcome: "REJECTED", reason: pick(["REJECTED_DUPLICATE_POSITION", "REJECTED_MAX_OPEN_POSITIONS", "REJECTED_MAX_MARKET_EXPOSURE", "REJECTED_INSUFFICIENT_CASH", "REJECTED_BELOW_MIN_ORDER"]), ...none }
         : { outcome: pick(["UNFILLED", "EXPIRED", "INVALID", "UNKNOWN"]), reason: pick([null, "NO_PRICE_OBSERVATION", "INSUFFICIENT_LIQUIDITY"]), ...none }));
     }
+  }
+  // always present: opened before W and closed after it (exited; resolved; partly exited before W, resolved after)
+  for (const [k, o2] of ([{ state: "EXITED", closedAt: W + 7200 }, { state: "RESOLVED", closedAt: W + 3600 }, { state: "RESOLVED", exitAt: W - DAY, closedAt: W + DAY }, { state: "EXITED", closedAt: W }, { state: "RESOLVED", exitAt: W, closedAt: W + 60 }] as const).entries()) {
+    const id = uid(ns, n + 100 + k); ids.push(id); withLots(inp, [lotPair(id, W - 5 * DAY + k, { ...o2, cost: 40 + k, cond: `cL${k}`, wallet: `wL${k}` })]);
   }
   // exact ties straddling the top-10 cut (same cost, ids differing only in case: code-unit order decides who is in)
   for (const [k, cond] of ["cZ", "cz", "cY", "cy", "cX", "cx", "cW", "cw", "cV", "cv", "cU", "cu"].entries()) { const id = uid(ns, n + k); ids.push(id); const [dd, l] = lotPair(id, B + DAY + k, { cost: 5000, cond, wallet: cond.toUpperCase() + k }); dd.requested_usd = 5000; withLots(inp, [[dd, l]]); }
@@ -369,10 +403,15 @@ d("portfolio report — real Postgres", () => {
         expect(same(sql, JSON.parse(JSON.stringify(js))), `${mode}/${seed}`).toBeNull();
         // non-trivial: every branch has data
         if (seed !== 3) { expect(js!.lots.byState.PARTIALLY_EXITED * js!.lots.byState.EXITED * js!.lots.byState.RESOLVED * js!.lots.byState.OPEN).toBeGreaterThan(0); expect(js!.lots.lockedUnresolved.count).toBeGreaterThan(0); }
-        else expect(inp.lots.filter((l) => ["EXITED", "RESOLVED"].includes(l.state) && Number(l.realized_pnl) > 0).length).toBeLessThan(10);     // ex-best-10 reaches losses
+        else expect(inp.lots.filter((l) => Date.parse(l.opened_ts) / 1000 <= js!.asOf.ts!).map((l) => lotAsOf(l, js!.asOf.ts!)).filter((l) => ["EXITED", "RESOLVED"].includes(l.state) && Number(l.realized_pnl) > 0).length).toBeLessThan(10); // ex-best-10 reaches losses
         if (seed === 2) expect(js!.risk.peakEquity).toBe(1000);                                                                              // never above the start
         expect(js!.pnl.marketValue.lotsWithoutMark.count).toBeGreaterThan(0); expect(js!.health.pendingAhead).toBeGreaterThan(0);
         expect(inp.decisions.some((x) => Date.parse(x.event_ts) / 1000 > js!.asOf.ts!)).toBe(true);
+        const W0 = js!.asOf.ts!; const opened = inp.lots.filter((x) => Date.parse(x.opened_ts) / 1000 <= W0); const at = (v: string | null) => (v == null ? null : Date.parse(v) / 1000);
+        if (seed !== 3) {                                                                                          // closes after asOf are exercised
+          expect(opened.some((x) => x.state === "EXITED" && at(x.exit_ts)! > W0)).toBe(true); expect(opened.some((x) => x.state === "RESOLVED" && at(x.resolution_ts)! > W0)).toBe(true);
+          expect(opened.some((x) => x.state === "RESOLVED" && x.exit_ts != null && at(x.exit_ts)! <= W0 && at(x.resolution_ts)! > W0)).toBe(true);
+        }
         expect(js!.exposure.topMarkets.map((x) => x.conditionId)).toEqual(["cU", "cV", "cW", "cX", "cY", "cZ", "cu", "cv", "cw", "cx"]); // the tie decides the cut
       }
       const empty = base("IDEAL", null); empty.portfolio!.id = "rep-empty-ideal"; await load(c, empty, []);
