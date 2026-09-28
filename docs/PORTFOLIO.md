@@ -67,7 +67,11 @@ Step by step (`PortfolioBook.enter` in `book.ts`, same rules as the Phase 2 refe
 `sim/portfolio.ts`, parity-tested):
 
 1. **Request.** `buildRequests` (`requests.ts`) turns the signal into a request for `positionUsd`, with the price
-   observations its mode needs. A signal whose fill time is before `startTs` is never requested (D4).
+   observations its mode needs. A signal is never requested if **either** its source trade (the wallet's own fill)
+   **or** its simulated fill is before `startTs` (D4). So a trade made before the start but detected after it — which
+   REALISTIC and CONSERVATIVE would otherwise fill after the start — stays out, and all three modes see the same
+   signals. (Fixed 28 Sep 2026: the first dry run applied the rule to the fill time only and let 730 such signals
+   into REALISTIC and CONSERVATIVE.)
 2. **Limits, in this order.** The first that fails decides:
    1. *Duplicate:* the same source fill was already taken (duplicate key `fill:<source_fill_id>`, else the legacy
       wallet|token|second|price key) → `REJECTED_DUPLICATE_POSITION`. Never resized.
@@ -260,7 +264,7 @@ worker logs one line naming the problem and the feature stays off (the rest of t
 | `maxWalletAllocationUsd` | Cap on open cost from one source wallet | USD | number > 0 |
 | `minCashReserveUsd` | Cash that entries may not spend | USD | number ≥ 0 and < `startingCapitalUsd` |
 | `allowResize` | Shrink an order to fit a limit instead of rejecting it | — | `true` or `false` |
-| `startTs` | First fill time the portfolio considers | ISO time with a timezone | for this deployment `"2026-09-27T04:28:38.593Z"` (below); not in the future |
+| `startTs` | Start of the portfolio: signals whose source trade **or** simulated fill is earlier are ignored (§3) | ISO time with a timezone | for this deployment `"2026-09-27T04:28:38.593Z"` (below); not in the future |
 
 The validator does **not** check that the caps are at least `positionUsd`: with `allowResize: false` and, say,
 `maxMarketExposureUsd` below `positionUsd`, every order is rejected. Choose caps ≥ `positionUsd`.
@@ -287,6 +291,12 @@ select value, updated_at from cursors where key = 'refresh:last';
 and use `updated_at`, in UTC with a `Z`, as `startTs` (seconds are enough). If the row has already moved on, the
 Railway log line `[rescore] scored …, tracking …` of 27 Sep is printed immediately after that write; use its timestamp.
 The value is never derived at runtime.
+
+**The rule is applied to both times.** A signal enters the portfolio only if the wallet's trade *and* the simulated
+fill are at or after `startTs` (the start second included). Checking the source time is what matters: a trade from
+before the start that our system detected late (for example a wallet replayed after returning to the watchlist) is an
+old signal, not a new opportunity. In every mode the fill is at or after the source trade, so this also keeps
+IDEAL, REALISTIC and CONSERVATIVE on exactly the same signals.
 
 **Recorded value (read from production on 27 Sep 2026 at 22:33 UTC):** the 27 Sep re-score started at 04:26:18 and
 finished at **`2026-09-27T04:28:38.593Z`**; it scored 3,958 wallets and left 179 tracked. Use exactly that as

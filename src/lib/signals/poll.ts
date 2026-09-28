@@ -14,6 +14,39 @@
 import { PolymarketClient, explainFill, withOccurrence } from "../polymarket/client";
 import type { Fill, RawFill } from "../polymarket/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { IN_CHUNK } from "../chunk";
+
+/**
+ * Cursor hygiene. A wallet that leaves the watchlist keeps its `poll:<wallet>` cursor; if it returns at a later
+ * re-score, the poller would resume from that old cursor and replay the whole absence as fresh signals (the 27 and
+ * 28 Sep bursts: 838 signals evaluated 6 h to 211 h after their trade, 399 of them sent to Telegram). Deleting the
+ * cursors of wallets that are no longer tracked makes a returning wallet start from the normal lookback window.
+ *
+ * Only `poll:` keys of untracked wallets are deleted; tracked wallets' cursors are never touched. Keys are read in
+ * keyset pages and deleted in IN_CHUNK chunks, so the work is bounded; a second call deletes nothing. An empty tracked
+ * set is refused (a failed or partial wallet load must never wipe every cursor).
+ */
+export async function pruneUntrackedCursors(db: SupabaseClient, tracked: Iterable<string>, opts: { page?: number } = {}): Promise<{ scanned: number; deleted: number; skipped?: string }> {
+  const keep = new Set([...tracked].map((w) => w.toLowerCase()));
+  if (!keep.size) return { scanned: 0, deleted: 0, skipped: "no tracked wallets" };
+  const page = opts.page ?? 1000; let scanned = 0, deleted = 0, last = "";
+  for (;;) {
+    let q = db.from("cursors").select("key").like("key", "poll:%");
+    if (last) q = q.gt("key", last);
+    const { data, error } = await q.order("key", { ascending: true }).limit(page);
+    if (error) throw new Error(`cursors read: ${error.message}`);
+    const keys = ((data ?? []) as { key: string }[]).map((r) => r.key); if (!keys.length) break;
+    scanned += keys.length; last = keys[keys.length - 1];
+    const drop = keys.filter((k) => k.startsWith("poll:") && !keep.has(k.slice(5).toLowerCase()));
+    for (let i = 0; i < drop.length; i += IN_CHUNK) {
+      const { error: de } = await db.from("cursors").delete().in("key", drop.slice(i, i + IN_CHUNK)).like("key", "poll:%");
+      if (de) throw new Error(`cursors delete: ${de.message}`);
+      deleted += Math.min(IN_CHUNK, drop.length - i);
+    }
+    if (keys.length < page) break;
+  }
+  return { scanned, deleted };
+}
 
 export interface PollEngine { trackedAddresses(): string[]; ingest(f: Fill): Promise<unknown[]> }
 export interface PollOptions { lookbackSec?: number; maxWallets?: number; concurrency?: number; pageSize?: number; maxRowsPerWallet?: number; now?: number }

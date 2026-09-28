@@ -4,7 +4,7 @@
  * matter how large the table is.
  *
  * Supported: select (incl. { count: "exact", head: true }) / insert / upsert (onConflict, ignoreDuplicates) / update /
- * delete; eq, neq, in, is, gt, gte, lt, lte; order (multi-column) + limit; maybeSingle; rpc via `opts.rpc`; an optional
+ * delete; eq, neq, in, is, gt, gte, lt, lte, prefix like; order (multi-column) + limit; maybeSingle; rpc via `opts.rpc`; an optional
  * `maxRows` read cap like Supabase's. Tables in SORTED keep a sorted array so a range
  * scan on the first sort column (the portfolio stream, equity ranges) is a binary search, not a table scan.
  */
@@ -42,12 +42,12 @@ export function stressDb(opts: { slimExecutions?: boolean; rpc?: Record<string, 
     for (const r of dead) pkMap[t]?.delete(key(t, r));
   }
   function q(t: string) {
-    let op = "select"; let payload: any; let o: any = {}; const eq: [string, any][] = []; const neq: [string, any][] = []; const ins: [string, any[]][] = []; const ranges: Range[] = []; const orders: [string, boolean][] = [];
+    let op = "select"; let payload: any; let o: any = {}; const eq: [string, any][] = []; const neq: [string, any][] = []; const ins: [string, any[]][] = []; const ranges: Range[] = []; const orders: [string, boolean][] = []; const likes: [string, string][] = [];
     let lim = Infinity; let single = false; let head = false; let wantCount = false;
     const b: any = {
       select: (_c?: string, x?: { count?: string; head?: boolean }) => { if (x?.head) head = true; if (x?.count) wantCount = true; return b; }, limit: (n: number) => ((lim = n), b), maybeSingle: () => ((single = true), b), single: () => ((single = true), b),
       order: (c: string, x?: { ascending?: boolean }) => (orders.push([c, x?.ascending !== false]), b),
-      eq: (k: string, v: any) => (eq.push([k, v]), b), neq: (k: string, v: any) => (neq.push([k, v]), b), is: (k: string, v: any) => (eq.push([k, v]), b), in: (k: string, v: any[]) => (ins.push([k, v]), b),
+      like: (k: string, p: string) => (likes.push([k, p]), b), eq: (k: string, v: any) => (eq.push([k, v]), b), neq: (k: string, v: any) => (neq.push([k, v]), b), is: (k: string, v: any) => (eq.push([k, v]), b), in: (k: string, v: any[]) => (ins.push([k, v]), b),
       gt: (k: string, v: any) => (ranges.push([k, "gt", v]), b), gte: (k: string, v: any) => (ranges.push([k, "gte", v]), b), lt: (k: string, v: any) => (ranges.push([k, "lt", v]), b), lte: (k: string, v: any) => (ranges.push([k, "lte", v]), b),
       upsert: (p: any, x?: any) => ((op = "upsert"), (payload = p), (o = x ?? {}), b), update: (p: any) => ((op = "update"), (payload = p), b), insert: (p: any) => ((op = "insert"), (payload = p), b), delete: () => ((op = "delete"), b),
       then(res: any, rej: any) { try { res(exec()); } catch (e) { rej(e); } },
@@ -71,7 +71,8 @@ export function stressDb(opts: { slimExecutions?: boolean; rpc?: Record<string, 
       return { rows: T(t), ordered: false };
     }
     const inRange = (r: Row) => ranges.every(([k, opn, v]) => { const x = cmpv(r[k], v); return opn === "gt" ? x > 0 : opn === "gte" ? x >= 0 : opn === "lt" ? x < 0 : x <= 0; });
-    const match = (r: Row) => eq.every(([k, v]) => (v === null ? r[k] == null : r[k] === v)) && neq.every(([k, v]) => r[k] !== v) && ins.every(([k, vs]) => vs.includes(r[k])) && inRange(r);
+    const likeOk = (r: Row) => likes.every(([k, p]) => { if (!/^[^%_]*%$/.test(p)) throw new Error(`stressDb: only prefix LIKE patterns, got ${p}`); return String(r[k] ?? "").startsWith(p.slice(0, -1)); });
+    const match = (r: Row) => likeOk(r) && eq.every(([k, v]) => (v === null ? r[k] == null : r[k] === v)) && neq.every(([k, v]) => r[k] !== v) && ins.every(([k, vs]) => vs.includes(r[k])) && inRange(r);
     function exec() {
       stats.calls++;
       if (op === "select") {

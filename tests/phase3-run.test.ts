@@ -258,7 +258,9 @@ describe("runner", () => {
   });
 
   for (const pcName of ["tight", "roomy"] as const) it(`a full run equals simulatePortfolio (the reference), all 3 modes — ${pcName} limits`, async () => {
-    const w = await world({ n: 600, seed: pcName === "tight" ? 3 : 4, before: 20 }); setClock(START + 3 * 86_400);
+    // seed 5 for "tight": under the D4 source-time rule (28 Sep fix) seed 3's CONSERVATIVE run no longer exercised
+    // REJECTED_DUPLICATE_POSITION (its one duplicate was a twin traded before the start); seed 5 covers every branch
+    const w = await world({ n: 600, seed: pcName === "tight" ? 5 : 4, before: 20 }); setClock(START + 3 * 86_400);
     const stats = await run(w, { pc: PCS[pcName] }); const cfg = cfgOf(PCS[pcName]);
     for (const m of ALL) {
       const st = byMode(stats, m); const pid = st.portfolioId; const { ref, reqs } = await reference(w.db, m, cfg);
@@ -519,21 +521,24 @@ describe("runner", () => {
     expect(w2.db.T("portfolio_runs")[0].lease_owner).toBe("thief");        // release only frees our own lease
   });
 
-  it("R3/D4 (test 12): the start boundary — fills before startTs are never requested, one exactly at it is; a different start is a different portfolio", async () => {
+  it("R3/D4 (test 12): the start boundary — signals traded or filled before startTs are never requested, one exactly at it is; a different start is a different portfolio", async () => {
     const w = await world({ n: 120, before: 30, seed: 71 }); setClock(START + 86_400);
     const s = await run(w);
     for (const m of ALL) {
       const d = outputs(w.db, byMode(s, m).portfolioId).decisions; expect(d.every((x) => sec(x.event_ts) >= START)).toBe(true);
-      const want = w.entries.filter((e) => timeline(e.src, e.ev, MODES[m]).fillTs >= START).length; expect(d.length).toBe(want); expect(want).toBeLessThan(120);
+      const want = w.entries.filter((e) => e.src >= START && timeline(e.src, e.ev, MODES[m]).fillTs >= START).length; expect(d.length).toBe(want); expect(want).toBeLessThan(120);
+      expect(d.every((x) => sec(w.db.T("signals").find((s) => s.id === x.signal_id)!.created_at) >= START)).toBe(true);        // source time too
     }
     // the sweep rewrites records from before the start (new marks): not the portfolio's business, nothing rewinds
     for (const e of w.entries.filter((x) => x.src < START - 300)) w.db.insertRow("paper_marks", { signal_id: e.id, horizon: "6h", observed_at: iso(e.src + 6 * 3600), price: 0.9 });
     setClock(START + 86_400 + 600); await sweep(w); const before = outWrites(w.db); setClock(START + 86_400 + 900);
     for (const x of await run(w)) { expect(x.rewind.to).toBeNull(); expect(x.writes).toEqual({}); } expect(outWrites(w.db)).toEqual(before);
-    const r = w.entries.find((e) => timeline(e.src, e.ev, MODES.REALISTIC).fillTs > START + 600)!; const at = timeline(r.src, r.ev, MODES.REALISTIC).fillTs;
+    // a start exactly at one entry's source trade (the D4 rule looks at source and fill time): that entry is in
+    const r = w.entries.find((e) => e.src > START + 600)!; const at = r.src;
     const s2 = await runPortfolios(w.db as never, { config: cfgOf(PCS.tight, at), modes: ["REALISTIC"], owner: "t" });
     expect(s2[0].portfolioId).not.toBe(byMode(s, "REALISTIC").portfolioId);
-    const d2 = outputs(w.db, s2[0].portfolioId).decisions; expect(d2.every((x) => sec(x.event_ts) >= at)).toBe(true); expect(d2.some((x) => x.signal_id === r.id && sec(x.event_ts) === at)).toBe(true);
+    const d2 = outputs(w.db, s2[0].portfolioId).decisions; expect(d2.every((x) => sec(x.event_ts) >= at)).toBe(true); expect(d2.some((x) => x.signal_id === r.id && sec(x.event_ts) === timeline(r.src, r.ev, MODES.REALISTIC).fillTs)).toBe(true);
+    expect(d2.every((x) => sec(w.db.T("signals").find((y) => y.id === x.signal_id)!.created_at) >= at)).toBe(true);
     expect(outputs(w.db, byMode(s, "REALISTIC").portfolioId).decisions.length).toBeGreaterThan(d2.length); // the old portfolio is untouched
     await expect(runPortfolios(w.db as never, { config: validatePortfolioConfig({ ...PCS.tight, startTs: iso(clock + 60) }, clock + 60), modes: ["IDEAL"], owner: "t" })).resolves.toBeDefined();
   });

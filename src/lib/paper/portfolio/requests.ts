@@ -9,7 +9,10 @@
  *  - never guesses a missing price: an entry whose price is not fetched yet is `pendingEntry`, and an exit whose price
  *    is not fetched yet is left off the request with `exitPendingTs` — the runner decides nothing at or after either
  *    (the per-event frontier, §B3; a pending exit does not hold back entries before it);
- *  - drops signals whose fill is before the portfolio's start (D4);
+ *  - drops signals from before the portfolio's start (D4): a signal is excluded when its source trade (the wallet's
+ *    own fill) OR its simulated fill is before `startTs`. The source time is the one that matters: a trade made before
+ *    the start but detected (and so filled, in REALISTIC / CONSERVATIVE) after it is an old signal, and IDEAL, which
+ *    fills at the source time, already excluded it. Checking both keeps every mode on the same set of signals;
  *  - fingerprints the decision inputs (never marks) so the runner can tell what changed and where to rewind to (§B2).
  * D1 needs nothing here: every request is its own lot; two signals from one fill share a duplicate key, so the book
  * takes the first by event order (NEW_POSITION before CONSENSUS) and records the other as REJECTED_DUPLICATE_POSITION.
@@ -41,7 +44,7 @@ export function buildRequests(built: BuiltSignal[], inp: SimInputs, exec: ExecCo
   const out: PortfolioRequest[] = [];
   for (const b of built) {
     const fillTs = timeline(b.entry.sourceTs, b.entry.evalTs, exec).fillTs;
-    if (fillTs < opts.startTs) continue;                                   // D4: before the portfolio existed
+    if (b.entry.sourceTs < opts.startTs || fillTs < opts.startTs) continue; // D4: traded or filled before the start
     const k = `${b.tokenId}@${fillTs}`;
     const pendingEntry = !exec.fillAtSignalPrice && !inp.obs.has(k);
     const entry = { ...b.entry, obs: exec.fillAtSignalPrice ? null : inp.obs.get(k) ?? null };

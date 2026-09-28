@@ -446,14 +446,17 @@ describe("portfolio requests", () => {
     expect(d.map((x) => [x.kind, x.outcome, x.reason])).toEqual([["NEW_POSITION", "FILLED", null], ["CONVICTION_ADD", "FILLED", null], ["CONSENSUS", "REJECTED", "REJECTED_DUPLICATE_POSITION"]]);
   });
 
-  it("start boundary (D4): a fill before the start is never requested; the same signal can fall either side per mode", () => {
+  it("start boundary (D4): a signal traded or filled before the start is never requested; every mode requests the same signals", () => {
     const inp = inputs(40); const built = buildSignals(inp);
-    const start = timeline(built[20].entry.sourceTs, built[20].entry.evalTs, MODES.REALISTIC).fillTs;
-    const r = buildRequests(built, inp, MODES.REALISTIC, { startTs: start });
-    expect(r.every((x) => x.key.ts >= start)).toBe(true); expect(r.some((x) => x.key.ts === start)).toBe(true);
-    expect(r.length).toBe(built.filter((b) => timeline(b.entry.sourceTs, b.entry.evalTs, MODES.REALISTIC).fillTs >= start).length);
-    const ideal = buildRequests(built, inp, MODES.IDEAL, { startTs: start }); // IDEAL fills at the source time, earlier
-    expect(ideal.map((x) => x.signal.signalId)).not.toContain(built[20].id);
+    // (until 28 Sep the rule looked at the fill time only, so a signal traded before the start but filled after it was
+    // requested in REALISTIC/CONSERVATIVE and not in IDEAL; tests/stale-signals.test.ts covers that case in depth)
+    const start = built[20].entry.sourceTs;
+    const ids = (m: keyof typeof MODES) => buildRequests(built, inp, MODES[m], { startTs: start }).map((x) => x.signal.signalId).sort();
+    const want = built.filter((b) => b.entry.sourceTs >= start).map((b) => b.id).sort();
+    for (const m of ["IDEAL", "REALISTIC", "CONSERVATIVE"] as const) expect(ids(m), m).toEqual(want);
+    expect(want).toContain(built[20].id); expect(want.length).toBeLessThan(built.length);
+    const r = buildRequests(built, inp, MODES.REALISTIC, { startTs: start }); expect(r.every((x) => x.key.ts >= start)).toBe(true);
+    const ideal = buildRequests(built, inp, MODES.IDEAL, { startTs: start }); expect(ideal.some((x) => x.key.ts === start)).toBe(true); // the start second is in
   });
 
   it("frontier: earliest missing price; a pending exit does not hold back entries before it; IDEAL is never pending", () => {

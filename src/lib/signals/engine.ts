@@ -13,6 +13,7 @@ import { recordConsensusEvent, recordPaperSignal } from "../paper/ledger";
 import { heartbeat } from "../health/heartbeat";
 import { GammaMarketMeta, type MarketMetaSource } from "../polymarket/markets";
 import type { RemotePosition } from "../polymarket/client";
+import { pruneUntrackedCursors } from "./poll";
 
 export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: Channels; now?: () => number; log?: (m: string) => void; markets?: MarketMetaSource }
 
@@ -40,12 +41,16 @@ export class SignalEngine {
   private seen = new Set<string>(); private remember(id: string) { this.seen.add(id); if (this.seen.size > 20_000) { const first = this.seen.values().next().value; if (first) this.seen.delete(first); } }
   constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; this.minStoreUsd = this.cfg.minFillUsd; this.markets = d.markets ?? new GammaMarketMeta(this.db); }
 
-  /** Load tracked wallets into memory. Call at start and after each refresh. */
+  /** Load tracked wallets into memory. Call at start and after each refresh. Then drop the poll cursors of wallets
+   *  that are no longer tracked, so one that returns later starts from the lookback window (pruneUntrackedCursors).
+   *  A failed prune is logged and never fails the load. */
   async loadWallets(): Promise<Map<string, WalletProfile>> {
     const { data, error } = await this.db.from("wallets").select("*").eq("tracked", true);
     if (error) throw error;
     this.wallets.clear();
     for (const r of data ?? []) this.wallets.set(r.address, { address: r.address, name: r.name, copyScore: Number(r.copy_score), pnl90d: Number(r.pnl_90d), style: r.style, fillsPerDay: r.fills_per_day, programShare: r.program_share, concentration: r.concentration, netDd: r.net_dd, monthsUp: r.months_up, monthsTotal: r.months_total, daysIdle: r.days_idle, tradeCount: r.trade_count, sources: r.sources ?? [] });
+    try { const p = await pruneUntrackedCursors(this.db, this.wallets.keys()); if (p.deleted) this.log(`cursors: removed ${p.deleted} poll cursor(s) of wallets no longer tracked`); }
+    catch (e) { this.log(`cursors: prune failed (${(e as Error).message}); will retry at the next wallet load`); }
     return this.wallets;
   }
   isTracked(wallet: string): boolean { return this.wallets.has(wallet.toLowerCase()); }

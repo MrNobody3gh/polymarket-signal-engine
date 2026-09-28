@@ -17,7 +17,7 @@ export function pgDb(c: pg.Client | pg.PoolClient, opts: { maxRows?: number } = 
       eq: (k: string, v: any) => (where.push([k, "=", v]), b), neq: (k: string, v: any) => (where.push([k, "<>", v]), b),
       gt: (k: string, v: any) => (where.push([k, ">", v]), b), gte: (k: string, v: any) => (where.push([k, ">=", v]), b),
       lt: (k: string, v: any) => (where.push([k, "<", v]), b), lte: (k: string, v: any) => (where.push([k, "<=", v]), b),
-      is: (k: string, v: any) => (where.push([k, "is", v]), b), in: (k: string, v: any[]) => (where.push([k, "in", v]), b),
+      is: (k: string, v: any) => (where.push([k, "is", v]), b), like: (k: string, v: string) => (where.push([k, "like", v]), b), in: (k: string, v: any[]) => (where.push([k, "in", v]), b),
       order: (k: string, x?: { ascending?: boolean }) => (orders.push(`"${k}" ${x?.ascending === false ? "desc" : "asc"}`), b),
       limit: (n: number) => ((lim = n), b), maybeSingle: () => ((single = true), b),
       delete: () => ((op = "delete"), b), update: (p: any) => ((op = "update"), (payload = p), b),
