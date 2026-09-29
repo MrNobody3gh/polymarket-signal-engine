@@ -531,7 +531,25 @@ line: switch the feature off (§9) and report the output (`--json --out`). Also 
 Decided and in force: D1 (one lot per signal; CONSENSUS under-attributed), D2 (resolutions free capital at their
 on-chain time), D3 (orphan resolver), D4 (start at the 27 Sep re-score), D5 (no default limits), D10, D11 (locked
 unresolved derived in the report), D12 (watermark lag, §5), D13 (accepted, plus the audit in §8), D14, D15 (the report
-functions are service-role only).
+functions are service-role only), **D22 (no alerts for late detections, implemented; below)**.
+
+**D22 — decided 28 Sep 2026 and implemented: no Telegram alert for a signal detected more than 6 hours late.**
+*Definition:* `lag = evaluation time − source trade time` of the signal, i.e. `signals.evaluated_at − signals.created_at`
+(the engine's `now()` when it evaluates the fill, minus the fill's `ts`), computed once at evaluation, never at delivery
+or retry. Late means lag **strictly greater than** `ALERT_MAX_LAG_HOURS` (default 6; exactly 6 h is still sent). The
+variable is parsed strictly as a positive number of hours; any other value uses 6 and logs one line per process.
+*Scope:* every kind including EXIT; the subscriber broadcast and the admin chat, and Discord and email, which share the
+same code path (unconfigured in production). *What does not change:* the signal row, the paper ledger row, the consensus
+event, positions, dedupe and everything the simulation and the portfolio read; no column, migration or payload change; a
+suppressed signal still appears in `/signals`, `/signal <ref>` and the dashboard. Its `delivered` column is `{}` (nothing
+was delivered). *Bookkeeping:* no `tg_deliveries` row, and no subscriber's failure counters or back-off are touched.
+*Visibility:* one `data_quality_issues` row per suppressed signal (`kind = 'stale_alert_suppressed'`, `ref_type =
+'signal'`, `ref_id` = signal id, `detail = { lagHours, thresholdHours, kind }`), one summary log line per minute in a
+burst, and a `/status` line with the count of the last 24 h (shown only when above 0). *Why:* between 26 Sep 12:15 and 28
+Sep 12:19 UTC, 838 of 3,063 signals were evaluated more than 6 h after the trade (up to 211 h), all in replay bursts after
+wallets returned to the watchlist, and 399 of them reached Telegram as if fresh; since the cursor fix none of 374 was more
+than 1 h late. The rule is a safety net for outages and catch-ups. To count them:
+`select count(*) from data_quality_issues where kind = 'stale_alert_suppressed'`.
 
 Open (from `docs/PHASE3_PLAN.md`):
 

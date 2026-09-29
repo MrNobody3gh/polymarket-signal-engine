@@ -109,6 +109,7 @@ optional — an admin chat that receives every signal unfiltered.
 | *(all)* | | fills < $50, bot/maker wallets (>500 fills/day or >25% program income), copy score < 40, neg-risk residue near 0.50, duplicates inside 10 min |
 
 Thresholds are env vars (`MIN_FILL_USD`, `NEW_POSITION_MIN_USD`, …), see `.env.example`.
+A signal detected more than `ALERT_MAX_LAG_HOURS` (default 6) after the trade is stored and simulated but not alerted (D22).
 Severity 1–5 scales with notional (+1 at $5k, +1 at $25k), copy score ≥ 60, and consensus depth.
 
 ## The copy score (0–100)

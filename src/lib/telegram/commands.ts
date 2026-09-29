@@ -23,7 +23,7 @@ export interface Store {
   topWallets(n: number): Promise<WalletRow[]>;
   findWallet(q: string): Promise<WalletRow | null>;
   openBook(wallet: string, n: number): Promise<PositionRow[]>;
-  status(): Promise<{ tracked: number; signals24h: number; lastRefresh: string | null; lastFill: string | null }>;
+  status(): Promise<{ tracked: number; signals24h: number; lastRefresh: string | null; lastFill: string | null; /** D22: alerts withheld as too late in the last 24 h */ staleSuppressed24h?: number }>;
   // V2
   paper(o: { sinceIso?: string; wallet?: string }): Promise<{ rows: PaperRowLite[]; marks: MarkLite[] }>;
   snapshot(): Promise<PaperSnapshot | null>;
@@ -145,7 +145,7 @@ export async function handle(chatId: number, username: string | null, text: stri
     }
     case "status": {
       const s = await store.status(); const h = await store.health();
-      return { html: `${healthHtml(assessHealth(h), esc)}\n\nTracking ${s.tracked} wallets · ${s.signals24h} signals in 24h\nLast re-score: ${s.lastRefresh ? esc(s.lastRefresh) : "never"}` };
+      return { html: `${healthHtml(assessHealth(h), esc)}\n\nTracking ${s.tracked} wallets · ${s.signals24h} signals in 24h\nLast re-score: ${s.lastRefresh ? esc(s.lastRefresh) : "never"}${s.staleSuppressed24h && s.staleSuppressed24h > 0 ? `\n${s.staleSuppressed24h} late alert${s.staleSuppressed24h === 1 ? "" : "s"} not sent in 24h (detected over the lag limit; still listed in /signals)` : ""}` };
     }
     case "performance": case "stats": {
       const win = (args[0] ?? (cmd === "stats" ? "30d" : "all")).toLowerCase();

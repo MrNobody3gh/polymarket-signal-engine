@@ -4,6 +4,7 @@ import type { Store, Subscriber } from "./commands";
 import { loadPaper, loadSignalDetail } from "../paper/queries";
 import { readSnapshot } from "../paper/snapshot";
 import { readHeartbeats } from "../health/heartbeat";
+import { STALE_ALERT_KIND } from "../alerts/staleness";
 
 export function supabaseStore(db: SupabaseClient): Store {
   return {
@@ -23,13 +24,14 @@ export function supabaseStore(db: SupabaseClient): Store {
     },
     async openBook(wallet, n) { const { data } = await db.from("positions").select("token_id,title,slug,outcome,size,avg_price,cost_usd,last_seen").eq("wallet", wallet).gt("size", 0).order("cost_usd", { ascending: false }).limit(n); return (data ?? []) as never; },
     async status() {
-      const [{ count: tracked }, { count: signals24h }, { data: r }, { data: f }] = await Promise.all([
+      const [{ count: tracked }, { count: signals24h }, { data: r }, { data: f }, { count: stale }] = await Promise.all([
         db.from("wallets").select("address", { count: "exact", head: true }).eq("tracked", true),
         db.from("signals").select("id", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 86_400_000).toISOString()),
         db.from("cursors").select("value").eq("key", "refresh:last").maybeSingle(),
         db.from("fills").select("ts").order("ts", { ascending: false }).limit(1).maybeSingle(),
+        db.from("data_quality_issues").select("id", { count: "exact", head: true }).eq("kind", STALE_ALERT_KIND).gte("created_at", new Date(Date.now() - 86_400_000).toISOString()),
       ]);
-      return { tracked: tracked ?? 0, signals24h: signals24h ?? 0, lastRefresh: r?.value ? new Date(Number(r.value) * 1000).toUTCString().slice(5, 22) + " UTC" : null, lastFill: f?.ts ?? null };
+      return { tracked: tracked ?? 0, signals24h: signals24h ?? 0, lastRefresh: r?.value ? new Date(Number(r.value) * 1000).toUTCString().slice(5, 22) + " UTC" : null, lastFill: f?.ts ?? null, staleSuppressed24h: stale ?? 0 };
     },
     paper: (o) => loadPaper(db, o),
     snapshot: () => readSnapshot(db),

@@ -138,6 +138,20 @@ Switch it on **only by following the runbook**, `docs/PORTFOLIO.md` §8 (migrati
 the read-only check `railway run npm run portfolio:audit`, then real runs). Switching off: delete the variables and
 redeploy; nothing is deleted (§9).
 
+### Late alerts (D22)
+
+A signal whose source trade is **more than 6 hours old when it is evaluated** is still stored, simulated and listed
+everywhere, but no Telegram alert is sent for it (subscribers and the admin chat; also Discord and email, which share the
+same path). It is a safety net for outages and catch-ups, not a daily event. Set it on the Railway worker **and** on
+Vercel (the poller evaluates too):
+
+| Variable | Value |
+|---|---|
+| `ALERT_MAX_LAG_HOURS` | Hours, a positive number (default `6`). Late means strictly more than this between the trade and its evaluation. Anything else (empty, `0`, negative, text) uses `6` and logs one line at start; it never switches the rule off. |
+
+Each suppressed alert is a `data_quality_issues` row (`kind = 'stale_alert_suppressed'`) and `/status` shows how many
+were held back in the last 24 h. See `docs/PORTFOLIO.md` §11 (D22).
+
 ## Step 11 — Optional extras
 
 - **Fill the position book faster:** the engine only knows positions it has seen fills for. It fills in naturally over the first day.

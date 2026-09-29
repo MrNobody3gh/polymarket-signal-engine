@@ -9,13 +9,15 @@ import { applyFill, configFromEnv, evaluate, isBotLike, type RuleConfig } from "
 import { channelsFromEnv, dispatch, type Channels } from "../alerts/dispatch";
 import { TelegramApi } from "../telegram/api";
 import { broadcast } from "../telegram/broadcast";
-import { recordConsensusEvent, recordPaperSignal } from "../paper/ledger";
+import { logIssues, recordConsensusEvent, recordPaperSignal } from "../paper/ledger";
 import { heartbeat } from "../health/heartbeat";
 import { GammaMarketMeta, type MarketMetaSource } from "../polymarket/markets";
 import type { RemotePosition } from "../polymarket/client";
 import { pruneUntrackedCursors } from "./poll";
+import { detectionLagSec, isStaleLag, resolveMaxLagHours, StaleAlertLog, STALE_ALERT_KIND } from "../alerts/staleness";
 
-export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: Channels; now?: () => number; log?: (m: string) => void; markets?: MarketMetaSource }
+export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: Channels; now?: () => number; log?: (m: string) => void; markets?: MarketMetaSource;
+  /** D22 override (hours); default ALERT_MAX_LAG_HOURS, else 6. Invalid values fall back to 6. */ maxAlertLagHours?: number }
 
 const toSec = (iso: string | null | undefined) => (iso ? Math.floor(Date.parse(iso) / 1000) : null);
 const toIso = (sec: number | null | undefined) => (sec == null ? null : new Date(sec * 1000).toISOString());
@@ -31,6 +33,7 @@ export class SignalEngine {
   private db: SupabaseClient; private cfg: RuleConfig; private ch: Channels; private now: () => number; private log: (m: string) => void;
   private wallets = new Map<string, WalletProfile>(); private median = new Map<string, number>(); private paperSize: number;
   private minStoreUsd: number; private markets: MarketMetaSource;
+  private maxAlertLagHours: number; private staleLog: StaleAlertLog;
   /** Per-wallet serialisation: a wallet's fills and reconciliation never interleave (position book is read-modify-write). */
   private locks = new Map<string, Promise<unknown>>();
   private withWalletLock<T>(wallet: string, fn: () => Promise<T>): Promise<T> {
@@ -39,7 +42,7 @@ export class SignalEngine {
     return run;
   }
   private seen = new Set<string>(); private remember(id: string) { this.seen.add(id); if (this.seen.size > 20_000) { const first = this.seen.values().next().value; if (first) this.seen.delete(first); } }
-  constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; this.minStoreUsd = this.cfg.minFillUsd; this.markets = d.markets ?? new GammaMarketMeta(this.db); }
+  constructor(d: EngineDeps) { this.db = d.db; this.cfg = d.cfg ?? configFromEnv(); this.ch = d.channels ?? channelsFromEnv(); this.now = d.now ?? (() => Math.floor(Date.now() / 1000)); this.log = d.log ?? (() => {}); const ps = Number(process.env.PAPER_SIZE_USD); this.paperSize = Number.isFinite(ps) && ps > 0 ? ps : 100; this.minStoreUsd = this.cfg.minFillUsd; this.markets = d.markets ?? new GammaMarketMeta(this.db); this.maxAlertLagHours = resolveMaxLagHours(d.maxAlertLagHours ?? process.env.ALERT_MAX_LAG_HOURS, this.log); this.staleLog = new StaleAlertLog(this.log, this.maxAlertLagHours); }
 
   /** Load tracked wallets into memory. Call at start and after each refresh. Then drop the poll cursors of wallets
    *  that are no longer tracked, so one that returns later starts from the lookback window (pruneUntrackedCursors).
@@ -112,9 +115,13 @@ export class SignalEngine {
         const sig = { id: ins.id as string, kind: s.kind, severity: s.severity, wallet: s.wallet, wallet_name: s.walletName, condition_id: s.conditionId, token_id: s.tokenId, outcome: s.outcome, title: s.title, slug: s.slug, price: s.price, usd: s.usd, payload: s.payload, created_at: new Date(s.ts * 1000).toISOString() };
         try { await recordPaperSignal(this.db, sig, this.paperSize); if (s.kind === "CONSENSUS") await recordConsensusEvent(this.db, sig); } catch (e) { console.error("paper ledger failed", (e as Error).message); }
       }
-      const delivered: Record<string, unknown> = await dispatch(s, this.ch);
+      // D22: a signal detected more than ALERT_MAX_LAG_HOURS after the trade is stored, simulated and visible as
+      // usual, but never pushed (admin chat, Discord/email and subscribers alike; no tg_deliveries row, no counters).
+      const lagSec = detectionLagSec(evaluatedAt, s.ts); const stale = isStaleLag(lagSec, this.maxAlertLagHours);
+      if (stale && ins?.id) await this.recordStale(ins.id as string, s.kind, lagSec);
+      const delivered: Record<string, unknown> = stale ? {} : await dispatch(s, this.ch);
       // Telegram bot subscribers (per-chat filters). Env TELEGRAM_CHAT_ID above stays as the admin fallback.
-      if (process.env.TELEGRAM_BOT_TOKEN && ins?.id) {
+      if (!stale && process.env.TELEGRAM_BOT_TOKEN && ins?.id) {
         try { delivered.bot = await broadcast(this.db, new TelegramApi(process.env.TELEGRAM_BOT_TOKEN), { id: ins.id, kind: s.kind, severity: s.severity, wallet: s.wallet, wallet_name: s.walletName, outcome: s.outcome, title: s.title, slug: s.slug, price: s.price, usd: s.usd, payload: s.payload, created_at: new Date(s.ts * 1000).toISOString(), closed_at: null }); }
         catch (e) { delivered.bot = { error: (e as Error).message }; }
       }
@@ -124,6 +131,17 @@ export class SignalEngine {
     }
     return fired;
   }
+
+  /** D22: one data_quality_issues row per suppressed signal (the open-issue unique index makes a repeat a no-op) and
+   *  a rate-limited log line. Never throws: visibility must not break ingestion. */
+  private async recordStale(signalId: string, kind: string, lagSec: number) {
+    try { await logIssues(this.db, [{ kind: STALE_ALERT_KIND, ref_type: "signal", ref_id: signalId, detail: { lagHours: Math.round((lagSec / 3600) * 1000) / 1000, thresholdHours: this.maxAlertLagHours, kind } }]); }
+    catch (e) { this.log(`alerts: could not record a suppressed stale alert (${(e as Error).message})`); }
+    this.staleLog.note(lagSec, this.now());
+  }
+
+  /** Emit any pending stale-alert summary line now (shutdown / tests). */
+  flushStaleSummary() { this.staleLog.flush(); }
 
   /**
    * Reconcile one wallet's book with the authoritative /v2/positions snapshot. Establishes state only — never
