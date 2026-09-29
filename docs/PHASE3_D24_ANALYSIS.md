@@ -1,6 +1,6 @@
 # D24 — leave the exit and resolution out of the input hash of a decision that never opened a lot
 
-Status: **analysis only. Nothing in this document is implemented.** The owner decides (D24, and D25 for the gate meanwhile).
+Status: **implemented (compare side, with D26)**; the analysis below is as written on 29 Sep 2026, before the implementation. See docs/PORTFOLIO.md §11 (D24–D29) for what was built and what remains (D27 checkpoint fix, D28 residual class, D29).
 Written 29 Sep 2026 after the first production audit; repository head at the time `e114ef6`.
 
 ## 1. What happened, and why (the unexplained difference)

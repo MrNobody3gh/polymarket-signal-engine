@@ -103,6 +103,50 @@ export function fingerprint(s: BookSignal, exec: ExecConfig, pendingEntry: boole
   return `${entry}|${exit}@${exitTs ?? "-"}|${res}@${s.resolution?.ts ?? "-"}`;
 }
 
+// ───────────────────────────── D24: what "changed" means for a decision (compare side) ─────────────────────────────
+/**
+ * Decision D24 (docs/PHASE3_D24_ANALYSIS.md). A decision opens a lot iff it filled shares, i.e. its outcome is FILLED or
+ * PARTIALLY_FILLED (`portfolio_decisions_fill_needs_shares`, migration 0008, states the same thing). Every other outcome
+ * (REJECTED, UNFILLED, EXPIRED, INVALID, UNKNOWN) never opened a lot, and then the signal's own exit and resolution
+ * cannot change any decision, lot or equity number (tests/phase3-d24.test.ts is the guard of that invariant).
+ * An unknown or missing outcome is not "never opened": it is compared whole.
+ */
+export const LOT_OUTCOMES: ReadonlySet<string> = new Set(["FILLED", "PARTIALLY_FILLED"]);
+const NO_LOT_OUTCOMES: ReadonlySet<string> = new Set(["REJECTED", "UNFILLED", "EXPIRED", "INVALID", "UNKNOWN"]);
+export const neverOpenedLot = (outcome: string | null | undefined): boolean => outcome != null && NO_LOT_OUTCOMES.has(outcome);
+
+/**
+ * The stored `input_hash` as it is compared with a current fingerprint. For a decision that never opened a lot only the
+ * entry part is compared, so its exit and resolution parts are taken from the current fingerprint (they cannot differ);
+ * every other decision is compared whole. The stored value itself is never changed: an old-format hash (`…|-@-|-@-`) and
+ * a whole hash agree on the entry part, so nothing needs re-hashing when this rule starts to apply.
+ * THE one rule: the runner (change detection, rehydration, hash refresh) and the audit all go through it.
+ */
+export function comparableStoredHash(storedOutcome: string | null | undefined, storedHash: string | null, currentFingerprint: string): string | null {
+  if (storedHash == null || !neverOpenedLot(storedOutcome)) return storedHash;
+  const entry = storedHash.split("|", 1)[0], rest = currentFingerprint.slice(currentFingerprint.indexOf("|"));
+  return `${entry}${rest}`;
+}
+/** Did the inputs of a stored decision change? Outcome-aware (D24): false for a no-lot decision whose entry part is equal. */
+export function decisionInputsChanged(storedOutcome: string | null | undefined, storedHash: string | null, currentFingerprint: string): boolean {
+  return comparableStoredHash(storedOutcome, storedHash, currentFingerprint) !== currentFingerprint;
+}
+/** `rewindPoint` for a stored decision: outcome-aware (D24). null when nothing that can affect it changed. */
+export function decisionRewindPoint(storedOutcome: string | null | undefined, storedHash: string | null, next: PortfolioRequest): number | null {
+  return rewindPoint(comparableStoredHash(storedOutcome, storedHash, next.fingerprint), next);
+}
+
+// ───────────────────────────── D26: change-detection safety margin ─────────────────────────────
+/**
+ * Change detection reads the rows the sweep stamped after the previous run's start, less this margin. `computed_at` is
+ * stamped in the worker when the sweep builds the row, before the write commits, so a row stamped just before a run
+ * starts can become visible just after it (two workers overlapping in a deploy). Re-reading a row is idempotent: it
+ * changes no decision, lot, equity value or stored hash when nothing changed. Shared by the runner and the audit.
+ */
+export const CHANGE_DETECTION_MARGIN_SEC = 120;
+/** The instant (seconds) after which `computed_at` is read by change detection, or null when there is no previous run. */
+export const changeDetectionReadsFrom = (previousRunStart: number | null): number | null => (previousRunStart == null ? null : previousRunStart - CHANGE_DETECTION_MARGIN_SEC);
+
 /**
  * Where to rewind to when a request's inputs changed: the entry's fill time if the entry changed, else the earlier of
  * the old and new times of whatever changed (exit, resolution). null when nothing that affects a decision changed.

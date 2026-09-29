@@ -2,21 +2,25 @@
  * D13 fingerprint audit (docs/PHASE3_PLAN.md D13; docs/PORTFOLIO.md "Switch-on runbook"). Strictly read-only.
  *
  * D13 accepts that the runner never re-examines a decided signal whose Phase 2 record is final (`sim_terminal`) and
- * whose lot is closed or was never opened: the sweep stops recomputing such a signal, so its `computed_at` never moves
- * and change detection (§B2) never reads it again; rehydration (§B11) only looks at open lots. This audit measures what
- * that costs. For one portfolio it pages through `portfolio_decisions` by signal id, rebuilds every signal's request
- * *now* with the runner's own functions (loadBatchInputs → buildSignals → buildRequests with sourceFillIds), and
- * compares the current fingerprint with the stored `input_hash`.
+ * whose lot is closed: the sweep stops recomputing such a signal, so its `computed_at` never moves and change detection
+ * (§B2) never reads it again; rehydration (§B11) only looks at open lots. This audit measures what that costs. For one
+ * portfolio it pages through `portfolio_decisions` by signal id, rebuilds every signal's request *now* with the runner's
+ * own functions (loadBatchInputs → buildSignals → buildRequests with sourceFillIds), and compares the current
+ * fingerprint with the stored `input_hash` by the runner's own rule (requests.ts decisionInputsChanged, D24): a decision
+ * that never opened a lot is compared on its entry part only, every other decision whole. A never-opened decision whose
+ * exit or resolution moved is therefore not a difference at all (D13 no longer has to accept it); one whose entry part
+ * differs is, and D13 does not cover it.
  *
  * Every difference is put in exactly one class, using the runner's own rules (run.ts), first match wins:
  *   unexplained  (first) an entry whose fill time moved, unless it is the D13 case below: the runner rewinds to the new
  *                fill time, so a lot opened at the old time survives the replay (plan D18; docs/PORTFOLIO.md §11).
- *   nextRun      the next run re-examines it anyway: its execution row was rewritten after the change-detection point,
+ *   nextRun      the next run re-examines it anyway: its execution row was rewritten after the change-detection point
+ *                (the last run's start less CHANGE_DETECTION_MARGIN_SEC, D26, exactly as the runner reads it),
  *                or its lot is open (every run re-links open lots), or it sits after the watermark of a run that did
  *                not finish (the next run deletes and replays that range), or the sweep would rewrite its execution
  *                row now (its $100 record differs from the stored one, so computed_at will move next cycle).
- *   d13          the D13 case: the sweep never recomputes it (sim_terminal, or no ledger row) and its lot is closed or
- *                was never opened. Accepted by decision D13; reported with the earliest event a rewind would need.
+ *   d13          the D13 case: the sweep never recomputes it (sim_terminal, or no ledger row) and its lot is closed
+ *                (closed lots only since D24). Accepted by decision D13; reported with the earliest event a rewind would need.
  *   unexplained  anything else: nothing will ever re-examine it, and D13 does not cover it.
  * Decisions whose signal or execution row no longer exists are counted apart.
  *
@@ -36,7 +40,7 @@ import { MODES, type ModeName } from "../sim/config";
 import { timeline } from "../sim/execute";
 import { buildSignals, loadBatchInputs, recordHash, selectIn, simulateMode } from "../sim/run";
 import { PortfolioConfigError, portfolioDefinitions, portfolioRunConfigFromEnv, type PortfolioDefinition, type PortfolioRunConfig } from "./config";
-import { buildRequests, rewindPoint } from "./requests";
+import { buildRequests, changeDetectionReadsFrom, comparableStoredHash, decisionInputsChanged, decisionRewindPoint, neverOpenedLot, CHANGE_DETECTION_MARGIN_SEC } from "./requests";
 
 export const AUDIT_BATCH_MAX = 500;
 export const AUDIT_EXAMPLES = 20;
@@ -61,7 +65,9 @@ export interface AuditExample {
   /** The mode's `paper_executions.computed_at` (what change detection reads), `paper_ledger.sim_terminal`, the lot's state. */
   computedAt: string | null; simTerminal: boolean | null; lotState: string | null;
   /** `none`: the decision never opened a lot and only its exit / resolution differ, so those inputs cannot change any
-   *  decision, lot or equity number (docs/PORTFOLIO.md §11, D24 analysis). `possible`: anything else. */
+   *  decision, lot or equity number (docs/PORTFOLIO.md §11, D24 analysis). `possible`: anything else. Since D24 such a
+   *  difference is not reported at all, so a reported difference is `possible`; the field is kept so that a future
+   *  regression of the rule shows up as `none` in the output instead of silently. */
   effect: "none" | "possible";
 }
 export interface ClassSummary { count: number; earliestTs: number | null; earliestIso: string | null; examples: AuditExample[]; /** how many of `count` have effect "none" */ inert: number }
@@ -73,6 +79,8 @@ export interface DecisionAudit {
   found: boolean;
   nothingToAudit: boolean; message: string | null;
   watermark: number | null; changeDetectionSince: number | null; previousRunFinished: boolean | null;
+  /** Where the runner's change detection reads from: `changeDetectionSince` less the D26 margin. */
+  changeDetectionReadsFrom: number | null;
   /** portfolio_runs.last_run_started_at (seconds), read at the start of the audit. */
   lastRunStartedAt: number | null;
   checked: number; matches: number; mismatches: number;
@@ -111,6 +119,7 @@ const emptyClass = (): ClassSummary => ({ count: 0, earliestTs: null, earliestIs
 interface ClassifyCtx {
   eventTs: number; request: { key: { ts: number } } | null; lot: AuditExample["lot"];
   computed: number | null; frozen: boolean; simHashDiffers: boolean;
+  /** Where change detection reads from (already less the D26 margin). */
   since: number | null; crashed: boolean; W0: number | null;
 }
 /** The runner's own rules (run.ts), first match wins. Pure. */
@@ -119,12 +128,13 @@ function classify(c: ClassifyCtx): { cls: MismatchClass; why: string } {
   // lot opened at the old, earlier time survives in the restored checkpoint (plan D18; docs/PORTFOLIO.md §11).
   const moved = c.request != null && c.request.key.ts !== c.eventTs;
   const tail = c.lot === "closed" ? "closed" : "never opened";
-  if (moved && !(c.frozen && c.lot !== "open")) return { cls: "unexplained", why: `its entry fill time moved from ${iso(c.eventTs)} to ${iso(c.request!.key.ts)}; the runner does not replay a moved entry correctly (known limitation)` };
-  if (c.since != null && c.computed != null && c.computed > c.since) return { cls: "nextRun", why: "its execution row was rewritten after the last run started, so the next run's change detection reads it" };
+  if (moved && !(c.frozen && c.lot === "closed")) return { cls: "unexplained", why: `its entry fill time moved from ${iso(c.eventTs)} to ${iso(c.request!.key.ts)}; the runner does not replay a moved entry correctly (known limitation)` };
+  if (c.since != null && c.computed != null && c.computed > c.since) return { cls: "nextRun", why: `its execution row was rewritten after the last run started (less a ${CHANGE_DETECTION_MARGIN_SEC} s safety margin), so the next run's change detection reads it` };
   if (c.lot === "open") return { cls: "nextRun", why: "its lot is open, and every run re-links open lots to their current exit and resolution (B11)" };
   if (c.crashed && (c.W0 == null || c.eventTs > c.W0)) return { cls: "nextRun", why: "it was decided after the watermark by a run that did not finish; the next run deletes and replays that range" };
   if (!c.frozen && c.simHashDiffers) return { cls: "nextRun", why: "the sweep will rewrite its execution row on its next cycle (its $100 record changed); the runner then sees it" };
-  if (c.frozen) return { cls: "d13", why: `its Phase 2 record is final (sim_terminal) or it has no ledger row (never recomputed), and its lot is ${tail}: never re-examined (D13)` };
+  if (c.frozen && c.lot === "closed") return { cls: "d13", why: "its Phase 2 record is final (sim_terminal) or it has no ledger row (never recomputed), and its lot is closed: never re-examined (D13)" };
+  if (c.frozen) return { cls: "unexplained", why: `its Phase 2 record is final (or it has no ledger row) so it is never recomputed, and its lot is ${tail}; the entry part of its inputs changed, which D13 (closed lots only) does not cover` };
   return { cls: "unexplained", why: `nothing will re-examine it: the sweep's $100 record is unchanged (so computed_at never moves) and its lot is ${tail}; the changed input is one the $100 record does not contain` };
 }
 
@@ -132,7 +142,7 @@ function classify(c: ClassifyCtx): { cls: MismatchClass; why: string } {
 export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefinition, opts: { batchSize?: number; now?: () => number } = {}): Promise<DecisionAudit> {
   const t0 = Date.now(); const now = opts.now ?? (() => Date.now() / 1000);
   const B = Math.max(1, Math.min(AUDIT_BATCH_MAX, opts.batchSize ?? AUDIT_BATCH_MAX)); const exec = MODES[def.mode];
-  const out: DecisionAudit = { portfolioId: def.id, mode: def.mode, found: false, nothingToAudit: false, message: null, watermark: null, changeDetectionSince: null, previousRunFinished: null,
+  const out: DecisionAudit = { portfolioId: def.id, mode: def.mode, found: false, nothingToAudit: false, message: null, watermark: null, changeDetectionSince: null, previousRunFinished: null, changeDetectionReadsFrom: null,
     lastRunStartedAt: null, checked: 0, matches: 0, mismatches: 0, classes: { d13: emptyClass(), nextRun: emptyClass(), unexplained: emptyClass() }, missing: { signal: 0, execution: 0, examples: [] }, inconclusive: null, batches: 0, maxBatchRows: 0, durationMs: 0 };
   const must = <T>(r: { data: T; error: { message: string } | null }, what: string): T => { if (r.error) throw new Error(`${what}: ${r.error.message}`); return r.data; };
 
@@ -146,8 +156,9 @@ export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefi
   // the start of the last run that did. A crashed run's range after its recorded watermark is replayed wholesale.
   const started = secs(run0?.last_run_started_at), finished = secs(run0?.last_run_finished_at), W0 = secs(run0?.last_watermark_ts);
   const crashed = started != null && (finished == null || finished < started);
-  const since = crashed ? (typeof run0?.stats?.runStartedAt === "number" ? run0.stats.runStartedAt : null) : started;
-  out.lastRunStartedAt = started; out.watermark = W0; out.changeDetectionSince = since; out.previousRunFinished = started == null ? null : !crashed;
+  const sinceStart = crashed ? (typeof run0?.stats?.runStartedAt === "number" ? run0.stats.runStartedAt : null) : started;
+  const since = changeDetectionReadsFrom(sinceStart);                                          // D26: the runner reads from here
+  out.lastRunStartedAt = started; out.watermark = W0; out.changeDetectionSince = sinceStart; out.changeDetectionReadsFrom = since; out.previousRunFinished = started == null ? null : !crashed;
   const leaseHeld = (r: Record<string, any> | null) => { const u = secs(r?.lease_until); return u != null && u > now() ? `a portfolio run holds the lease (${r?.lease_owner ?? "?"}, until ${iso(Math.floor(u))})` : null; };
   const busy0 = leaseHeld(run0);
 
@@ -159,9 +170,9 @@ export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefi
 
   let last = "";
   for (;;) {
-    let q = db.from("portfolio_decisions").select("signal_id,kind,event_ts,input_hash").eq("portfolio_id", def.id);
+    let q = db.from("portfolio_decisions").select("signal_id,kind,event_ts,outcome,input_hash").eq("portfolio_id", def.id);
     if (last) q = q.gt("signal_id", last);
-    const page = (must(await q.order("signal_id", { ascending: true }).limit(B), "portfolio_decisions page") ?? []) as { signal_id: string; kind: string; event_ts: unknown; input_hash: string }[];
+    const page = (must(await q.order("signal_id", { ascending: true }).limit(B), "portfolio_decisions page") ?? []) as { signal_id: string; kind: string; event_ts: unknown; outcome: string; input_hash: string }[];
     if (!page.length) break;
     out.batches++; out.maxBatchRows = Math.max(out.maxBatchRows, page.length); last = String(page[page.length - 1].signal_id);
     const ids = page.map((d) => String(d.signal_id));
@@ -188,16 +199,16 @@ export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefi
         continue;
       }
       const r = reqs.get(id) ?? null; const current = r?.fingerprint ?? null;
-      if (current === d.input_hash) { out.matches++; continue; }
+      if (current != null && !decisionInputsChanged(d.outcome, d.input_hash, current)) { out.matches++; continue; }   // the runner's rule (D24)
       out.mismatches++;
-      const parts = fingerprintParts(d.input_hash, current);
+      const parts = fingerprintParts(comparableStoredHash(d.outcome, d.input_hash, current ?? "|-@-|-@-") ?? d.input_hash, current);
       // An entry change can move the fill in either direction: the earlier of the stored and the current time.
-      const rewindTo = !r ? eventTs : parts.includes("entry") ? Math.min(eventTs, r.key.ts) : rewindPoint(d.input_hash, r) ?? eventTs;
+      const rewindTo = !r ? eventTs : parts.includes("entry") ? Math.min(eventTs, r.key.ts) : decisionRewindPoint(d.outcome, d.input_hash, r) ?? eventTs;
       const x = execs.get(id)!; const l = ledger.get(id); const frozen = !l || l.sim_terminal === true;
       const stLot = lots.get(id) ?? null; const lot: AuditExample["lot"] = !stLot ? "none" : OPEN.has(stLot) ? "open" : "closed";
       const computed = secs(x.computed_at);
       const { cls, why } = classify({ eventTs, request: r, lot, computed, frozen, simHashDiffers: !frozen && simHash.get(id) !== (x.record_hash ?? undefined), since, crashed, W0 });
-      const effect: AuditExample["effect"] = lot === "none" && parts.every((p) => p !== "entry") ? "none" : "possible";
+      const effect: AuditExample["effect"] = neverOpenedLot(d.outcome) && lot === "none" && parts.every((p) => p !== "entry") ? "none" : "possible";
       note(cls, { signalId: id, kind: d.kind, eventTs, eventIso: iso(eventTs)!, parts, lot, rewindTo, rewindIso: iso(rewindTo)!, why, stored: d.input_hash, current, computedAt: computed == null ? null : iso(Math.floor(computed)), simTerminal: l ? l.sim_terminal === true : null, lotState: stLot, effect });
     }
     if (page.length < B) break;
@@ -253,10 +264,10 @@ export function formatAudit(results: DecisionAudit[], exitCode: number): string 
     if (r.nothingToAudit) L.push(`${t} ${r.message}.`);
     else {
       L.push(`${t} as of watermark ${utc(r.watermark)} · ${n(r.checked)} checked in ${n(r.batches)} page(s) · ${n(r.matches)} match · ${n(r.mismatches)} differ · ${n(r.missing.signal + r.missing.execution)} missing · last run started ${short(iso(r.lastRunStartedAt))}`);
-      const cls: [MismatchClass, string][] = [["d13", "(a) D13 — final Phase 2 record, lot closed or never opened; never re-examined (accepted)"], ["nextRun", "(b) other — the next run re-examines these anyway"], ["unexplained", "(b) other — UNEXPLAINED: nothing will re-examine these"]];
+      const cls: [MismatchClass, string][] = [["d13", "(a) D13 — final Phase 2 record, lot closed; never re-examined (accepted)"], ["nextRun", "(b) other — the next run re-examines these anyway"], ["unexplained", "(b) other — UNEXPLAINED: nothing will re-examine these"]];
       for (const [k, label] of cls) {
         const c = r.classes[k]; if (!c.count) continue;
-        L.push(`${t} ${label}: ${n(c.count)} · earliest affected event ${utc(c.earliestTs)}${k === "unexplained" ? ` · no effect on any number (no lot ever opened, only exit/resolution differ): ${n(c.inert)} of ${n(c.count)}` : ""}`);
+        L.push(`${t} ${label}: ${n(c.count)} · earliest affected event ${utc(c.earliestTs)}${k === "unexplained" ? ` · no effect on any number (no lot ever opened, only exit/resolution differ; D24 should make this 0): ${n(c.inert)} of ${n(c.count)}` : ""}`);
       }
       if (r.missing.signal) L.push(`${t} MISSING: ${n(r.missing.signal)} decision(s) whose signal no longer exists`);
       if (r.missing.execution) L.push(`${t} MISSING: ${n(r.missing.execution)} decision(s) whose ${r.mode} execution row no longer exists`);
@@ -279,7 +290,10 @@ export interface ExplainMode {
   decision: { outcome: string; reason: string | null; eventTs: number; eventIso: string; inputHash: string } | null;
   /** The fingerprint the runner would compute now, with what it is made of. */
   current: { fingerprint: string; pendingEntry: boolean; exitPendingTs: number | null; exitId: string | null; exitFillTs: number | null; resolutionTs: number | null; entryFillTs: number } | null;
+  /** The parts that differ AND are compared (what the runner compares, D24). */
   parts: PartDiff[];
+  /** Parts that differ but are not compared: the exit / resolution of a decision that never opened a lot (D24). Information only. */
+  notCompared: PartDiff[];
   row: { computedAt: string | null; recordHash: string | null; status: string | null; state: string | null; fillTs: string | null } | null;
   simTerminal: boolean | null; lotState: string | null; lastRunStartedAt: number | null; lastRunFinishedAt: number | null; watermark: number | null;
   /** Would the runner's change detection read this row next run? (computed_at after the last run's start) */
@@ -305,24 +319,26 @@ export async function explainSignal(db: SupabaseClient, cfg: PortfolioRunConfig,
     const run = must(await db.from("portfolio_runs").select("last_run_started_at,last_run_finished_at,last_watermark_ts,stats").eq("portfolio_id", def.id).maybeSingle(), "portfolio_runs read") as Record<string, any> | null;
     const started = secs(run?.last_run_started_at), finished = secs(run?.last_run_finished_at), W0 = secs(run?.last_watermark_ts);
     const crashed = started != null && (finished == null || finished < started);
-    const since = crashed ? (typeof run?.stats?.runStartedAt === "number" ? run.stats.runStartedAt : null) : started;
+    const since = changeDetectionReadsFrom(crashed ? (typeof run?.stats?.runStartedAt === "number" ? run.stats.runStartedAt : null) : started);   // D26
     const stLot = lots[0]?.state ?? null; const lot: AuditExample["lot"] = !stLot ? "none" : OPEN.has(stLot) ? "open" : "closed";
     const computed = secs(x?.computed_at);
     const frozen = !ledgerRow || ledgerRow.sim_terminal === true;
-    const base: ExplainMode = { mode: def.mode, portfolioId: def.id, signalFound: present, decision: null, current: null, parts: [], row: null, simTerminal: ledgerRow ? ledgerRow.sim_terminal === true : null, lotState: stLot,
+    const base: ExplainMode = { mode: def.mode, portfolioId: def.id, signalFound: present, decision: null, current: null, parts: [], notCompared: [], row: null, simTerminal: ledgerRow ? ledgerRow.sim_terminal === true : null, lotState: stLot,
       lastRunStartedAt: started, lastRunFinishedAt: finished, watermark: W0, nextRunReadsRow: since != null && computed != null ? computed > since : null, cls: null, why: "", effect: null };
     if (x) base.row = { computedAt: computed == null ? null : iso(Math.floor(computed)), recordHash: x.record_hash ?? null, status: x.status ?? null, state: x.state ?? null, fillTs: x.fill_ts == null ? null : String(x.fill_ts) };
     if (req) base.current = { fingerprint: req.fingerprint, pendingEntry: req.pendingEntry, exitPendingTs: req.exitPendingTs, exitId: req.signal.exitId ?? null, exitFillTs: req.signal.exit ? timeline(req.signal.exit.triggerTs, req.signal.exit.triggerEvalTs, exec).fillTs : req.exitPendingTs, resolutionTs: req.signal.resolution?.ts ?? null, entryFillTs: req.key.ts };
     if (!present) { base.why = "the signal no longer exists"; out.push(base); continue; }
     if (!dec) { base.why = req ? "no decision stored for this signal in this portfolio (not decided yet, or excluded by D4)" : "no request can be built (excluded by D4: traded or filled before the start) and no decision is stored"; out.push(base); continue; }
     const eventTs = Math.floor(secs(dec.event_ts)!); base.decision = { outcome: dec.outcome, reason: dec.reason ?? null, eventTs, eventIso: iso(eventTs)!, inputHash: dec.input_hash };
-    base.parts = fingerprintParts(dec.input_hash, req?.fingerprint ?? null).length ? fingerprintPartDiffs(dec.input_hash, req?.fingerprint ?? null) : [];
-    if (req && req.fingerprint === dec.input_hash) { base.cls = "match"; base.why = "the stored input_hash equals the current fingerprint"; out.push(base); continue; }
+    const stored = req ? comparableStoredHash(dec.outcome, dec.input_hash, req.fingerprint) ?? dec.input_hash : dec.input_hash;     // D24: the parts the runner compares
+    base.parts = fingerprintParts(stored, req?.fingerprint ?? null).length ? fingerprintPartDiffs(stored, req?.fingerprint ?? null) : [];
+    if (req) base.notCompared = fingerprintPartDiffs(dec.input_hash, req.fingerprint).filter((d) => !base.parts.some((p) => p.part === d.part));
+    if (req && !decisionInputsChanged(dec.outcome, dec.input_hash, req.fingerprint)) { base.cls = "match"; base.why = req.fingerprint === dec.input_hash ? "the stored input_hash equals the current fingerprint" : `the decision never opened a lot (${dec.outcome}) and its entry part is unchanged; its exit / resolution parts are not compared (D24)`; out.push(base); continue; }
     let simDiffers = false;
     if (x && !frozen) simDiffers = simulateMode(built.filter((b) => b.id === signalId), inp, exec).records.map((r) => recordHash(r))[0] !== (x.record_hash ?? undefined);
     const { cls, why } = classify({ eventTs, request: req, lot, computed, frozen, simHashDiffers: simDiffers, since, crashed, W0 });
     base.cls = cls; base.why = why;
-    base.effect = lot === "none" && base.parts.every((d) => d.part !== "entry") ? "none" : "possible";
+    base.effect = neverOpenedLot(dec.outcome) && lot === "none" && base.parts.every((d) => d.part !== "entry") ? "none" : "possible";
     out.push(base);
   }
   return out;
@@ -339,6 +355,7 @@ export function formatExplain(signalId: string, rs: ExplainMode[]): string {
     if (r.current) L.push(`${t} current fingerprint: ${r.current.fingerprint} · entry fill ${iso(r.current.entryFillTs)}${r.current.exitId ? ` · linked exit ${r.current.exitId} fills ${iso(r.current.exitFillTs)}${r.current.exitPendingTs != null ? " (price pending)" : ""}` : " · no linked exit"}${r.current.resolutionTs != null ? ` · resolution at ${iso(r.current.resolutionTs)}` : " · no resolution"}${r.current.pendingEntry ? " · entry price pending" : ""}`);
     else L.push(`${t} current fingerprint: none (no request can be built)`);
     for (const d of r.parts) L.push(`${t} differs in ${d.part}: stored=${d.stored} current=${d.current}`);
+    for (const d of r.notCompared) L.push(`${t} not compared (the decision never opened a lot, D24) ${d.part}: stored=${d.stored} current=${d.current}`);
     L.push(`${t} execution row: ${r.row ? `${r.row.status}/${r.row.state} fill_ts=${r.row.fillTs} computed_at=${short(r.row.computedAt)} record_hash=${short(r.row.recordHash)}` : "none"} · sim_terminal=${r.simTerminal ?? "no-ledger-row"} · lot=${r.lotState ?? "none"} · last_run_started_at=${short(iso(r.lastRunStartedAt))} · next run reads this row: ${r.nextRunReadsRow == null ? "unknown" : r.nextRunReadsRow ? "yes" : "no"}`);
     L.push(`${t} verdict: ${r.cls ?? "n/a"}${r.effect ? ` · effect=${r.effect}` : ""} — ${r.why}`);
   }

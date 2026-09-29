@@ -12,90 +12,18 @@
  * go stale (a row rewritten while a run is in progress; a run that dies before it refreshes hashes; a rewind that does not
  * replay the decision).
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { stressDb } from "./helpers/stressDb";
+import { describe, it, expect } from "vitest";
 import { sweepSimulation } from "@/lib/paper/sim/run";
 import { MODES, type ModeName, type PortfolioConfig } from "@/lib/paper/sim/config";
 import { timeline } from "@/lib/paper/sim/execute";
 import { runPortfolios } from "@/lib/paper/portfolio/run";
-import { validatePortfolioConfig, portfolioDefinitions, type PortfolioRunConfig } from "@/lib/paper/portfolio/config";
-import { auditPortfolios, explainSignal, type DecisionAudit } from "@/lib/paper/portfolio/audit";
+import { explainSignal, formatExplain } from "@/lib/paper/portfolio/audit";
+import { buildRequests, decisionRewindPoint } from "@/lib/paper/portfolio/requests";
+import { buildSignals, loadBatchInputs } from "@/lib/paper/sim/run";
+import { ALL, E, ONE_SLOT, ROOMY, START, TIGHT, X, addEntry, addExit, addMarkets, audit, byMode, cfgOf, clock, decisionOf, defOf, execOf, fetchPrices, freshReplay, installClock, iso, ledgerOf, mkDb, putObs, run, sameNumbers, sec, setClock, unit, world, type Db, type Sig } from "./helpers/liveWorld";
 
-const START = 1_790_000_000;
-const iso = (s: number) => new Date(s * 1000).toISOString();
-const sec = (v: string) => Math.floor(Date.parse(v) / 1000);
-const pad = (i: number) => String(i).padStart(12, "0");
-const E = (i: number) => `00000000-0000-4000-8000-${pad(i)}`, X = (i: number) => `00000000-0000-4000-9000-${pad(i)}`;
-const ALL: ModeName[] = ["IDEAL", "REALISTIC", "CONSERVATIVE"];
-/** One slot: every entry after the first is REJECTED_MAX_OPEN_POSITIONS, so it never opens a lot. */
-const ONE_SLOT: PortfolioConfig = { startingCapitalUsd: 10_000, positionUsd: 100, maxMarketExposureUsd: 10_000, maxTotalExposurePct: 100, maxOpenPositions: 1, maxWalletAllocationUsd: 10_000, minCashReserveUsd: 0, allowResize: false };
-const TIGHT: PortfolioConfig = { startingCapitalUsd: 1_500, positionUsd: 100, maxMarketExposureUsd: 300, maxTotalExposurePct: 70, maxOpenPositions: 3, maxWalletAllocationUsd: 350, minCashReserveUsd: 50, allowResize: true };
-const ROOMY: PortfolioConfig = { startingCapitalUsd: 1_000_000, positionUsd: 100, maxMarketExposureUsd: 1_000_000, maxTotalExposurePct: 100, maxOpenPositions: 100_000, maxWalletAllocationUsd: 1_000_000, minCashReserveUsd: 0, allowResize: false };
+installClock();
 
-let clock = START;
-const setClock = (t: number) => { clock = t; vi.setSystemTime(t * 1000); };
-beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); setClock(START); });
-afterEach(() => { vi.useRealTimers(); });
-
-type Db = ReturnType<typeof stressDb>;
-function mkDb(): Db {
-  const now = () => Math.floor(Date.now() / 1000);
-  const runsRow = (id: string) => db.T("portfolio_runs").find((r) => r.portfolio_id === id);
-  const db: Db = stressDb({ rpc: {
-    claim_portfolio_lease: ({ p_portfolio_id: id, p_owner: owner, p_seconds: s }: any) => {
-      let r = runsRow(id); if (!r) { r = { portfolio_id: id, lease_owner: null, lease_until: null, last_run_started_at: null, last_run_finished_at: null, last_watermark_ts: null, last_watermark_key: null, stats: {} }; db.insertRow("portfolio_runs", r); }
-      if (r.lease_until == null || sec(r.lease_until) <= now() || r.lease_owner === owner) { r.lease_owner = owner; r.lease_until = iso(now() + s); return true; }
-      return false;
-    },
-    release_portfolio_lease: ({ p_portfolio_id: id, p_owner: owner }: any) => { const r = runsRow(id); if (!r || r.lease_owner !== owner) return false; r.lease_owner = null; r.lease_until = null; return true; },
-  } });
-  return db;
-}
-const cfgOf = (pc: PortfolioConfig): PortfolioRunConfig => validatePortfolioConfig({ ...pc, startTs: iso(START) }, clock);
-const defOf = (pc: PortfolioConfig, m: ModeName) => portfolioDefinitions(cfgOf(pc)).find((d) => d.mode === m)!;
-const run = (db: Db, pc: PortfolioConfig, extra: Record<string, unknown> = {}) => runPortfolios(db as never, { config: cfgOf(pc), modes: ALL, owner: "worker", ...extra });
-const audit = (db: Db, pc: PortfolioConfig) => auditPortfolios(db as never, cfgOf(pc), { now: () => clock });
-const byMode = (r: DecisionAudit[], m: ModeName) => r.find((x) => x.mode === m)!;
-const unit = (k: string) => { let h = 2166136261; for (let i = 0; i < k.length; i++) { h ^= k.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 2 ** 32; };
-/** The price backlog: every PENDING observation becomes COMPLETE (a function of token and time only), except `unavailable`. */
-function fetchPrices(db: Db, unavailable: (token: string, asOf: number) => boolean = () => false) {
-  for (const r of db.T("price_observations")) {
-    if (r.state !== "PENDING") continue;
-    Object.assign(r, unavailable(r.token_id, r.as_of) ? { state: "UNAVAILABLE" } : { state: "COMPLETE", obs_ts: r.as_of - Math.floor(unit(`${r.token_id}@${r.as_of}`) * 50), price: 0.3 + unit(`${r.token_id}@${r.as_of}`) * 0.4, resolution_seconds: 0 });
-  }
-}
-const putObs = (db: Db, token: string, asOf: number) => db.insertRow("price_observations", { token_id: token, as_of: asOf, state: "COMPLETE", obs_ts: asOf - 3, price: 0.5, resolution_seconds: 0 });
-
-interface Sig { id: string; kind: string; wallet: string; cond: string; token: string; src: number; ev: number; usd?: number; price?: number }
-const addEntry = (db: Db, s: Sig, fill = s.id) => { db.insertRow("signals", { id: s.id, kind: s.kind, wallet: s.wallet, condition_id: s.cond, token_id: s.token, price: s.price ?? 0.5, usd: s.usd ?? 3000, created_at: iso(s.src), evaluated_at: iso(s.ev), source_fill_id: `0xfill${fill}` }); db.insertRow("paper_ledger", { signal_id: s.id, created_at: iso(s.ev), sim_terminal: false, side: "LONG" }); };
-const addExit = (db: Db, id: string, wallet: string, cond: string, token: string, src: number, ev: number, usd: number) => { db.insertRow("signals", { id, kind: "EXIT", wallet, condition_id: cond, token_id: token, price: 0.6, usd, created_at: iso(src), evaluated_at: iso(ev), source_fill_id: `0xexit${id}` }); db.insertRow("paper_ledger", { signal_id: id, created_at: iso(ev), sim_terminal: true, side: "EXIT_EVENT" }); };
-const addMarkets = (db: Db, conds: string[]) => { for (const c of conds) db.insertRow("markets", { condition_id: c, fees_enabled: true, taker_fee_rate: 0.02, tick_size: 0.01, min_order_shares: 5, meta_fetched_at: iso(START - 86_400) }); };
-const decisionOf = (db: Db, pid: string, id: string) => db.T("portfolio_decisions").find((d) => d.portfolio_id === pid && d.signal_id === id);
-const execOf = (db: Db, id: string, m: ModeName) => db.T("paper_executions").find((x) => x.signal_id === id && x.mode === m);
-const ledgerOf = (db: Db, id: string) => db.T("paper_ledger").find((l) => l.signal_id === id)!;
-
-// ───────────────────────────── outputs, and "a fresh replay of the final inputs" ─────────────────────────────
-const strip = ({ computed_at: _c, record_hash: _r, input_hash: _i, ...r }: Record<string, any>) => r;
-const outputs = (db: Db) => ({
-  decisions: db.T("portfolio_decisions").map(strip).sort((a, b) => `${a.portfolio_id}${a.signal_id}`.localeCompare(`${b.portfolio_id}${b.signal_id}`)),
-  lots: db.T("portfolio_lots").map(strip).sort((a, b) => `${a.portfolio_id}${a.signal_id}`.localeCompare(`${b.portfolio_id}${b.signal_id}`)),
-  equity: db.T("portfolio_equity").map((r) => [r.portfolio_id, r.ts, r.seq, r.cash, r.exposure, r.equity]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-});
-/** Same signals, marks, metadata, resolutions and price observations in an empty database; sweep once, run once. */
-async function freshReplay(db: Db, pc: PortfolioConfig): Promise<Db> {
-  const f = mkDb();
-  for (const t of ["signals", "paper_ledger", "markets", "token_resolutions", "paper_marks", "price_observations"]) for (const r of db.T(t)) f.insertRow(t, { ...r, ...(t === "paper_ledger" && r.side === "LONG" ? { sim_terminal: false } : {}) });
-  await sweepSimulation(f as never); await run(f, pc);
-  return f;
-}
-/** input_hash aside, the incrementally-run database and a from-scratch replay of its final inputs are identical. */
-const sameNumbers = async (db: Db, pc: PortfolioConfig, modes: ModeName[] = ALL) => {
-  const fresh = await freshReplay(db, pc); const keep = new Set(modes.map((m) => defOf(pc, m).id)); const a = outputs(db), b = outputs(fresh);
-  const only = <T extends { portfolio_id?: string }>(rows: T[]) => rows.filter((r) => keep.has(String(r.portfolio_id ?? "")));
-  const diffs = (x: Record<string, any>[], y: Record<string, any>[]) => { const kx = new Map(x.map((r) => [`${r.portfolio_id}|${r.signal_id}`, JSON.stringify(r)])), ky = new Map(y.map((r) => [`${r.portfolio_id}|${r.signal_id}`, JSON.stringify(r)])); return [...new Set([...kx.keys(), ...ky.keys()])].filter((k) => kx.get(k) !== ky.get(k)).map((k) => `${k}\n  incremental: ${kx.get(k)}\n  fresh:       ${ky.get(k)}`); };
-  expect(diffs(only(a.decisions), only(b.decisions))).toEqual([]); expect(diffs(only(a.lots), only(b.lots))).toEqual([]);
-  expect(a.equity.filter((e) => keep.has(String(e[0])))).toEqual(b.equity.filter((e) => keep.has(String(e[0]))));
-};
 
 // ───────────────────────────── the production shape ─────────────────────────────
 /**
@@ -115,6 +43,7 @@ async function cycle1(db: Db, pc: PortfolioConfig) {
   addMarkets(db, ["cF", C]); for (const s of [F, A, B]) addEntry(db, s);
   setClock(S + 3600);
   await sweepSimulation(db as never); fetchPrices(db, (tok, at) => tok === T && at === timeline(A.src, A.ev, MODES.CONSERVATIVE).fillTs); await sweepSimulation(db as never);
+  setClock(clock + 600);                                                        // the portfolio job runs minutes after the sweep (in production, hours after this row was stamped): outside the D26 margin
   await run(db, pc); setClock(clock + 900);
 }
 async function cycle2(db: Db, pc: PortfolioConfig) {
@@ -123,60 +52,52 @@ async function cycle2(db: Db, pc: PortfolioConfig) {
   setClock(S + 7200); await sweepSimulation(db as never); setClock(clock + 40); await run(db, pc); setClock(clock + 900);
 }
 
-describe("stale input_hash on a decision that never opened a lot (production, 29 Sep 2026)", () => {
-  it("reproduces it: a NOT_ENTERED row never moves, so the exit that arrives is never read; the audit reports exactly one unexplained difference, in one mode", async () => {
+describe("the 29 Sep 2026 shape, with D24 (compare side): a decision that never opened a lot is compared on its entry part only", () => {
+  const hashes = (db: Db, pc: PortfolioConfig, ids: string[]) => ALL.flatMap((m) => ids.map((id) => { const d = decisionOf(db, defOf(pc, m).id, id)!; return [m, id, d.input_hash, d.record_hash]; }));
+
+  it("flips: the late exit that never moved a NOT_ENTERED row is no difference; the audit finds nothing, in any mode, and nothing was rewritten", async () => {
     const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc);
     const cons = defOf(pc, "CONSERVATIVE");
     // precondition: the production state before the exit
     expect(execOf(db, A.id, "CONSERVATIVE")).toMatchObject({ status: "UNKNOWN", state: "NOT_ENTERED" });
     for (const m of ALL) expect(decisionOf(db, defOf(pc, m).id, A.id), m).toMatchObject({ outcome: "REJECTED", reason: "REJECTED_MAX_OPEN_POSITIONS" });
     expect(decisionOf(db, cons.id, A.id)!.input_hash.split("|").slice(1)).toEqual(["-@-", "-@-"]);
-    const rowBefore = { ...execOf(db, A.id, "CONSERVATIVE")! };
-    expect(byMode(await audit(db, pc), "CONSERVATIVE").mismatches).toBe(0);
+    const rowBefore = { ...execOf(db, A.id, "CONSERVATIVE")! }; const stored = hashes(db, pc, [A.id, B.id]);
+    for (const r of await audit(db, pc)) expect(r.mismatches, r.mode).toBe(0);
 
     await cycle2(db, pc);
 
-    if (process.env.DBG) console.log("STATES", JSON.stringify(db.T("paper_executions").filter((x) => [A.id, B.id].includes(x.signal_id)).map((x) => `${x.signal_id.slice(-1)} ${x.mode} ${x.status}/${x.state} ${x.exit_status ?? ""} ${x.computed_at}`)), "terminal", ledgerOf(db, A.id).sim_terminal, ledgerOf(db, B.id).sim_terminal);
     // 1. the exit is linked and the sweep rewrote the rows that carry it …
-    expect(execOf(db, A.id, "IDEAL")).toMatchObject({ state: "EXITED" }); expect(execOf(db, A.id, "REALISTIC")).toMatchObject({ state: "PARTIALLY_EXITED" });   // REALISTIC keeps the signal in the sweep
+    expect(execOf(db, A.id, "IDEAL")).toMatchObject({ state: "EXITED" }); expect(execOf(db, A.id, "REALISTIC")).toMatchObject({ state: "PARTIALLY_EXITED" });
     expect(execOf(db, B.id, "CONSERVATIVE")).toMatchObject({ state: "PARTIALLY_EXITED" });
-    // 2. … but not A's CONSERVATIVE row: a NOT_ENTERED record has no exit fields, so nothing changed (same hash, same computed_at)
+    // 2. … but not A's CONSERVATIVE row (a NOT_ENTERED record has no exit fields), exactly as in production
     const rowAfter = execOf(db, A.id, "CONSERVATIVE")!;
     expect({ record_hash: rowAfter.record_hash, computed_at: rowAfter.computed_at }).toEqual({ record_hash: rowBefore.record_hash, computed_at: rowBefore.computed_at });
-    expect(ledgerOf(db, A.id).sim_terminal).toBe(false);                       // the sweep still visits it (other modes are open), so it is not D13
-    // 3. so the decision kept its old hash while every sibling was refreshed
-    expect(decisionOf(db, cons.id, A.id)!.input_hash.split("|").slice(1)).toEqual(["-@-", "-@-"]);
-    for (const [m, id] of [["IDEAL", A.id], ["REALISTIC", A.id], ["IDEAL", B.id], ["REALISTIC", B.id], ["CONSERVATIVE", B.id]] as [ModeName, string][])
-      expect(decisionOf(db, defOf(pc, m).id, id)!.input_hash.split("|")[1], `${m} ${id}`).toMatch(/^[0-9a-f]{16}@\d+$/);
-
-    // 4. the audit: exactly one unexplained difference in the whole run, the exit part, no lot, with every field the log line needs
+    expect(ledgerOf(db, A.id).sim_terminal).toBe(false);
+    // 3. no decision that never opened a lot has its stored hash rewritten, in any mode (D24: stored values stay as they are), whether or not its row moved
+    expect(hashes(db, pc, [A.id, B.id])).toEqual(stored);
+    // 4. the audit: every decision matches by the runner's rule; nothing is unexplained
     const res = await audit(db, pc);
-    expect(res.map((r) => [r.mode, r.classes.unexplained.count])).toEqual([["IDEAL", 0], ["REALISTIC", 0], ["CONSERVATIVE", 1]]);
-    const ex = byMode(res, "CONSERVATIVE").classes.unexplained.examples[0];
-    expect(ex).toMatchObject({ signalId: A.id, kind: "NEW_POSITION", parts: ["exit"], lot: "none", lotState: null, simTerminal: false, effect: "none", computedAt: iso(sec(rowBefore.computed_at)).replace(".000Z", "Z"), rewindTo: xFill("CONSERVATIVE") });
-    expect(ex.why).toMatch(/\$100 record is unchanged.*never opened/);
-    expect(byMode(res, "CONSERVATIVE").classes.unexplained.inert).toBe(1);
-    expect(byMode(res, "CONSERVATIVE").lastRunStartedAt).toBe(sec(db.T("portfolio_runs").find((r) => r.portfolio_id === cons.id)!.last_run_started_at));
-
-    // 5. nothing ever re-examines it: more cycles change nothing
+    for (const r of res) { expect(r.mismatches, r.mode).toBe(0); expect(r.classes.unexplained.count, r.mode).toBe(0); expect(r.matches, r.mode).toBe(r.checked); }
+    // 5. more cycles change nothing
     for (let i = 0; i < 3; i++) { setClock(clock + 900); await sweepSimulation(db as never); setClock(clock + 40); await run(db, pc); }
-    const later = byMode(await audit(db, pc), "CONSERVATIVE");
-    expect(later.classes.unexplained.count).toBe(1); expect(later.classes.unexplained.examples[0].signalId).toBe(A.id);
-    expect(decisionOf(db, cons.id, A.id)!.input_hash.split("|")[1]).toBe("-@-");
+    for (const r of await audit(db, pc)) expect(r.mismatches, r.mode).toBe(0);
+    expect(hashes(db, pc, [A.id, B.id])).toEqual(stored);
     expect(execOf(db, A.id, "CONSERVATIVE")!.computed_at).toBe(rowBefore.computed_at);
   });
 
   it("changes no number: decisions, lots and the equity curve equal a from-scratch replay of the same final inputs (input_hash aside)", async () => {
     const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc); await cycle2(db, pc);
-    expect(byMode(await audit(db, pc), "CONSERVATIVE").classes.unexplained.count).toBe(1);   // the stale hash is really there
     await sameNumbers(db, pc);
-    // and the fresh replay is what has the current hash: the only stored difference is that one input_hash
+    // the fresh replay stores the whole current hash; the only stored differences are input_hash of decisions that never opened a lot, whose entry part is equal
     const fresh = await freshReplay(db, pc);
-    const diff = db.T("portfolio_decisions").filter((d) => decisionOf(fresh, d.portfolio_id, d.signal_id)?.input_hash !== d.input_hash).map((d) => `${d.portfolio_id}:${d.signal_id}`);
-    expect(diff).toEqual([`${defOf(pc, "CONSERVATIVE").id}:${A.id}`]);
+    const diff = db.T("portfolio_decisions").filter((d) => decisionOf(fresh, d.portfolio_id, d.signal_id)?.input_hash !== d.input_hash);
+    expect(diff.length).toBeGreaterThan(0);
+    for (const d of diff) { expect(Number(d.filled_shares), `${d.portfolio_id}:${d.signal_id}`).toBe(0); expect(d.input_hash.split("|")[0]).toBe(decisionOf(fresh, d.portfolio_id, d.signal_id)!.input_hash.split("|")[0]); }
+    expect(diff.some((d) => d.portfolio_id === defOf(pc, "CONSERVATIVE").id && d.signal_id === A.id)).toBe(true);           // the production decision is one of them
   });
 
-  it("the same class exists in IDEAL: a resolution that arrives after the exit closed the position leaves the $100 record unchanged", async () => {
+  it("the same class in IDEAL (a resolution that arrives after the exit closed the position leaves the $100 record unchanged) is no difference either", async () => {
     const db = mkDb(); const pc = ONE_SLOT;
     const A2: Sig = { id: E(12), kind: "NEW_POSITION", wallet: "wV", cond: "cV", token: "tV", src: S + 1000, ev: S + 1010 };
     addMarkets(db, ["cF", "cV"]); addEntry(db, F); addEntry(db, A2);
@@ -189,35 +110,46 @@ describe("stale input_hash on a decision that never opened a lot (production, 29
     await sweepSimulation(db as never); setClock(clock + 40); await run(db, pc); setClock(clock + 900);
     expect(execOf(db, A2.id, "IDEAL")!.computed_at).toBe(row.computed_at);                                            // the record ignores a resolution after the exit
     const r = byMode(await audit(db, pc), "IDEAL");
-    expect(r.classes.unexplained.examples).toMatchObject([{ signalId: A2.id, parts: ["resolution"], lot: "none", effect: "none", simTerminal: false }]);
+    expect(r.mismatches).toBe(0); expect(r.classes.unexplained.examples).toEqual([]);
     await sameNumbers(db, pc);
   });
 
-  // The regression the fix (D24, or any other) must turn green: no decision that never opened a lot may keep a stale hash.
-  it.fails("DESIRED, not true yet: a decision that never opened a lot always carries the current fingerprint (remove .fails when D24 or another fix lands)", async () => {
+  // The regression the fix had to turn green (was `it.fails` until D24): no decision that never opened a lot is reported for its exit / resolution.
+  it("DESIRED, true since D24: a decision that never opened a lot never makes the audit report an unexplained difference", async () => {
     const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc); await cycle2(db, pc);
     expect(byMode(await audit(db, pc), "CONSERVATIVE").classes.unexplained.count).toBe(0);
   });
 
-  it("--explain names the difference: stored versus current, the row the runner would have to read, and why it never will", async () => {
+  it("a decision that never opened a lot whose ENTRY part changes is still a difference: unexplained, exit 1 (the entry is what the D24 rule keeps comparing)", async () => {
+    const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc); await cycle2(db, pc);
+    db.T("signals").find((x) => x.id === A.id)!.source_fill_id = "0xbackfilled";                                        // an entry input the $100 record does not contain
+    const r = byMode(await audit(db, pc), "CONSERVATIVE");
+    expect(r.classes.unexplained.examples).toMatchObject([{ signalId: A.id, parts: ["entry"], lot: "none", effect: "possible" }]);
+  });
+
+  it("--explain: the exit that differs is shown as NOT COMPARED, and the verdict is 'match'", async () => {
     const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc); await cycle2(db, pc);
     const rs = await explainSignal(db as never, cfgOf(pc), A.id, { now: () => clock });
     const cons = rs.find((r) => r.mode === "CONSERVATIVE")!;
-    expect(cons).toMatchObject({ cls: "unexplained", effect: "none", simTerminal: false, lotState: null, nextRunReadsRow: false, signalFound: true });
-    expect(cons.parts).toEqual([{ part: "exit", stored: "-@-", current: expect.stringMatching(/^[0-9a-f]{16}@\d+$/) }]);
+    expect(cons).toMatchObject({ cls: "match", effect: null, simTerminal: false, lotState: null, nextRunReadsRow: false, signalFound: true, parts: [] });
+    expect(cons.notCompared).toEqual([{ part: "exit", stored: "-@-", current: expect.stringMatching(/^[0-9a-f]{16}@\d+$/) }]);
+    expect(cons.why).toMatch(/never opened a lot.*entry part is unchanged.*D24/);
     expect(cons.current).toMatchObject({ exitId: XID, exitFillTs: xFill("CONSERVATIVE"), resolutionTs: null });
     expect(rs.filter((r) => r.mode !== "CONSERVATIVE").map((r) => r.cls)).toEqual(["match", "match"]);
+    expect(formatExplain(A.id, rs)).toMatch(/not compared \(the decision never opened a lot, D24\) exit: stored=-@- current=[0-9a-f]{16}@\d+/);
   });
 });
 
 // ───────────────────────────── the other ways a hash could go stale: ruled out ─────────────────────────────
-describe("what does not leave a stale hash (hypotheses 1 and 2 of the brief, ruled out)", () => {
+// With room for every entry, A opens a lot in every mode, so its whole hash is compared (D24 leaves those alone): a late exit on it must
+// still be detected, re-read and its hash refreshed by every path below.
+describe("what does not leave a stale hash on a decision that opened a lot (hypotheses 1 and 2 of the brief, ruled out; unchanged by D24)", () => {
   /** A world whose IDEAL row for A is rewritten by the exit (so change detection must fix A's hash), plus a new late entry G so a run streams a batch. */
   const G: Sig = { id: E(9), kind: "NEW_POSITION", wallet: "wG", cond: "cG", token: "tG", src: S + 6000, ev: S + 6010 };
   const staleIdeal = (db: Db, pc: PortfolioConfig) => { const d = defOf(pc, "IDEAL"); const dec = decisionOf(db, d.id, A.id); return { dec, exitPart: dec?.input_hash.split("|")[1] }; };
 
   it("a row the sweep rewrites while a run is in progress is read by the next run (change detection starts at the last run's START)", async () => {
-    const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc);
+    const db = mkDb(); const pc = ROOMY; await cycle1(db, pc);
     // precompute the sweep's rewrite of A's IDEAL row in a clone, then land it mid-run (on the runner's first stream read)
     const clone = mkDb(); for (const t of Object.keys(db.tables)) for (const r of db.T(t)) clone.insertRow(t, JSON.parse(JSON.stringify(r)));
     addExit(clone, XID, W, C, T, XS, XE, 5); putObs(clone, T, xFill("REALISTIC")); putObs(clone, T, xFill("CONSERVATIVE"));
@@ -242,7 +174,7 @@ describe("what does not leave a stale hash (hypotheses 1 and 2 of the brief, rul
   });
 
   it("a run that dies after streaming a batch but before it refreshes hashes leaves nothing stale: the next run re-reads the same rows", async () => {
-    const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc); addEntry(db, G); addMarkets(db, ["cG"]);
+    const db = mkDb(); const pc = ROOMY; await cycle1(db, pc); addEntry(db, G); addMarkets(db, ["cG"]);
     addExit(db, XID, W, C, T, XS, XE, 5); putObs(db, T, xFill("REALISTIC")); putObs(db, T, xFill("CONSERVATIVE"));
     setClock(S + 7200); await sweepSimulation(db as never); fetchPrices(db); await sweepSimulation(db as never);
     setClock(clock + 40);
@@ -255,7 +187,7 @@ describe("what does not leave a stale hash (hypotheses 1 and 2 of the brief, rul
   });
 
   it("a change before the restored checkpoint (a rewind that does not replay the decision) still refreshes its hash", async () => {
-    const db = mkDb(); const pc = ONE_SLOT; await cycle1(db, pc);
+    const db = mkDb(); const pc = ROOMY; await cycle1(db, pc);
     addEntry(db, G); addMarkets(db, ["cG"]); setClock(S + 7000); await sweepSimulation(db as never); fetchPrices(db); await sweepSimulation(db as never); await run(db, pc); setClock(clock + 900); // a checkpoint after A
     const ckAfterA = db.T("portfolio_checkpoints").filter((c) => c.portfolio_id === defOf(pc, "IDEAL").id && sec(c.event_ts) > A.ev).length; expect(ckAfterA).toBeGreaterThan(0);
     await cycle2(db, pc);
@@ -265,65 +197,43 @@ describe("what does not leave a stale hash (hypotheses 1 and 2 of the brief, rul
   });
 });
 
+
 // ───────────────────────────── the audit's own answer, over many random worlds ─────────────────────────────
 /**
- * Random live worlds through the real sweep and runner, in production order and cadence (price backlog → sweep → the
- * three portfolio runs, every 15 minutes; signals, late-evaluated exits and late resolutions arriving over time), audited
- * after every cycle. Two properties:
- *  - LOST never happens: no decision keeps a stale hash although its execution row was rewritten in the window the run
- *    that just finished had to read (computed_at after the previous run's start).
- *  - it changes no number: at the end the incrementally-run database equals a fresh replay of its final inputs.
- * Every unexplained difference that does appear is the invisible kind: row not rewritten since, $100 record unchanged.
+ * The runner's answer for every stored decision, by the rule it uses (requests.ts decisionRewindPoint, fed with the requests it
+ * builds: loadBatchInputs → buildSignals → buildRequests with source_fill_id): how many decisions it would treat as changed.
  */
-async function world(seed: number, pc: PortfolioConfig, n = 30) {
-  let s = seed; const rnd = () => ((s = (s * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
-  const db = mkDb(); const evs: { at: number; f: () => void }[] = []; let t = START + 60;
-  for (let i = 0; i < n; i++) {
-    t += 30 + Math.floor(rnd() * 90); const src = t; const ev = src + (rnd() < 0.2 ? 60 + Math.floor(rnd() * 500) : 3 + Math.floor(rnd() * 40));
-    const wallet = `w${Math.floor(rnd() * 3)}`, cond = `c${Math.floor(rnd() * 5)}`, tok = `t${Math.floor(rnd() * 12)}`;
-    const sig = { id: E(i), kind: ["NEW_POSITION", "NEW_POSITION", "CONVICTION_ADD", "EARLY_ENTRY", "CONSENSUS"][Math.floor(rnd() * 5)], wallet, condition_id: cond, token_id: tok, price: 0.1 + rnd() * 0.8, usd: 50 + rnd() * 3000, created_at: iso(src), evaluated_at: iso(ev), source_fill_id: `0xfill${i}` };
-    evs.push({ at: ev, f: () => { db.insertRow("signals", sig); db.insertRow("paper_ledger", { signal_id: sig.id, created_at: iso(ev), sim_terminal: false, side: "LONG" }); } });
-    if (rnd() < 0.5) { const xs = src + 30 + Math.floor(rnd() * 20_000), xe = xs + (rnd() < 0.5 ? 4 : 60 + Math.floor(rnd() * 500)); const usd = rnd() < 0.3 ? 10 + rnd() * 30 : 500 + rnd() * 2000; const price = 0.05 + rnd() * 0.9;
-      evs.push({ at: xe, f: () => { db.insertRow("signals", { id: X(i), kind: "EXIT", wallet, condition_id: cond, token_id: tok, price, usd, created_at: iso(xs), evaluated_at: iso(xe), source_fill_id: `0xexit${i}` }); db.insertRow("paper_ledger", { signal_id: X(i), created_at: iso(xe), sim_terminal: true, side: "EXIT_EVENT" }); } }); }
-    if (rnd() < 0.4) { const rt = src + 600 + Math.floor(rnd() * 20_000); const at = rt + Math.floor(rnd() * 8000); const value = [0, 1, 1, 0.5][Math.floor(unit(tok) * 4)]; evs.push({ at, f: () => { if (!db.T("token_resolutions").some((r) => r.token_id === tok)) db.insertRow("token_resolutions", { token_id: tok, value, resolved_ts: iso(rt) }); } }); }
-  }
-  addMarkets(db, ["c1", "c2", "c4"]); evs.sort((a, b) => a.at - b.at);
-  const end = evs[evs.length - 1].at + 4 * 900; let cur = 0; let unexplained = 0, lost = 0, invisible = 0, cycles = 0; const notInert: string[] = [];
-  const prevStart = (m: ModeName) => { const id = defOf(pc, m).id; const r = db.T("portfolio_runs").find((x) => x.portfolio_id === id); return r?.last_run_started_at ? sec(r.last_run_started_at) : null; };
-  for (let ct = START + 900; ct <= end; ct += 900, cycles++) {
-    setClock(ct - 1); while (cur < evs.length && evs[cur].at <= ct - 5) evs[cur++].f(); setClock(ct);
-    for (const r of db.T("price_observations")) { if (r.state !== "PENDING" || unit(`lag${r.token_id}@${r.as_of}@${cycles}`) < 0.3) continue; const v = unit(`${r.token_id}@${r.as_of}`); Object.assign(r, v < 0.05 ? { state: "UNAVAILABLE" } : { state: "COMPLETE", obs_ts: r.as_of - Math.floor(v * 200), price: 0.05 + ((v * 7919) % 1) * 0.9, resolution_seconds: 0 }); }
-    await sweepSimulation(db as never); setClock(ct + 40 + Math.floor(rnd() * 30));
-    const before = Object.fromEntries(ALL.map((m) => [m, prevStart(m)])) as Record<ModeName, number | null>;
-    await run(db, pc); setClock(ct + 300);
-    for (const r of await audit(db, pc)) for (const e of r.classes.unexplained.examples) {
-      if (e.parts.includes("entry")) continue;                                               // a moved entry is D18, not this
-      unexplained++; if (e.effect !== "none") notInert.push(`${r.mode} ${e.signalId} ${e.lot}`);
-      const pv = before[r.mode]; if (pv != null && e.computedAt && sec(e.computedAt) > pv) lost++; else invisible++;
-    }
-  }
-  // D24 (analysis): what the audit sees at the end, and how much of it never opened a lot and differs only in exit / resolution
-  const fin = await audit(db, pc); const tot = { mismatches: 0, removable: 0, byClass: { d13: 0, nextRun: 0, unexplained: 0 }, removableByClass: { d13: 0, nextRun: 0, unexplained: 0 }, checked: 0 };
-  for (const r of fin) { tot.checked += r.checked; tot.mismatches += r.mismatches; for (const k of ["d13", "nextRun", "unexplained"] as const) { tot.byClass[k] += r.classes[k].count; tot.removableByClass[k] += r.classes[k].inert; tot.removable += r.classes[k].inert; } }
-  return { db, unexplained, lost, invisible, notInert, cycles, tot };
+async function runnerChanged(db: Db, pc: PortfolioConfig, mode: ModeName) {
+  const d = defOf(pc, mode); const decs = db.T("portfolio_decisions").filter((x) => x.portfolio_id === d.id); const ids = decs.map((x) => x.signal_id);
+  const inp = await loadBatchInputs(db as never, ids); const fills = new Map(db.T("signals").map((x) => [x.id, x.source_fill_id ?? null]));
+  const reqs = new Map(buildRequests(buildSignals(inp), inp, MODES[mode], { startTs: d.startTs, sourceFillIds: fills }).map((r) => [r.signal.signalId, r]));
+  let changed = 0, checked = 0; const changedIds: string[] = [];
+  for (const x of decs) { const r = reqs.get(x.signal_id); if (!inp.signals.some((sg) => String(sg.id) === x.signal_id)) continue; checked++; if (!r || decisionRewindPoint(x.outcome, x.input_hash, r) != null) { changed++; changedIds.push(x.signal_id); } }
+  return { changed, checked, changedIds };
 }
 
-describe("over random live worlds (production order and cadence)", () => {
-  it("no hash is ever lost; every unexplained difference is the invisible kind; and a fresh replay of the final inputs always equals the incremental run", async () => {
-    let unexplained = 0, invisible = 0, lost = 0, worlds = 0, withStale = 0; const notInert: string[] = []; const tot = { checked: 0, mismatches: 0, removable: 0 };
-    for (const [name, pc] of [["tight", TIGHT], ["roomy", ROOMY]] as [string, PortfolioConfig][]) {
+describe("over random live worlds (production order and cadence), D24 on", () => {
+  it("no exit / resolution difference on a decision that never opened a lot is ever reported; nothing is ever lost; the runner and the audit agree on every decision after every cycle; and a fresh replay of the final inputs always equals the incremental run", async () => {
+    let unexplained = 0, lost = 0, worlds = 0, agreed = 0, cycles = 0, residual = 0; const measure = { runs: 0, rewinds: 0, rewindSec: 0, rowsRead: 0, writes: 0, checked: 0, mismatches: 0 };
+    for (const [, pc] of [["tight", TIGHT], ["roomy", ROOMY]] as [string, PortfolioConfig][]) {
       for (let seed = 1; seed <= 8; seed++) {
-        const w = await world(seed, pc); worlds++; if (w.unexplained) withStale++;
-        tot.checked += w.tot.checked; tot.mismatches += w.tot.mismatches; tot.removable += w.tot.removable;
-        unexplained += w.unexplained; invisible += w.invisible; lost += w.lost; notInert.push(...w.notInert.map((x) => `${name}#${seed} ${x}`));
+        // (the audit's answer versus the runner's, for every mode, after every cycle)
+        const w = await world(seed, pc, 30, { onCycle: async (db) => { cycles++;
+          for (const r of await audit(db, pc)) { const rc = await runnerChanged(db, pc, r.mode); expect(rc.changed, `${r.mode} runner vs audit (world ${seed})`).toBe(r.mismatches); expect(rc.checked).toBe(r.checked - r.missing.signal - r.missing.execution); agreed += rc.checked;
+            // What is still reported as unexplained is NOT the D24 class: only a decision that opened a lot, whose lot a resolution closed before an exit that arrived
+            // later (the $100 record does not contain that exit, so its row never moves). D24 keeps the whole hash for a decision that has a lot.
+            for (const e of r.classes.unexplained.examples) { if (e.parts.includes("entry")) continue; residual++;
+              const lot = db.T("portfolio_lots").find((l) => l.portfolio_id === defOf(pc, r.mode).id && l.signal_id === e.signalId)!;
+              expect(e, `${r.mode} ${e.signalId}`).toMatchObject({ lot: "closed", effect: "possible", parts: ["exit"] }); expect(lot.state).toBe("RESOLVED");
+              expect(Number(e.current!.split("|")[1].split("@")[1]), "the exit fills after the resolution").toBeGreaterThanOrEqual(sec(lot.resolution_ts)); } } } });
+        worlds++; unexplained += w.unexplained; lost += w.lost;
+        for (const k of ["runs", "rewinds", "rewindSec", "rowsRead", "writes"] as const) measure[k] += w.runStats[k]; measure.checked += w.tot.checked; measure.mismatches += w.tot.mismatches;
         await sameNumbers(w.db, pc);
       }
     }
     expect(worlds).toBe(16); expect(lost).toBe(0);
-    expect(unexplained).toBeGreaterThan(0); expect(withStale).toBeGreaterThanOrEqual(8);       // the class is common, not a curiosity
-    expect(invisible).toBe(unexplained);
-    // where a stale hash sits on a decision that did open a lot, the numbers are still the fresh replay's (asserted above)
-    expect(notInert.length).toBeLessThanOrEqual(unexplained);
-    if (process.env.DBG) console.log("D24-MEASURE", JSON.stringify({ worlds, unexplainedEvents: unexplained, ...tot }));
-  }, 300_000);
+    expect(residual).toBe(unexplained);                            // every unexplained exit / resolution difference in every cycle is that residual class (before D24: in at least 8 of the 16 worlds, mostly on decisions that never opened a lot)
+    expect(agreed).toBeGreaterThan(10_000);                        // not vacuous
+    if (process.env.DBG) console.log("D24-MEASURE", JSON.stringify({ worlds, cycles, unexplainedEvents: unexplained, residual, lost, agreed, ...measure }));
+  }, 600_000);
 });

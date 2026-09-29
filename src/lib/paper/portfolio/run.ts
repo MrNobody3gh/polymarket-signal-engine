@@ -26,7 +26,7 @@ import { selectIn } from "../../chunk";
 import { memSample, type MemSample } from "../../health/memory";
 import { KIND_ORDER, PortfolioBook, cmpKey } from "./book";
 import { IDEAL_LABEL, portfolioDefinitions, portfolioRunConfigFromEnv, type PortfolioDefinition, type PortfolioRunConfig } from "./config";
-import { buildRequests, frontierOf, orderRequests, rewindPoint, stableHash, type PortfolioRequest } from "./requests";
+import { buildRequests, changeDetectionReadsFrom, decisionInputsChanged, decisionRewindPoint, frontierOf, orderRequests, stableHash, type PortfolioRequest } from "./requests";
 import type { BookDecision, BookLot, BookOutput, BookState, EquityPoint, EventKey } from "./types";
 
 export const LEASE_SEC = 900;
@@ -112,8 +112,9 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
     // recorded one (or to the start if none was ever recorded) and delete everything after the restored checkpoint.
     const crashed = prevStarted != null && (prevFinished == null || prevFinished < prevStarted);
     if (crashed) { T = W0 != null ? W0 + 1 : def.startTs; reasons.push("previous run did not finish"); }
-    // Changes are read from the start of the last run that finished: a run that died may not have acted on them.
-    const since = crashed ? prevStats.runStartedAt ?? null : prevStarted;
+    // Changes are read from the start of the last run that finished: a run that died may not have acted on them. Less the
+    // D26 margin: computed_at is stamped before the write commits (requests.ts CHANGE_DETECTION_MARGIN_SEC).
+    const since = changeDetectionReadsFrom(crashed ? prevStats.runStartedAt ?? null : prevStarted);
     const hashFixes = new Map<string, string>(); // decided signals whose inputs changed without needing a rewind
     if (W0 != null && since != null) {
       const cd = await detectChanges(db, def, exec, cfg, iso(since), W0, B);
@@ -131,10 +132,10 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
       const lots = book.openLots(); let rewindTo = Infinity; lotFrontier = null;
       if (lots.length) {
         const ids = lots.map((l) => l.signalId); const reqs = await requestsFor(db, exec, cfg, ids); await enqueueMissing(db, dry, [...reqs.values()], st);
-        const stored = new Map((await selectIn<{ signal_id: string; input_hash: string }>(ids, (c) => db.from("portfolio_decisions").select("signal_id,input_hash").eq("portfolio_id", def.id).in("signal_id", c as string[]))).map((d) => [d.signal_id, d.input_hash]));
+        const stored = new Map((await selectIn<{ signal_id: string; outcome: string; input_hash: string }>(ids, (c) => db.from("portfolio_decisions").select("signal_id,outcome,input_hash").eq("portfolio_id", def.id).in("signal_id", c as string[]))).map((d) => [d.signal_id, d]));
         for (const l of lots) {
           const r = reqs.get(l.signalId); if (!r) continue;
-          const rp = stored.has(l.signalId) ? rewindPoint(stored.get(l.signalId)!, r) : null;
+          const sd = stored.get(l.signalId); const rp = sd ? decisionRewindPoint(sd.outcome, sd.input_hash, r) : null;
           if (rp != null && rp <= S) { rewindTo = Math.min(rewindTo, rp); continue; }             // e.g. its entry inputs changed
           const xw = exitWait(r);
           if (xw != null && xw <= S) { rewindTo = Math.min(rewindTo, xw); continue; } // the book already passed an exit it could not price
@@ -202,7 +203,11 @@ async function runOne(db: SupabaseClient, def: PortfolioDefinition, cfg: Portfol
     await flush();
     await w.fixInputHashes(hashFixes, fps);                                   // outputs first, then the checkpoint
     const changedSinceRestore = W !== S || !restored || canonical(book.snapshot()) !== canonical(restored.state);
-    if (W >= def.startTs && changedSinceRestore) await w.checkpoint(W, book.snapshot());
+    // A checkpoint at W holds the state after every event at or before W and after none later (restoring it and streaming
+    // fill_ts > W must be exact). When the frontier is an exit that fills before entries the book already took, the book is
+    // past W: that state is not W's, and restoring it would refuse the entries it already holds ("out of order").
+    const pastW = (book.snapshot().last?.ts ?? -Infinity) > W;
+    if (W >= def.startTs && changedSinceRestore && !pastW) await w.checkpoint(W, book.snapshot());
     opts.fault?.("afterCheckpoints", def.mode);
     await pruneCheckpoints(w, db, def.id, now, W);
     equityCursor = await downsampleEquity(w, db, def.id, equityCursor, now);
@@ -293,11 +298,11 @@ async function detectChanges(db: SupabaseClient, def: PortfolioDefinition, exec:
     if (error) throw new Error(`change detection: ${error.message}`);
     const ids = ((data ?? []) as { signal_id: string }[]).map((r) => r.signal_id); if (!ids.length) break; last = ids[ids.length - 1];
     const reqs = await requestsFor(db, exec, cfg, ids);
-    const decided = new Map((await selectIn<{ signal_id: string; input_hash: string }>(ids, (c) => db.from("portfolio_decisions").select("signal_id,input_hash").eq("portfolio_id", def.id).in("signal_id", c as string[]))).map((d) => [d.signal_id, d.input_hash]));
+    const decided = new Map((await selectIn<{ signal_id: string; outcome: string; input_hash: string }>(ids, (c) => db.from("portfolio_decisions").select("signal_id,outcome,input_hash").eq("portfolio_id", def.id).in("signal_id", c as string[]))).map((d) => [d.signal_id, d]));
     for (const r of reqs.values()) {
-      const old = decided.get(r.signal.signalId) ?? null;
+      const dec = decided.get(r.signal.signalId) ?? null; const old = dec?.input_hash ?? null;
       if (old == null && r.key.ts > W) continue;                    // not decided yet: the stream will reach it
-      const rp = rewindPoint(old, r);
+      const rp = decisionRewindPoint(dec?.outcome, old, r);         // D24: entry part only for a decision that never opened a lot
       if (rp == null) continue;                                     // mark-only (or no) change
       if (rp <= W) { if (rp < rewindTs) rewindTs = rp; reasons.push(`${old == null ? "late signal" : "inputs changed"} ${r.signal.signalId.slice(0, 8)} at ${iso(rp)}`); }
       // Keep input_hash current either way: a decision before the restored checkpoint is not replayed by the rewind, and
@@ -351,17 +356,26 @@ function writer(db: SupabaseClient, pid: string, dry: boolean, st: PortfolioRunS
       }
     },
     async checkpoint(ts: number, state: BookState) { await put("portfolio_checkpoints", [{ portfolio_id: pid, event_ts: iso(ts), event_key: CK_KEY, state }], "portfolio_id,event_ts,event_key"); },
-    /** Keep input_hash current for decided signals whose inputs changed without needing a replay. */
+    /** Keep input_hash current for decided signals whose inputs changed without needing a replay. D24: a decision that never
+     *  opened a lot is refreshed only when its entry part changed; its stored hash is not rewritten for an exit / resolution. */
     async fixInputHashes(fixes: Map<string, string>, replayed: Map<string, string>) {
       const ids = [...fixes.keys()].filter((id) => !replayed.has(id)); if (!ids.length) return;
       const rows = await selectIn<Record<string, any>>(ids, (c) => db.from("portfolio_decisions").select("*").eq("portfolio_id", pid).in("signal_id", c as string[]));
-      const changed = rows.filter((r) => r.input_hash !== fixes.get(r.signal_id)).map((r) => { const { record_hash: _h, computed_at: _c, ...rest } = r; void _h; void _c;
-        const d = { ...rest, input_hash: fixes.get(r.signal_id)! }; return { ...d, record_hash: stableHash(d) }; });
-      await put("portfolio_decisions", changed, "portfolio_id,signal_id");
+      await put("portfolio_decisions", inputHashRefreshes(rows, fixes), "portfolio_id,signal_id");
     },
   };
 }
 type Writer = ReturnType<typeof writer>;
+
+/**
+ * The decision rows whose input_hash fixInputHashes writes: those whose inputs changed by the runner's rule (D24). A decision that
+ * never opened a lot is refreshed only when its entry part differs (then with the whole current fingerprint, as a replay would
+ * store it); one that exit / resolution alone differ for keeps the hash it was stored with, and nothing is written for it.
+ */
+export function inputHashRefreshes(rows: Record<string, any>[], fixes: Map<string, string>): Record<string, any>[] {
+  return rows.filter((r) => decisionInputsChanged(r.outcome, r.input_hash, fixes.get(r.signal_id)!)).map((r) => { const { record_hash: _h, computed_at: _c, ...rest } = r; void _h; void _c;
+    const d = { ...rest, input_hash: fixes.get(r.signal_id)! }; return { ...d, record_hash: stableHash(d) }; });
+}
 
 /** Delete this portfolio's rows matching `where` (unless dry) and return how many there were. The count is a head count:
  *  exact however many rows match (a plain read is capped at 1,000 rows by Supabase, so it would undercount). */

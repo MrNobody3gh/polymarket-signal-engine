@@ -424,14 +424,15 @@ re-auditing only the modes that were inconclusive. Exit 3 only if every attempt 
 
 What it does (`auditDecisionInputs`, `src/lib/paper/portfolio/audit.ts`): for each mode it reads the stored decisions
 500 at a time, rebuilds each signal's request *now* with the runner's own functions, and compares the current
-fingerprint with the stored `input_hash`. Each difference is classed, first match wins:
+fingerprint with the stored `input_hash` by the runner's own rule (D24): a decision that never opened a lot is compared on
+its entry part only, every other decision whole. Each difference is classed, first match wins:
 
 | Class | Meaning | Exit |
 |---|---|---|
 | unexplained (moved entry) | the entry's fill time moved (unless it is the D13 case below); the runner does not replay that correctly (§11, D18) | 1 |
-| next run | the next run re-examines it anyway: its row was rewritten since the last run, its lot is open, it sits after a crashed run's watermark, or the sweep will rewrite its row next cycle | 0 |
-| (a) D13 | its Phase 2 record is final (`sim_terminal`) or it has no ledger row, and its lot is closed or was never opened: never re-examined, accepted by D13 | 0 |
-| unexplained | nothing will ever re-examine it. Each one carries `effect=none` (no lot was ever opened and only the exit and/or resolution differ: it cannot change any decision, lot or equity number, §11 D24) or `effect=possible` (anything else) | 1 |
+| next run | the next run re-examines it anyway: its row was rewritten since the last run started (less a 120 s safety margin, D26), its lot is open, it sits after a crashed run's watermark, or the sweep will rewrite its row next cycle | 0 |
+| (a) D13 | its Phase 2 record is final (`sim_terminal`) or it has no ledger row, and its lot is **closed**: never re-examined, accepted by D13 (closed lots only since D24: a never-opened decision's exit / resolution is no difference at all) | 0 |
+| unexplained | nothing will ever re-examine it. Each one carries `effect=possible`; `effect=none` (no lot ever opened, only exit/resolution differ) can no longer occur since D24, so seeing it means the rule regressed (§11) | 1 |
 
 **Reading the output (built for Railway's 500 lines/second limit).** Every summary line starts with the mode and the
 whole portfolio id, `[CONSERVATIVE bf203d3695be49b9a4f2195ce1f46ab7] …`, so interleaved logs can be read. Per mode you get
@@ -477,9 +478,9 @@ labelled "non-causal baseline — not a strategy that could have been run", "As 
 signal, "This cycle: completed" in Health, no staleness note, "insufficient data" wherever fewer than 10 lots have
 settled (normal for the first days). After 24 hours of real runs, run the audit again (`railway run npm run
 portfolio:audit`, between two cycles); expect exit 0 and note the D13 count and earliest time. Repeat after a week.
-Exit 1: read the `UNEXPLAINED` lines. With `effect=none` on every one (a decision that never opened a lot), nothing in the
-results is affected (§11, D24/D25); the owner decides whether to continue. Anything with `effect=possible`, or any `MISSING`
-line: switch the feature off (§9) and report the output (`--json --out`). Also note `rewinds in last 20 runs` for D16.
+Exit 1: read the `UNEXPLAINED` lines. Since D24 a late exit or resolution on a decision that never opened a lot is no
+difference, so `effect=none` should not appear (if it does, report it: the rule regressed). Any `UNEXPLAINED` or `MISSING`
+line: switch the feature off (§9) and report the output (`--json --out`); §11 D28 describes the one class known to remain. Also note `rewinds in last 20 runs` for D16.
 
 ## 9. Switch-off and rollback
 
@@ -523,8 +524,9 @@ line: switch the feature off (§9) and report the output (`--json --out`). Also 
 | page: "Portfolio simulation is off: PAPER_PORTFOLIO_CONFIG is not set on the worker." while in dry run | A dry run saves no snapshot. | Expected in dry run. |
 | an error containing `out of order` or `rehydration did not converge` | A bug in the runner. | Switch off (§9) and report the log. |
 | "insufficient data" | Fewer than 10 settled lots. | Not an error. |
-| audit exit 1 / 2 / 3 | Unexplained differences or missing rows / config unset, invalid or an unknown argument / a run was in progress on all 3 attempts. | 1: find the `UNEXPLAINED` / `MISSING` lines (one line each; every field is on the line), then `npm run portfolio:audit -- --explain <signalId>`; `effect=none` is the D24 case below, anything else: stop and report `--json --out`. 2: run with the worker's variables (`--help` for the arguments). 3: the audit already retried 3 times; run it again between cycles. |
-| audit line `UNEXPLAINED … differs=exit` (or `resolution`), `lot=none`, `sim_terminal=false`, `effect=none` | A decision that never opened a lot kept its old `input_hash` because the input that changed (an exit, a resolution) is not in its $100 execution row, so the row never moved and nothing re-reads it (§11, D24). It changes no decision, lot or equity number. | Nothing to fix today; report the count. See D24/D25 in the plan for the owner's decisions. |
+| audit exit 1 / 2 / 3 | Unexplained differences or missing rows / config unset, invalid or an unknown argument / a run was in progress on all 3 attempts. | 1: find the `UNEXPLAINED` / `MISSING` lines (one line each; every field is on the line), then `npm run portfolio:audit -- --explain <signalId>`; stop and report `--json --out` (§11 D28 is the one known residual class). 2: run with the worker's variables (`--help` for the arguments). 3: the audit already retried 3 times; run it again between cycles. |
+| audit line `UNEXPLAINED … differs=exit` (or `resolution`), `lot=closed`, `sim_terminal=false`, `effect=possible` | A decision that opened a lot, closed by a resolution before an exit that arrived later; the exit is not in the $100 record, so the row never moved (§11, D28). Numbers equal a fresh replay in every synthetic world tried. | Report the count (owner decision D28). |
+| a stored `input_hash` with `-@-\|-@-` on a REJECTED / UNFILLED / EXPIRED / INVALID / UNKNOWN decision although an exit or resolution exists | Normal since D24: for a decision that never opened a lot only the entry part is compared and stored values are never rewritten (§11, D24). | Nothing. |
 
 ## 11. Known limitations and open decisions
 
@@ -598,17 +600,34 @@ Found in the first production audit (29 Sep 2026); decisions D24–D26 (decided 
   opens a lot does not depend on its own exit or resolution (tested exhaustively, `tests/phase3-d24.test.ts`), and a
   fresh replay of the final inputs equals the incrementally-run database in every random world tried
   (`tests/phase3-stale-hash.test.ts`). It does cause needless rewinds later, if the row is ever rewritten for another
-  reason. **Decided 29 Sep 2026: adopt** the compare-side rule (compare only the entry part for a decision that never
-  opened a lot); **not implemented yet** (a brief for it is next). Until it lands, the audit keeps listing the difference.
-- **D25 — the audit gate.** Until D24 lands, an audit with only `effect=none` unexplained differences exits 1 although
-  nothing is wrong. **Decided 29 Sep 2026: (b) until D24 lands**: the owner accepts a lone `effect=none` difference as
-  harmless (the audit still lists it). No code change, because D24 removes that class.
+  reason. **Decided 29 Sep 2026: adopt** the compare-side rule. **Implemented:** `requests.ts` `comparableStoredHash` /
+  `decisionInputsChanged` / `decisionRewindPoint` are the one rule, used by change detection, rehydration, the hash refresh
+  and the audit (which selects `outcome` with `input_hash`). A decision whose outcome is not FILLED / PARTIALLY_FILLED is
+  compared on its entry part only (an entry change still rewinds and replays exactly as before); every other decision whole.
+  Fingerprint, stored values and every decision, lot and equity number are unchanged; stored old-format hashes need no
+  re-hash (option (c) not done) and nothing rewinds when it ships. Audit: D13 now covers closed lots only; `effect=none` is
+  kept as a regression signal. Guard: `tests/phase3-d24.test.ts` (unchanged); tests `phase3-d24-compare`, `phase3-stale-hash`.
+- **D25 — the audit gate.** **Superseded by D24 (implemented):** the class no longer produces a difference, so there is
+  nothing to accept; no code change was ever made for it.
 - **D26 — `computed_at` has no safety margin.** The sweep stamps `computed_at` in the worker before the write commits, and
   change detection starts at the previous run's *start* with no margin. With one worker the sweep and the portfolio job
   never overlap, and a test shows a row rewritten while a run is in progress is read by the next run; two workers
   overlapping during a deploy could in theory lose a row stamped just before a run started. Not observed; not the cause
-  of D24. **Decided 29 Sep 2026: (b)** read from the previous start minus 120 s (re-reads a few rows, changes no number),
-  to be done together with D24, which touches the same function.
+  of D24. **Decided 29 Sep 2026: (b)** read from the previous start minus 120 s (re-reads a few rows, changes no number).
+  **Implemented:** `CHANGE_DETECTION_MARGIN_SEC = 120` in `requests.ts`, applied by the runner and by the audit's "rewritten
+  after the last run started" class (a row stamped 119 s before the start is read, 121 s is not; re-reading writes nothing).
+- **D27 — a checkpoint could be stored at a second the book had already passed (found while implementing D24; fixed).**
+  When the frontier is an unpriced exit that fills before entries the book already took, the run stored the later state
+  under the earlier watermark; a rewind that restored it stopped with `rehydration did not converge` on every run. Reachable
+  since D24 removed the rewinds that used to go back beyond it (reproduced by `tests/phase3-job.test.ts` R4 world 29).
+  Fix: `run.ts` writes no checkpoint whose state is past its second (`tests/phase3-d27.test.ts`). **Owner: confirm.**
+- **D28 — one class of stale hash remains, on decisions that opened a lot.** A lot closed by a resolution, then an exit that
+  arrives later: the $100 record does not contain the exit, so its row never moves; the whole hash differs; the audit reports
+  it `unexplained`, `effect=possible`, exit 1 (seen in 1 of 16 synthetic worlds; numbers equal a fresh replay; none in the 29 Sep
+  production data). Options: (a) leave (the gate then stops on it); (b) also compare the exit part only up to the lot's close
+  for closed lots; (c) classify it D13. **Owner decides.**
+- **D29 — D13 narrowed to closed lots.** An entry-part change on a never-opened decision whose record is final was D13
+  (accepted); it is now `unexplained` (exit 1), as the brief's "closed lots only" requires. **Owner: confirm.**
 
 Other limitations: IDEAL is not causal (§2); marks are the only market-value evidence (§5); spread, impact and
 liquidity are approximations (`docs/PAPER_EXECUTION.md`); `/execution` cannot tell "off" from "dry run" and keeps the

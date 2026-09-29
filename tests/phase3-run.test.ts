@@ -6,6 +6,7 @@
  * computed_at from a controlled clock), and the runner streams those rows. "Equals a fresh replay" always means: a
  * second database built from the same final inputs and run once gives the same decisions, lots and equity rows.
  */
+import { noLotHashAside } from "./helpers/d24";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import pg from "pg";
 import { readFileSync } from "node:fs";
@@ -301,7 +302,10 @@ describe("runner", () => {
       expect(r.memory!.after.heapUsedMb).toBeGreaterThan(0);
     }
     // a dry run over an existing portfolio that would rewind: still nothing written or deleted
-    const tr = w.db.T("token_resolutions").find((r) => r.token_id === w.entries[20].token); if (tr) tr.resolved_ts = iso(sec(tr.resolved_ts) - 100); else w.db.insertRow("token_resolutions", { token_id: w.entries[20].token, value: 1, resolved_ts: iso(w.entries[20].src + 700) });
+    // an entry input changes (a backfilled source_fill_id) and the sweep has rewritten that signal's rows: an entry change
+    // rewinds for every decision (D24 leaves a no-lot decision's exit / resolution out of the comparison, never its entry)
+    const e20 = w.entries[20]; w.db.T("signals").find((r) => r.id === e20.id)!.source_fill_id = "0xbackfilled";
+    for (const x of w.db.T("paper_executions").filter((r) => r.signal_id === e20.id)) x.computed_at = iso(START + 2 * 86_400 - 60);
     setClock(START + 2 * 86_400); await sweep(w);
     const snap = dump(w.db); const d2 = await run(w, { dryRun: true });
     expect(dump(w.db)).toBe(snap); expect(d2.some((s) => s.rewind.to != null)).toBe(true); expect(d2.some((s) => Object.keys(s.deletes).length > 0)).toBe(true);
@@ -396,8 +400,9 @@ describe("runner", () => {
     missing.clear(); setClock(START + 86_400 + 1200); await sweep(world0); setClock(START + 86_400 + 1500);
     const s3 = await run(world0, { batchSize: 40 }); expect(byMode(s3, "REALISTIC").frontier).toBeNull();
     const f = await freshReplay({ ...o, missing: () => false }, () => {});
+    const aside = (o: ReturnType<typeof outputs>) => ({ ...o, decisions: o.decisions.map(noLotHashAside) });   // D24: a no-lot decision keeps the hash it was stored with
     for (const m of ALL) { const p = byMode(s1, m).portfolioId;
-      expect(outputs(world0.db, p)).toEqual(outputs(f.w.db, p)); expect(byMode(s3, m).summary).toEqual(byMode(f.s, m).summary); }
+      expect(aside(outputs(world0.db, p))).toEqual(aside(outputs(f.w.db, p))); expect(byMode(s3, m).summary).toEqual(byMode(f.s, m).summary); }
     assert0008(world0.db);
   });
 

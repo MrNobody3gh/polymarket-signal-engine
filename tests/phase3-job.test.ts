@@ -214,29 +214,45 @@ describe("runner: prices it waits for (found by the R4 world)", () => {
   });
 });
 
-describe("runner: a rewind keeps input_hash current for decisions it does not replay", () => {
-  it("a late resolution on a rejected decision before the restored checkpoint updates its input_hash (no stale hash, no repeat rewind)", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] }); const pc1 = { ...PC, maxOpenPositions: 1 };
+describe("runner: input_hash of decisions a rewind does not replay (D24)", () => {
+  /** A fills; B (60 s later) is rejected with one slot, or fills with room; then one signal per hour. B's market resolves 3 h in, after a checkpoint. */
+  const scenario = async (pcB: typeof PC) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const mk = () => { const db = leaseDb(); const id = (i: number) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
-      for (let i = 0; i < 8; i++) { const t = START + 60 + (i === 0 ? 0 : i === 1 ? 60 : (i - 1) * 3600);  // A fills; B (60 s later) is rejected; then one per hour
+      for (let i = 0; i < 8; i++) { const t = START + 60 + (i === 0 ? 0 : i === 1 ? 60 : (i - 1) * 3600);
         db.insertRow("signals", { id: id(i), kind: "NEW_POSITION", wallet: `w${i}`, condition_id: `c${i}`, token_id: `t${i}`, price: 0.5, usd: 2000, created_at: iso(t), evaluated_at: iso(t + 30), source_fill_id: `f${i}` });
         db.insertRow("paper_ledger", { signal_id: id(i), created_at: iso(t + 30), sim_terminal: false, side: "LONG" });
         db.insertRow("paper_executions", { signal_id: id(i), mode: "IDEAL", fill_ts: iso(t), computed_at: iso(START), state: "OPEN", coverage_state: "SIMULATED", record_hash: "x" }); }
       return { db, B: id(1) }; };
     const now = START + 8 * 3600; setClock(now); const w = mk();
-    const [s1] = await runPortfolios(w.db as never, { config: cfg(now, pc1), modes: ["IDEAL"], owner: "t", now: () => now });
-    const before = { ...w.db.T("portfolio_decisions").find((r) => r.signal_id === w.B)! }; expect(before.outcome).toBe("REJECTED"); // a copy: rows are updated in place
-    // B's market resolves 3 h in; the sweep rewrites B's record
+    const [s1] = await runPortfolios(w.db as never, { config: cfg(now, pcB), modes: ["IDEAL"], owner: "t", now: () => now });
+    const before = { ...w.db.T("portfolio_decisions").find((r) => r.signal_id === w.B)! };                              // a copy: rows are updated in place
     const late = (db: Db) => { db.insertRow("token_resolutions", { token_id: "t1", value: 1, resolved_ts: iso(START + 3 * 3600) }); for (const r of db.T("paper_executions")) if (r.signal_id === w.B) r.computed_at = iso(now + 30); };
-    late(w.db); setClock(now + 60);
-    const [s2] = await runPortfolios(w.db as never, { config: cfg(now, pc1), modes: ["IDEAL"], owner: "t", now: () => now + 60 });
-    expect(s2.rewind.to).toBe(START + 3 * 3600); expect(s2.rewind.restoredFrom!).toBeGreaterThan(START + 120);       // B's decision lies before the restored checkpoint
-    const f = mk(); late(f.db); const [sf] = await runPortfolios(f.db as never, { config: cfg(now, pc1), modes: ["IDEAL"], owner: "t", now: () => now + 60 });
+    late(w.db); setClock(now + 60); const writesBefore = JSON.stringify(w.db.stats.writes);
+    const [s2] = await runPortfolios(w.db as never, { config: cfg(now, pcB), modes: ["IDEAL"], owner: "t", now: () => now + 60 });
+    const f = mk(); late(f.db); const [sf] = await runPortfolios(f.db as never, { config: cfg(now, pcB), modes: ["IDEAL"], owner: "t", now: () => now + 60 });
     const after = w.db.T("portfolio_decisions").find((r) => r.signal_id === w.B)!, fresh = f.db.T("portfolio_decisions").find((r) => r.signal_id === w.B)!;
-    expect(after.input_hash).not.toBe(before.input_hash); expect(after.input_hash).toBe(fresh.input_hash); expect(after.record_hash).toBe(fresh.record_hash);
-    // and nothing is left to rewind for: the next run is quiet
-    setClock(now + 120); const [s3] = await runPortfolios(w.db as never, { config: cfg(now, pc1), modes: ["IDEAL"], owner: "t", now: () => now + 120 });
-    expect(s3.rewind.to).toBeNull(); expect(s3.writes).toEqual({}); void s1; void sf;
+    setClock(now + 120); const [s3] = await runPortfolios(w.db as never, { config: cfg(now, pcB), modes: ["IDEAL"], owner: "t", now: () => now + 120 });
+    return { s1, s2, s3, sf, before, after, fresh, w, writesBefore };
+  };
+
+  it("a late resolution on a decision that never opened a lot is not a change: no rewind, no write, the stored hash stays", async () => {
+    const r = await scenario({ ...PC, maxOpenPositions: 1 });
+    expect(r.before.outcome).toBe("REJECTED");
+    expect(r.s2.rewind.to).toBeNull(); expect(r.s2.rewind.reasons).toEqual([]); expect(r.s2.writes).toEqual({}); expect(r.s2.deletes).toEqual({});
+    expect(r.after.input_hash).toBe(r.before.input_hash); expect(r.after.record_hash).toBe(r.before.record_hash);           // stored values stay as they are
+    expect(r.after.input_hash).not.toBe(r.fresh.input_hash);                                                                   // (a fresh replay stores the whole current hash)
+    expect(r.after.input_hash.split("|")[0]).toBe(r.fresh.input_hash.split("|")[0]);                                           // the entry part is the same
+    const { input_hash: _a, record_hash: _b, ...x } = r.after, { input_hash: _c, record_hash: _d, ...y } = r.fresh; void [_a, _b, _c, _d]; expect(x).toEqual(y);   // every other column identical
+    expect(r.s3.rewind.to).toBeNull(); expect(r.s3.writes).toEqual({});
+  });
+
+  it("…while the same late resolution on a decision that opened a lot is still detected, replayed or re-linked, and its whole hash kept current (no stale hash, no repeat rewind)", async () => {
+    const r = await scenario(PC);
+    expect(r.before.outcome).toBe("FILLED");
+    expect(r.s2.rewind.to).toBe(START + 3 * 3600); expect(r.s2.rewind.restoredFrom!).toBeGreaterThan(START + 120);          // B's decision lies before the restored checkpoint
+    expect(r.after.input_hash).not.toBe(r.before.input_hash); expect(r.after.input_hash).toBe(r.fresh.input_hash); expect(r.after.record_hash).toBe(r.fresh.record_hash);
+    expect(r.s3.rewind.to).toBeNull(); expect(r.s3.writes).toEqual({});                                                        // nothing is left to rewind for: the next run is quiet
   });
 });
 

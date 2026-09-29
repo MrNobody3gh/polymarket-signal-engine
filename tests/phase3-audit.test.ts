@@ -163,18 +163,19 @@ describe("D13 audit", () => {
     const addExit = (e: World["entries"][number], k: number) => { const xs = e.src + 500; w.db.insertRow("signals", { id: X(9000 + k), kind: "EXIT", wallet: e.wallet, condition_id: e.condition, token_id: e.token, price: 0.5, usd: 2000, created_at: iso(xs), evaluated_at: iso(xs + 4) }); w.db.insertRow("paper_ledger", { signal_id: X(9000 + k), created_at: iso(xs + 4), sim_terminal: true, side: "EXIT_EVENT" }); };
     addExit(a, 1); addExit(b, 2);
     let r = mode(await audit(w.db, pc), "REALISTIC");
-    expect(r.classes.d13.count).toBe(0); expect(r.classes.unexplained.count).toBe(0); expect(r.classes.nextRun.count).toBe(2);
+    // D24: b never opened a lot, so its exit is not a difference at all; a (an open lot) still is, and is 'next run'
+    expect(r.classes.d13.count).toBe(0); expect(r.classes.unexplained.count).toBe(0); expect(r.classes.nextRun.count).toBe(1); expect(r.mismatches).toBe(1);
     const ex = new Map(r.classes.nextRun.examples.map((x) => [x.signalId, x]));
     expect(ex.get(a.id)).toMatchObject({ parts: ["exit"], lot: "open" }); expect(ex.get(a.id)!.why).toMatch(/lot is open/);
-    expect(ex.get(b.id)).toMatchObject({ parts: ["exit"], lot: "none" }); expect(ex.get(b.id)!.why).toMatch(/sweep will rewrite/);
+    expect(ex.has(b.id)).toBe(false);
     expect(ex.get(a.id)!.rewindTo).toBeGreaterThanOrEqual(a.src + 500);        // the exit's own fill time, not the entry's
     expect(auditExitCode([r])).toBe(AUDIT_EXIT.OK);
-    expect(formatAudit([r], 0)).toMatch(/\(b\) other — the next run re-examines these anyway: 2/);
+    expect(formatAudit([r], 0)).toMatch(/\(b\) other — the next run re-examines these anyway: 1/);
     // the sweep rewrites both rows: now change detection will read them
     setClock(clock + 60); await sweep(w.db); setClock(clock + 60);
     r = mode(await audit(w.db, pc), "REALISTIC");
-    expect(r.classes.nextRun.count).toBe(2); for (const x of r.classes.nextRun.examples) expect(x.why).toMatch(/rewritten after the last run started/);
-    // the next run acts on them: nothing differs any more
+    expect(r.classes.nextRun.count).toBe(1); for (const x of r.classes.nextRun.examples) expect(x.why).toMatch(/rewritten after the last run started/);
+    // the next run acts on it: nothing differs any more
     await run(w.db, pc); setClock(clock + 900);
     r = mode(await audit(w.db, pc), "REALISTIC"); expect(r.mismatches).toBe(0); expect(r.matches).toBe(r.checked);
   });
@@ -188,6 +189,16 @@ describe("D13 audit", () => {
     expect(r.classes.unexplained.earliestTs).toBe(sec(decisionsOf(w.db, d.id).find((y) => y.signal_id === e.id)!.event_ts));
     expect(auditExitCode(res)).toBe(AUDIT_EXIT.UNEXPECTED);
     const { code, text } = await cli(w.db, envOf(pc)); expect(code).toBe(1); expect(text).toContain("UNEXPLAINED"); expect(text).toContain("Result: STOP");
+  });
+
+  it("D13 covers closed lots only (D24): an entry change on a never-opened decision whose record is final is unexplained, not D13", async () => {
+    const pc = PCS.tight; const w = await decided(220, pc); const d = def(pc, "CONSERVATIVE");
+    const e = w.entries.find((x) => !lotOf(w.db, d.id, x.id) && decisionsOf(w.db, d.id).some((y) => y.signal_id === x.id))!;
+    ledgerOf(w.db, e.id).sim_terminal = true;                                        // the sweep never recomputes it
+    w.db.T("signals").find((s) => s.id === e.id)!.source_fill_id = "0xbackfilled";
+    const r = mode(await audit(w.db, pc), "CONSERVATIVE");
+    expect(r.classes.d13.count).toBe(0); expect(r.classes.unexplained.examples).toMatchObject([{ signalId: e.id, parts: ["entry"], lot: "none", simTerminal: true, effect: "possible" }]);
+    expect(r.classes.unexplained.examples[0].why).toMatch(/D13 \(closed lots only\) does not cover/);
   });
 
   it("an entry whose fill time moved later (an evaluation-time correction) is unexplained, not 'next run': the runner keeps the old lot", async () => {
@@ -225,7 +236,8 @@ describe("D13 audit", () => {
     const pc = PCS.tight; const w = await decided(240, pc);
     // make every class non-empty first (a late resolution, a late exit, a backfill, a missing row)
     const d = def(pc, "REALISTIC");
-    const t = w.entries.find((x) => ledgerOf(w.db, x.id).sim_terminal === true && !resolved(w.db, x.token) && decisionsOf(w.db, d.id).some((y) => y.signal_id === x.id) && !["OPEN", "PARTIALLY_EXITED"].includes(lotOf(w.db, d.id, x.id)?.state))!;
+    const t = w.entries.find((x) => !resolved(w.db, x.token) && ["EXITED", "RESOLVED"].includes(lotOf(w.db, d.id, x.id)?.state))!;   // a closed lot: D13 covers closed lots only
+    ledgerOf(w.db, t.id).sim_terminal = true;                                                                                       // …whose Phase 2 record is final (never recomputed)
     w.db.insertRow("token_resolutions", { token_id: t.token, value: 0, resolved_ts: iso(t.src + 99_999) });
     const o = w.entries.find((x) => lotOf(w.db, d.id, x.id)?.state === "OPEN" && !hasExit(w.db, x))!;
     w.db.insertRow("signals", { id: X(7777), kind: "EXIT", wallet: o.wallet, condition_id: o.condition, token_id: o.token, price: 0.4, usd: 900, created_at: iso(o.src + 700), evaluated_at: iso(o.src + 704) });
@@ -321,9 +333,10 @@ describe("D13 audit", () => {
     await runPortfolios(w.db as never, { config: cfgOf(pc), modes: ["IDEAL"], owner: "w", maxBatches: 1, batchSize: 60 }); setClock(clock + 900);
     let n = 0; await expect(runPortfolios(w.db as never, { config: cfgOf(pc), modes: ["IDEAL"], owner: "w", batchSize: 60, fault: (s) => { if (s === "afterOutputs" && ++n === 2) throw new Error("killed"); } })).rejects.toThrow("killed");
     setClock(clock + 900); const d = def(pc, "IDEAL"); const W0 = sec(w.db.T("portfolio_runs").find((r) => r.portfolio_id === d.id)!.last_watermark_ts);
-    // a late resolution on a decision the dead run wrote after its recorded watermark
-    const dd = decisionsOf(w.db, d.id).filter((x) => sec(x.event_ts) > W0).map((x) => w.entries.find((e) => e.id === x.signal_id)!).find((e) => !resolved(w.db, e.token) && !["OPEN", "PARTIALLY_EXITED"].includes(lotOf(w.db, d.id, e.id)?.state))!;
-    expect(dd).toBeTruthy(); w.db.insertRow("token_resolutions", { token_id: dd.token, value: 1, resolved_ts: iso(dd.src + 50_000) });
+    // an entry input that changed on a decision the dead run wrote after its recorded watermark (for a decision that never opened
+    // a lot a late exit or resolution is no difference since D24, an entry change still is)
+    const dd = decisionsOf(w.db, d.id).filter((x) => sec(x.event_ts) > W0).map((x) => w.entries.find((e) => e.id === x.signal_id)!).find((e) => !lotOf(w.db, d.id, e.id))!;
+    expect(dd).toBeTruthy(); w.db.T("signals").find((s) => s.id === dd.id)!.source_fill_id = "0xbackfilled";
     const r = await auditDecisionInputs(w.db as never, d);
     expect(r.previousRunFinished).toBe(false); expect(r.classes.nextRun.examples.find((x) => x.signalId === dd.id)?.why).toMatch(/did not finish/);
   });
@@ -525,13 +538,13 @@ describe("docs/PORTFOLIO.md names everything the code can emit or read", () => {
     expect(ok.startIso).toBe("2026-09-27T04:26:41.000Z");
     expect(doc).toContain("example values, not a recommendation");
   });
-  it("the audit's options, retry, output and the D24–D26 decisions are documented, and the plan and the analysis agree with them", () => {
+  it("the audit's options, retry, output and the D24–D29 decisions are documented, and the plan and the analysis agree with them", () => {
     const code = src("src/lib/paper/portfolio/audit.ts"); const plan = src("docs/PHASE3_PLAN.md"); const d24 = src("docs/PHASE3_D24_ANALYSIS.md");
     for (const flag of ["--json", "--out", "--explain", "--help"]) { expect(code, flag).toContain(`"${flag}"`); expect(doc, flag).toContain(flag); }
     for (const w of ["AUDIT_JSON", "up to 3 attempts, 90 s apart", "one line per unexplained or missing", "up to 50", "effect=none", "effect=possible", "200 lines", "unknown argument"]) expect(doc, w).toContain(w);
     expect(code).toMatch(/attempts: 3, gapMs: 90_000/); expect(code).toContain("AUDIT_EXAMPLES_KEPT = 50"); expect(code).toContain("AUDIT_PACE_LINES = 200");
-    for (const id of ["D24", "D25", "D26"]) { expect(plan, id).toMatch(new RegExp(`^\\| ${id} \\|`, "m")); expect(doc, id).toContain(`**${id} —`); }
-    expect(doc).toContain("docs/PHASE3_D24_ANALYSIS.md"); expect(d24).toContain("analysis only"); expect(d24).toContain("adopt, with conditions");
+    for (const id of ["D24", "D25", "D26", "D27", "D28", "D29"]) { expect(plan, id).toMatch(new RegExp(`^\\| ${id} \\|`, "m")); expect(doc, id).toContain(`**${id} —`); }
+    expect(doc).toContain("docs/PHASE3_D24_ANALYSIS.md"); expect(d24).toContain("implemented (compare side, with D26)"); expect(d24).toContain("adopt, with conditions");
     expect(readFileSync(path.join(ROOT, "scripts/portfolio-audit.ts"), "utf8")).toContain("argv: process.argv.slice(2)");
   });
   it("README, PAPER_EXECUTION and DEPLOY link to it", () => {
