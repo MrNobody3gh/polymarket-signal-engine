@@ -2,11 +2,12 @@
  * D22 — no alerts for signals detected too late.
  *
  * lag = evaluation time − source trade time (`signals.evaluated_at` − `signals.created_at`), computed once, when the
- * engine evaluates the fill. A signal is late when lag is STRICTLY greater than ALERT_MAX_LAG_HOURS (default 6).
+ * engine evaluates the fill. A signal is late when lag is STRICTLY greater than ALERT_MAX_LAG_HOURS (default 1, D23).
  * A late signal is stored, gets its paper ledger row and consensus event and stays visible everywhere; only the alert
  * push (Telegram subscribers, the admin chat, and Discord/email, which share `dispatch`) is skipped.
  */
-export const DEFAULT_ALERT_MAX_LAG_HOURS = 6;
+/** D23 (29 Sep 2026): 1 hour. The owner first decided 6 h (D22); the 29 Sep re-score showed backfills 1.1-5.7 h late that a 6 h rule cannot catch. */
+export const DEFAULT_ALERT_MAX_LAG_HOURS = 1;
 export const STALE_ALERT_KIND = "stale_alert_suppressed";
 const SUMMARY_WINDOW_SEC = 60;
 

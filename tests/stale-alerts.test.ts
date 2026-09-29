@@ -1,5 +1,5 @@
 /**
- * D22 — no alerts for signals detected more than ALERT_MAX_LAG_HOURS (default 6) after the trade.
+ * D22/D23 — no alerts for signals detected more than ALERT_MAX_LAG_HOURS (default 1) after the trade.
  * lag = evaluation time − source trade time (signals.evaluated_at − signals.created_at). Late = strictly greater.
  * The signal is stored and simulated exactly as before; only the push (admin chat, subscribers, Discord/email) is skipped.
  */
@@ -10,14 +10,14 @@ import path from "node:path";
 import { fakeDb } from "./helpers/fakeDb";
 import { pgDb } from "./helpers/pgDb";
 import { SignalEngine } from "@/lib/signals/engine";
-import { detectionLagSec, isStaleLag, parseMaxLagHours, resetStaleWarning, resolveMaxLagHours, STALE_ALERT_KIND } from "@/lib/alerts/staleness";
+import { detectionLagSec, isStaleLag, parseMaxLagHours, DEFAULT_ALERT_MAX_LAG_HOURS, resetStaleWarning, resolveMaxLagHours, STALE_ALERT_KIND } from "@/lib/alerts/staleness";
 import { handle, type Store, type Subscriber } from "@/lib/telegram/commands";
 import { supabaseStore } from "@/lib/telegram/store";
 import { logIssues } from "@/lib/paper/ledger";
 import type { Fill, WalletProfile } from "@/lib/polymarket/types";
 import type { MarketMetaSource } from "@/lib/polymarket/markets";
 
-const NOW = 1_790_000_000; const H = 3600; const SIX = 6 * H;
+const NOW = 1_790_000_000; const H = 3600; const LIMIT = DEFAULT_ALERT_MAX_LAG_HOURS * H; // D23: the default threshold, in seconds
 const A = "0x" + "a".repeat(40), B = "0x" + "b".repeat(40);
 const profile = (address: string, o: Partial<WalletProfile> = {}): WalletProfile => ({ address, name: address.slice(0, 6), copyScore: 70, pnl90d: 100_000, style: "Selective directional", fillsPerDay: 10, programShare: 0.01, concentration: 0.1, netDd: 20, monthsUp: 3, monthsTotal: 3, daysIdle: 0, tradeCount: 1000, sources: [], ...o });
 let seq = 0;
@@ -67,47 +67,48 @@ async function runScenario(sc: (typeof SCENARIOS)[number], lag: number, o: Param
 describe("D22 definition: lag = evaluation − trade time, strictly greater than the threshold", () => {
   it("isStaleLag / detectionLagSec: exactly at the threshold is fresh, one second over is late", () => {
     expect(detectionLagSec(NOW, NOW - 100)).toBe(100);
-    expect(isStaleLag(SIX - 1, 6)).toBe(false); expect(isStaleLag(SIX, 6)).toBe(false); expect(isStaleLag(SIX + 1, 6)).toBe(true);
-    expect(isStaleLag(0, 6)).toBe(false); expect(isStaleLag(-30, 6)).toBe(false); // a trade timestamped slightly in the future is not late
+    expect(isStaleLag(LIMIT - 1, 1)).toBe(false); expect(isStaleLag(LIMIT, 1)).toBe(false); expect(isStaleLag(LIMIT + 1, 1)).toBe(true);
+    expect(isStaleLag(6 * H, 6)).toBe(false); expect(isStaleLag(6 * H + 1, 6)).toBe(true); // an explicit 6 h is still honoured
+    expect(isStaleLag(0, 1)).toBe(false); expect(isStaleLag(-30, 1)).toBe(false); // a trade timestamped slightly in the future is not late
     expect(isStaleLag(90, 0.025)).toBe(false); expect(isStaleLag(91, 0.025)).toBe(true); // fractional hours: 0.025 h = 90 s
   });
 
-  it("through the engine: 5 h 59 min 59 s → sent, exactly 6 h → sent, 6 h + 1 s → suppressed (admin chat and subscriber)", async () => {
+  it("through the engine: 1 s under the limit → sent, exactly the limit (1 h) → sent, 1 s over → suppressed (admin chat and subscriber)", async () => {
     const nb = SCENARIOS[0];
-    const under = await runScenario(nb, SIX - 1), exact = await runScenario(nb, SIX), over = await runScenario(nb, SIX + 1);
+    const under = await runScenario(nb, LIMIT - 1), exact = await runScenario(nb, LIMIT), over = await runScenario(nb, LIMIT + 1);
     for (const r of [under, exact]) { expect(r.admin, "admin chat").toBe(r.n); expect(r.subscribers, "subscriber").toBe(r.n); expect(r.deliveries).toBe(r.n); expect(r.issues).toBe(0); }
     expect(over.admin).toBe(0); expect(over.subscribers).toBe(0); expect(over.deliveries).toBe(0); expect(over.issues).toBe(over.n);
   });
 
   it("the lag is the signal's own evaluated_at − created_at, as stored", async () => {
-    const r = await runScenario(SCENARIOS[0], SIX + 1);
-    expect(Date.parse(r.target.evaluated_at) / 1000 - Date.parse(r.target.created_at) / 1000).toBe(SIX + 1);
+    const r = await runScenario(SCENARIOS[0], LIMIT + 1);
+    expect(Date.parse(r.target.evaluated_at) / 1000 - Date.parse(r.target.created_at) / 1000).toBe(LIMIT + 1);
   });
 });
 
 describe("D22 scope: every signal kind, admin chat and subscribers", () => {
   for (const sc of SCENARIOS) {
-    it(`${sc.kind}: late (6 h + 1 s) → nothing pushed anywhere; 1 h → pushed to both`, async () => {
-      const late = await runScenario(sc, SIX + 1);
+    it(`${sc.kind}: late (1 h + 1 s) → nothing pushed anywhere; 30 min → pushed to both`, async () => {
+      const late = await runScenario(sc, LIMIT + 1);
       expect(late.admin, "admin chat").toBe(0); expect(late.subscribers).toBe(0); expect(late.deliveries).toBe(0);
       expect(late.issues).toBe(late.n); expect(late.staleIssues().map((i) => i.ref_id)).toContain(late.target.id);
-      const fresh = await runScenario(sc, H);
+      const fresh = await runScenario(sc, H / 2);
       expect(fresh.admin).toBe(fresh.n); expect(fresh.subscribers).toBe(fresh.n); expect(fresh.issues).toBe(0);
     });
   }
   it("the admin chat alone is gated (no bot token, no subscribers)", async () => {
-    const late = await runScenario(SCENARIOS[0], SIX + 1, { bot: false, subs: [] }); expect(late.calls).toHaveLength(0);
-    const fresh = await runScenario(SCENARIOS[0], H, { bot: false, subs: [] }); expect(fresh.admin).toBe(fresh.n); expect(fresh.calls.every((c) => c.chat_id === String(ADMIN))).toBe(true);
+    const late = await runScenario(SCENARIOS[0], LIMIT + 1, { bot: false, subs: [] }); expect(late.calls).toHaveLength(0);
+    const fresh = await runScenario(SCENARIOS[0], H / 2, { bot: false, subs: [] }); expect(fresh.admin).toBe(fresh.n); expect(fresh.calls.every((c) => c.chat_id === String(ADMIN))).toBe(true);
   });
   it("the subscriber broadcast alone is gated (no admin chat)", async () => {
-    const late = await runScenario(SCENARIOS[0], SIX + 1, { admin: false }); expect(late.calls).toHaveLength(0);
+    const late = await runScenario(SCENARIOS[0], LIMIT + 1, { admin: false }); expect(late.calls).toHaveLength(0);
     const fresh = await runScenario(SCENARIOS[0], H, { admin: false }); expect(fresh.subscribers).toBe(fresh.n);
   });
   it("Discord and email share dispatch and are gated the same way", async () => {
     const db = fakeDb(); const urls: string[] = []; vi.stubGlobal("fetch", vi.fn(async (u: string) => { urls.push(String(u)); return okResp(); })); vi.stubEnv("TELEGRAM_BOT_TOKEN", "");
     const e = new SignalEngine({ db: db as never, channels: { discord: { webhookUrl: "https://discord.example/hook" }, email: { resendKey: "k", to: "a@b.c", from: "s@b.c" } }, markets: noMeta, now: () => NOW });
     (e as unknown as { wallets: Map<string, WalletProfile> }).wallets.set(A, profile(A));
-    await e.ingest(fill({ ts: NOW - SIX - 1 })); expect(urls).toEqual([]);
+    await e.ingest(fill({ ts: NOW - LIMIT - 1 })); expect(urls).toEqual([]);
     await e.ingest(fill({ ts: NOW - 60, tokenId: "tok2" })); expect(urls.some((u) => u.includes("discord"))).toBe(true); expect(urls.some((u) => u.includes("resend"))).toBe(true);
   });
 });
@@ -123,8 +124,8 @@ describe("D22 what must NOT change", () => {
   const SCRIPT = (): Fill[] => (seq = 1000, [
     fill({ wallet: B, ts: NOW }), fill({ ts: NOW - 30 }),                                                    // fresh NEW_POSITION + CONSENSUS
     fill({ ts: NOW - 20, size: 6000, usd: 1800 }),                                                            // fresh CONVICTION_ADD
-    fill({ tokenId: "tok2", ts: NOW - SIX - 5 }), fill({ tokenId: "tok2", wallet: B, ts: NOW - SIX - 9 }),  // LATE NEW_POSITION ×2 (+ CONSENSUS)
-    fill({ tokenId: "tok2", ts: NOW - SIX - 3, size: 6000, usd: 1800 }),                                     // LATE CONVICTION_ADD
+    fill({ tokenId: "tok2", ts: NOW - LIMIT - 5 }), fill({ tokenId: "tok2", wallet: B, ts: NOW - LIMIT - 9 }),  // LATE NEW_POSITION ×2 (+ CONSENSUS)
+    fill({ tokenId: "tok2", ts: NOW - LIMIT - 3, size: 6000, usd: 1800 }),                                     // LATE CONVICTION_ADD
     fill({ tokenId: "tok3", ts: NOW - 40 * H, price: 0.2, size: 15_000 }),                                    // LATE EARLY_ENTRY (+ NEW_POSITION)
     fill({ tokenId: "tok3", side: "SELL", ts: NOW - 30 * H, size: 15_000, price: 0.4, usd: 6000 }),          // LATE EXIT
     fill({ ts: NOW - 5, side: "SELL", size: 16_000, price: 0.4, usd: 6400 }),                                 // fresh EXIT
@@ -138,7 +139,7 @@ describe("D22 what must NOT change", () => {
 
   it("a run with the rule on writes byte-identical rows to a run with it off, in every table (only data_quality_issues gains rows)", async () => {
     const on = await playScript(); const off = await playScript(1e9);
-    const late = on.db.T("signals").filter((s) => Date.parse(s.evaluated_at) - Date.parse(s.created_at) > SIX * 1000);
+    const late = on.db.T("signals").filter((s) => Date.parse(s.evaluated_at) - Date.parse(s.created_at) > LIMIT * 1000);
     expect(late.length).toBeGreaterThanOrEqual(6); // the script really contains late signals
     expect(new Set(late.map((s) => s.kind))).toEqual(new Set(["NEW_POSITION", "CONSENSUS", "CONVICTION_ADD", "EARLY_ENTRY", "EXIT"]));
     expect(on.db.T("signals").length).toBe(off.db.T("signals").length);
@@ -157,7 +158,7 @@ describe("D22 what must NOT change", () => {
   });
 
   it("with channels configured the late row is stored as today, with nothing recorded as delivered", async () => {
-    const late = await runScenario(SCENARIOS[0], SIX + 1);
+    const late = await runScenario(SCENARIOS[0], LIMIT + 1);
     expect(late.target.delivered).toEqual({}); expect(late.target.payload).toBeTruthy(); expect(late.target.closed_at ?? null).toBeNull();
     const fresh = await runScenario(SCENARIOS[0], H); expect(fresh.target.delivered).toMatchObject({ telegram: true, bot: { sent: 1 } });
     // same columns, same payload shape: the only difference is what was delivered
@@ -165,12 +166,12 @@ describe("D22 what must NOT change", () => {
   });
 
   it("a late EXIT still closes the wallet's open signals", async () => {
-    const r = await runScenario(SCENARIOS[4], SIX + 1);
+    const r = await runScenario(SCENARIOS[4], LIMIT + 1);
     expect(r.db.T("signals").filter((s) => s.kind !== "EXIT" && s.token_id === "tok1").every((s) => s.closed_at != null)).toBe(true);
   });
 
   it("a late signal is still listed by /signals and /signal <ref> (the store reads the signals table, untouched)", async () => {
-    const r = await runScenario(SCENARIOS[0], SIX + 1);
+    const r = await runScenario(SCENARIOS[0], LIMIT + 1);
     const { data } = await (r.db.from("signals").select("*").order("created_at") as unknown as Promise<{ data: { id: string }[] }>);
     expect(data.map((s) => s.id)).toContain(r.target.id);
   });
@@ -180,7 +181,7 @@ describe("D22 delivery bookkeeping", () => {
   const failing = (chat: number | string) => (chat === "1" || chat === 1 ? new Response(JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 5 } }), { status: 429 }) : null);
   it("a suppressed alert writes no tg_deliveries row and leaves every subscriber's failure counters and back-off alone", async () => {
     const subs = [{ chat_id: 1, consecutive_failures: 3, last_error: "old", next_attempt_at: null }, { chat_id: 2, consecutive_failures: 0 }];
-    const late = await runScenario(SCENARIOS[0], SIX + 1, { subs, fail: failing });
+    const late = await runScenario(SCENARIOS[0], LIMIT + 1, { subs, fail: failing });
     expect(late.calls).toHaveLength(0); expect(late.db.T("tg_deliveries")).toHaveLength(0);
     expect(late.db.T("tg_subscribers")).toEqual([expect.objectContaining({ chat_id: 1, consecutive_failures: 3, last_error: "old", next_attempt_at: null, active: true }), expect.objectContaining({ chat_id: 2, consecutive_failures: 0, active: true })]);
   });
@@ -190,7 +191,7 @@ describe("D22 delivery bookkeeping", () => {
   });
   it("subscriber filters and dedupe are unaffected: a later fresh signal reaches exactly the matching subscribers, once", async () => {
     const r = rig({ subs: [{ chat_id: 1 }, { chat_id: 2, kinds: ["EXIT"] }, { chat_id: 3, min_usd: 1e9 }] });
-    await r.e.ingest(fill({ ts: NOW - SIX - 1 }));                    // late: nothing
+    await r.e.ingest(fill({ ts: NOW - LIMIT - 1 }));                    // late: nothing
     expect(r.calls).toHaveLength(0);
     const f = fill({ tokenId: "tok9", ts: NOW - 10 }); await r.e.ingest(f); await r.e.ingest(f);
     const sig = r.sigOf(f)[0]; expect(r.subscribers().filter((c) => c.chat_id === 1 || c.chat_id === "1")).toHaveLength(r.sigOf(f).length);
@@ -202,10 +203,10 @@ describe("D22 delivery bookkeeping", () => {
 
 describe("D22 visibility", () => {
   it("records each suppression in data_quality_issues with the specified shape, once per signal", async () => {
-    const r = rig({ subs: [{ chat_id: 1 }] }); const f = fill({ ts: NOW - (SIX + 3) }); await r.e.ingest(f);
+    const r = rig({ subs: [{ chat_id: 1 }] }); const f = fill({ ts: NOW - (LIMIT + 3) }); await r.e.ingest(f);
     const [s] = r.sigOf(f); const issues = r.staleIssues(); expect(issues).toHaveLength(r.sigOf(f).length);
     const mine = issues.find((i) => i.ref_id === s.id)!;
-    expect(mine).toMatchObject({ kind: "stale_alert_suppressed", ref_type: "signal", ref_id: s.id, detail: { lagHours: 6.001, thresholdHours: 6, kind: s.kind } });
+    expect(mine).toMatchObject({ kind: "stale_alert_suppressed", ref_type: "signal", ref_id: s.id, detail: { lagHours: Math.round(((LIMIT + 3) / 3600) * 1000) / 1000, thresholdHours: DEFAULT_ALERT_MAX_LAG_HOURS, kind: s.kind } });
     expect(Object.keys(mine.detail).sort()).toEqual(["kind", "lagHours", "thresholdHours"]);
     // re-ingesting the same fill (same engine, a fresh engine, another worker) records nothing new
     await r.e.ingest(f); const e2 = new SignalEngine({ db: r.db as never, channels: {}, markets: noMeta, now: () => NOW }); (e2 as unknown as { wallets: Map<string, WalletProfile> }).wallets.set(A, profile(A)); await e2.ingest(f);
@@ -217,52 +218,52 @@ describe("D22 visibility", () => {
   });
   it("a failure to record the issue never breaks ingestion or the suppression", async () => {
     const r = rig({ subs: [{ chat_id: 1 }] }); const real = r.db.from.bind(r.db); (r.db as { from: unknown }).from = (t: string) => { if (t === "data_quality_issues") throw new Error("dq down"); return real(t); };
-    const f = fill({ ts: NOW - SIX - 1 }); const out = await r.e.ingest(f);
+    const f = fill({ ts: NOW - LIMIT - 1 }); const out = await r.e.ingest(f);
     expect(out.length).toBeGreaterThan(0); expect(r.sigOf(f).length).toBe(out.length); expect(r.calls).toHaveLength(0); expect(r.logs.some((l) => l.includes("could not record"))).toBe(true);
   });
   it("a burst is one leading line plus one summary line, never one line per signal", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] }); vi.setSystemTime(NOW * 1000);
     const r = rig({ subs: [{ chat_id: 1 }] });
-    for (let i = 0; i < 40; i++) await r.e.ingest(fill({ tokenId: `t${i}`, ts: NOW - SIX - 100 - i * 60 }));
+    for (let i = 0; i < 40; i++) await r.e.ingest(fill({ tokenId: `t${i}`, ts: NOW - LIMIT - 100 - i * 60 }));
     expect(r.staleIssues().length).toBeGreaterThanOrEqual(40); // every signal is recorded…
     const lines = () => r.logs.filter((l) => l.startsWith("alerts:"));
-    expect(lines()).toHaveLength(1); expect(lines()[0]).toMatch(/suppressed 1 stale alert .*limit 6 h/); // …but only one line so far
+    expect(lines()).toHaveLength(1); expect(lines()[0]).toMatch(/suppressed 1 stale alert .*limit 1 h/); // …but only one line so far
     vi.advanceTimersByTime(61_000);
-    expect(lines()).toHaveLength(2); expect(lines()[1]).toMatch(/suppressed \d+ more stale alert\(s\) in the last minute \(max lag 6\.\d h, limit 6 h\)/);
+    expect(lines()).toHaveLength(2); expect(lines()[1]).toMatch(/suppressed \d+ more stale alert\(s\) in the last minute \(max lag 1\.\d h, limit 1 h\)/);
     expect(Number(lines()[1].match(/suppressed (\d+)/)![1])).toBe(r.staleIssues().length - 1);
     vi.advanceTimersByTime(120_000); expect(lines()).toHaveLength(2); // nothing more when nothing more happens
   });
   it("flushStaleSummary reports a pending summary at once", async () => {
-    const r = rig({ subs: [] }); await r.e.ingest(fill({ tokenId: "a", ts: NOW - SIX - 1 })); await r.e.ingest(fill({ tokenId: "b", ts: NOW - SIX - 1 }));
+    const r = rig({ subs: [] }); await r.e.ingest(fill({ tokenId: "a", ts: NOW - LIMIT - 1 })); await r.e.ingest(fill({ tokenId: "b", ts: NOW - LIMIT - 1 }));
     r.e.flushStaleSummary(); expect(r.logs.filter((l) => l.startsWith("alerts:")).length).toBe(2);
   });
 });
 
 describe("D22 configuration: ALERT_MAX_LAG_HOURS", () => {
-  it("parses strictly: a positive decimal number of hours; anything else is 6 with a warning", () => {
+  it("parses strictly: a positive decimal number of hours; anything else is the default (1) with a warning", () => {
     for (const [raw, hours] of [["6", 6], ["12", 12], ["0.5", 0.5], [" 3 ", 3], [24, 24], ["1.25", 1.25]] as const) expect(parseMaxLagHours(raw), String(raw)).toEqual({ hours, warning: null });
-    expect(parseMaxLagHours(undefined)).toEqual({ hours: 6, warning: null }); // unset is the default, not a mistake
-    for (const bad of ["", " ", "0", "0.0", "-1", "-6", "abc", "6h", "six", "NaN", "Infinity", "-Infinity", "1e3", "0x10", "1,5", ".5", "5.", 0, -3, NaN, Infinity]) { const r = parseMaxLagHours(bad as never); expect(r.hours, String(bad)).toBe(6); expect(r.warning, String(bad)).toMatch(/ALERT_MAX_LAG_HOURS/); }
+    expect(parseMaxLagHours(undefined)).toEqual({ hours: DEFAULT_ALERT_MAX_LAG_HOURS, warning: null }); // unset is the default, not a mistake
+    for (const bad of ["", " ", "0", "0.0", "-1", "-6", "abc", "6h", "six", "NaN", "Infinity", "-Infinity", "1e3", "0x10", "1,5", ".5", "5.", 0, -3, NaN, Infinity]) { const r = parseMaxLagHours(bad as never); expect(r.hours, String(bad)).toBe(DEFAULT_ALERT_MAX_LAG_HOURS); expect(r.warning, String(bad)).toMatch(/ALERT_MAX_LAG_HOURS/); }
   });
-  it("an invalid environment value falls back to 6 h and logs exactly one line per process, however many engines are built", () => {
+  it("an invalid environment value falls back to 1 h and logs exactly one line per process, however many engines are built", () => {
     const lines: string[] = []; vi.stubEnv("ALERT_MAX_LAG_HOURS", "banana");
-    for (let i = 0; i < 4; i++) { const e = new SignalEngine({ db: fakeDb() as never, channels: {}, markets: noMeta, now: () => NOW, log: (m) => lines.push(m) }); expect((e as unknown as { maxAlertLagHours: number }).maxAlertLagHours).toBe(6); }
-    expect(lines).toHaveLength(1); expect(lines[0]).toContain('"banana"'); expect(lines[0]).toContain("using 6");
+    for (let i = 0; i < 4; i++) { const e = new SignalEngine({ db: fakeDb() as never, channels: {}, markets: noMeta, now: () => NOW, log: (m) => lines.push(m) }); expect((e as unknown as { maxAlertLagHours: number }).maxAlertLagHours).toBe(DEFAULT_ALERT_MAX_LAG_HOURS); }
+    expect(lines).toHaveLength(1); expect(lines[0]).toContain('"banana"'); expect(lines[0]).toContain(`using ${DEFAULT_ALERT_MAX_LAG_HOURS}`);
   });
-  it.each(["", "0", "-2", "soon"])("engine with ALERT_MAX_LAG_HOURS=%j still suppresses at 6 h + 1 s and sends at exactly 6 h", async (v) => {
+  it.each(["", "0", "-2", "soon"])("engine with ALERT_MAX_LAG_HOURS=%j still suppresses at 1 h + 1 s and sends at exactly 1 h", async (v) => {
     vi.stubEnv("ALERT_MAX_LAG_HOURS", v); const lines: string[] = [];
-    const late = await runScenario(SCENARIOS[0], SIX + 1, { log: (m) => lines.push(m) }); expect(late.calls).toHaveLength(0);
-    const exact = await runScenario(SCENARIOS[0], SIX); expect(exact.admin).toBe(exact.n);
+    const late = await runScenario(SCENARIOS[0], LIMIT + 1, { log: (m) => lines.push(m) }); expect(late.calls).toHaveLength(0);
+    const exact = await runScenario(SCENARIOS[0], LIMIT); expect(exact.admin).toBe(exact.n);
     expect(lines.filter((l) => l.includes("ALERT_MAX_LAG_HOURS"))).toHaveLength(1);
   });
-  it("a valid value moves the threshold (1 h and 12 h), and unset means 6", async () => {
-    vi.stubEnv("ALERT_MAX_LAG_HOURS", "1");
-    expect((await runScenario(SCENARIOS[0], H + 1)).calls).toHaveLength(0); expect((await runScenario(SCENARIOS[0], H)).admin).toBeGreaterThan(0);
+  it("a valid value moves the threshold (2 h and 12 h), and unset means 1 h", async () => {
+    vi.stubEnv("ALERT_MAX_LAG_HOURS", "2");
+    expect((await runScenario(SCENARIOS[0], 2 * H + 1)).calls).toHaveLength(0); expect((await runScenario(SCENARIOS[0], 2 * H)).admin).toBeGreaterThan(0);
     vi.stubEnv("ALERT_MAX_LAG_HOURS", "12");
-    expect((await runScenario(SCENARIOS[0], 7 * H)).admin).toBeGreaterThan(0); expect((await runScenario(SCENARIOS[0], 12 * H + 1)).calls).toHaveLength(0);
+    expect((await runScenario(SCENARIOS[0], 7 * H)).admin).toBeGreaterThan(0); // 7 h is late at the default and at 6 h, fresh at 12 h expect((await runScenario(SCENARIOS[0], 12 * H + 1)).calls).toHaveLength(0);
     vi.unstubAllEnvs(); const lines: string[] = [];
-    expect((await runScenario(SCENARIOS[0], SIX + 1, { log: (m) => lines.push(m) })).calls).toHaveLength(0); expect(lines.filter((l) => l.includes("ALERT_MAX_LAG_HOURS"))).toHaveLength(0);
-    const e = rig({}).e as unknown as { maxAlertLagHours: number }; expect(e.maxAlertLagHours).toBe(6);
+    expect((await runScenario(SCENARIOS[0], LIMIT + 1, { log: (m) => lines.push(m) })).calls).toHaveLength(0); expect(lines.filter((l) => l.includes("ALERT_MAX_LAG_HOURS"))).toHaveLength(0);
+    const e = rig({}).e as unknown as { maxAlertLagHours: number }; expect(e.maxAlertLagHours).toBe(1);
   });
   it("the recorded threshold is the effective one", async () => {
     vi.stubEnv("ALERT_MAX_LAG_HOURS", "2"); const r = await runScenario(SCENARIOS[0], 3 * H);
@@ -289,7 +290,7 @@ describe("D22 /status", () => {
     expect((await supabaseStore(fakeDb() as never).status()).staleSuppressed24h).toBe(0);
   });
   it("end to end: suppress through the engine, then /status through the real store shows it", async () => {
-    const r = await runScenario(SCENARIOS[0], SIX + 1);
+    const r = await runScenario(SCENARIOS[0], LIMIT + 1);
     const patched = { ...r.db, from: (t: string) => r.db.from(t) };
     // the engine stamps created_at with the database default in production; the fake has none, so stamp it here
     for (const i of r.db.T("data_quality_issues")) i.created_at = new Date().toISOString();

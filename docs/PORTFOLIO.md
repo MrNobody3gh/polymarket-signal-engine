@@ -533,11 +533,13 @@ on-chain time), D3 (orphan resolver), D4 (start at the 27 Sep re-score), D5 (no 
 unresolved derived in the report), D12 (watermark lag, §5), D13 (accepted, plus the audit in §8), D14, D15 (the report
 functions are service-role only), **D22 (no alerts for late detections, implemented; below)**.
 
-**D22 — decided 28 Sep 2026 and implemented: no Telegram alert for a signal detected more than 6 hours late.**
+**D22 / D23 — decided 28–29 Sep 2026 and implemented: no Telegram alert for a signal detected more than 1 hour late.**
+(D22 first set the limit at 6 hours; D23 lowered it to 1 hour the next day, see below.)
 *Definition:* `lag = evaluation time − source trade time` of the signal, i.e. `signals.evaluated_at − signals.created_at`
 (the engine's `now()` when it evaluates the fill, minus the fill's `ts`), computed once at evaluation, never at delivery
-or retry. Late means lag **strictly greater than** `ALERT_MAX_LAG_HOURS` (default 6; exactly 6 h is still sent). The
-variable is parsed strictly as a positive number of hours; any other value uses 6 and logs one line per process.
+or retry. Late means lag **strictly greater than** `ALERT_MAX_LAG_HOURS` (default 1; exactly 1 h is still sent). The
+variable is optional and only overrides the default; it is parsed strictly as a positive number of hours, and any other
+value uses 1 and logs one line per process.
 *Scope:* every kind including EXIT; the subscriber broadcast and the admin chat, and Discord and email, which share the
 same code path (unconfigured in production). *What does not change:* the signal row, the paper ledger row, the consensus
 event, positions, dedupe and everything the simulation and the portfolio read; no column, migration or payload change; a
@@ -548,7 +550,11 @@ was delivered). *Bookkeeping:* no `tg_deliveries` row, and no subscriber's failu
 burst, and a `/status` line with the count of the last 24 h (shown only when above 0). *Why:* between 26 Sep 12:15 and 28
 Sep 12:19 UTC, 838 of 3,063 signals were evaluated more than 6 h after the trade (up to 211 h), all in replay bursts after
 wallets returned to the watchlist, and 399 of them reached Telegram as if fresh; since the cursor fix none of 374 was more
-than 1 h late. The rule is a safety net for outages and catch-ups. To count them:
+than 1 h late. The rule is a safety net for outages and catch-ups. *D23 (29 Sep 2026):* after the 29 Sep 04:31 UTC
+re-score, 16 signals were 1.1–5.7 h late, from 7 newly added wallets (a wallet with no saved position is polled from a
+6-hour look-back), and 10 of them reached Telegram; none entered a portfolio. A 6-hour limit could not have caught any of
+them (the look-back is also 6 hours), whereas live signals arrive within about 6 minutes, so the owner lowered the limit
+to 1 hour. To count them:
 `select count(*) from data_quality_issues where kind = 'stale_alert_suppressed'`.
 
 Open (from `docs/PHASE3_PLAN.md`):
@@ -579,7 +585,7 @@ Found while writing this page (step 9); open decisions D18–D21 are listed in t
 - **D21 — limits smaller than `positionUsd` are accepted** by validation; with `allowResize: false` every order is then
   rejected.
 
-Found in the first production audit (29 Sep 2026); open decisions D24–D26 in the plan, analysis in
+Found in the first production audit (29 Sep 2026); decisions D24–D26 (decided 29 Sep 2026, see the plan), analysis in
 `docs/PHASE3_D24_ANALYSIS.md`:
 
 - **D24 — a decision that never opened a lot can keep a stale `input_hash`.** Change detection only re-reads a decision
@@ -592,15 +598,17 @@ Found in the first production audit (29 Sep 2026); open decisions D24–D26 in t
   opens a lot does not depend on its own exit or resolution (tested exhaustively, `tests/phase3-d24.test.ts`), and a
   fresh replay of the final inputs equals the incrementally-run database in every random world tried
   (`tests/phase3-stale-hash.test.ts`). It does cause needless rewinds later, if the row is ever rewritten for another
-  reason. Proposed fix (owner decides): leave the exit and resolution parts out of the comparison for decisions that
-  never opened a lot.
-- **D25 — the audit gate.** Until D24 is decided, an audit with only `effect=none` unexplained differences exits 1 although
-  nothing is wrong. The owner decides whether to treat them as accepted (as D13) for the switch-on.
+  reason. **Decided 29 Sep 2026: adopt** the compare-side rule (compare only the entry part for a decision that never
+  opened a lot); **not implemented yet** (a brief for it is next). Until it lands, the audit keeps listing the difference.
+- **D25 — the audit gate.** Until D24 lands, an audit with only `effect=none` unexplained differences exits 1 although
+  nothing is wrong. **Decided 29 Sep 2026: (b) until D24 lands**: the owner accepts a lone `effect=none` difference as
+  harmless (the audit still lists it). No code change, because D24 removes that class.
 - **D26 — `computed_at` has no safety margin.** The sweep stamps `computed_at` in the worker before the write commits, and
   change detection starts at the previous run's *start* with no margin. With one worker the sweep and the portfolio job
   never overlap, and a test shows a row rewritten while a run is in progress is read by the next run; two workers
   overlapping during a deploy could in theory lose a row stamped just before a run started. Not observed; not the cause
-  of D24.
+  of D24. **Decided 29 Sep 2026: (b)** read from the previous start minus 120 s (re-reads a few rows, changes no number),
+  to be done together with D24, which touches the same function.
 
 Other limitations: IDEAL is not causal (§2); marks are the only market-value evidence (§5); spread, impact and
 liquidity are approximations (`docs/PAPER_EXECUTION.md`); `/execution` cannot tell "off" from "dry run" and keeps the

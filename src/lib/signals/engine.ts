@@ -17,7 +17,7 @@ import { pruneUntrackedCursors } from "./poll";
 import { detectionLagSec, isStaleLag, resolveMaxLagHours, StaleAlertLog, STALE_ALERT_KIND } from "../alerts/staleness";
 
 export interface EngineDeps { db: SupabaseClient; cfg?: RuleConfig; channels?: Channels; now?: () => number; log?: (m: string) => void; markets?: MarketMetaSource;
-  /** D22 override (hours); default ALERT_MAX_LAG_HOURS, else 6. Invalid values fall back to 6. */ maxAlertLagHours?: number }
+  /** D22 override (hours); default ALERT_MAX_LAG_HOURS, else 1 (D23). Invalid values fall back to 1. */ maxAlertLagHours?: number }
 
 const toSec = (iso: string | null | undefined) => (iso ? Math.floor(Date.parse(iso) / 1000) : null);
 const toIso = (sec: number | null | undefined) => (sec == null ? null : new Date(sec * 1000).toISOString());
