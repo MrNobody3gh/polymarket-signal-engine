@@ -322,6 +322,7 @@ The variable has no effect while `PAPER_PORTFOLIO_CONFIG` is unset.
 ### Other variables involved
 
 - `PAPER_SIZE_USD` (Phase 2, default 100): part of every portfolio id (above). The audit must run with the worker's value.
+- `AUDIT_JSON` (audit only, default unset): `1` prints the audit's full JSON, the same as `--json` (§8 step 4).
 - `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DB_REQUEST_TIMEOUT_MS`: the database connection
   (`src/lib/db.ts`), needed by the worker and by `npm run portfolio:audit`.
 
@@ -416,8 +417,10 @@ database is reachable and the portfolio ids are computed the same way as the wor
 real runs (step 7): a dry run writes no decisions to check.
 
 Exit codes: **0** clean (every difference explained) · **1** stop: unexplained differences or missing rows ·
-**2** the configuration is unset or invalid (nothing was read) · **3** inconclusive: a run held the lease during the
-audit; run it again between two cycles.
+**2** the configuration is unset, invalid, or an argument is unknown (nothing was read) · **3** inconclusive on every
+attempt. An audit that overlaps a worker cycle (the run holds the lease, or started while the audit was reading) is
+inconclusive by design; it now **retries by itself**: up to 3 attempts, 90 s apart, waiting for the lease to be free,
+re-auditing only the modes that were inconclusive. Exit 3 only if every attempt was.
 
 What it does (`auditDecisionInputs`, `src/lib/paper/portfolio/audit.ts`): for each mode it reads the stored decisions
 500 at a time, rebuilds each signal's request *now* with the runner's own functions, and compares the current
@@ -428,11 +431,34 @@ fingerprint with the stored `input_hash`. Each difference is classed, first matc
 | unexplained (moved entry) | the entry's fill time moved (unless it is the D13 case below); the runner does not replay that correctly (§11, D18) | 1 |
 | next run | the next run re-examines it anyway: its row was rewritten since the last run, its lot is open, it sits after a crashed run's watermark, or the sweep will rewrite its row next cycle | 0 |
 | (a) D13 | its Phase 2 record is final (`sim_terminal`) or it has no ledger row, and its lot is closed or was never opened: never re-examined, accepted by D13 | 0 |
-| unexplained | nothing will ever re-examine it | 1 |
+| unexplained | nothing will ever re-examine it. Each one carries `effect=none` (no lot was ever opened and only the exit and/or resolution differ: it cannot change any decision, lot or equity number, §11 D24) or `effect=possible` (anything else) | 1 |
 
-For each class it prints the count, the **earliest affected event** (how far back a replay would have to go) and up
-to 20 examples naming the part that differs (entry / exit / resolution). Decisions whose signal or execution row no
-longer exists are counted separately (exit 1). A plain-English summary is followed by the full JSON under `--- JSON ---`.
+**Reading the output (built for Railway's 500 lines/second limit).** Every summary line starts with the mode and the
+whole portfolio id, `[CONSERVATIVE bf203d3695be49b9a4f2195ce1f46ab7] …`, so interleaved logs can be read. Per mode you get
+one counts line, one line per class (count, earliest affected event), and then **one line per unexplained or missing
+example, all of them, up to 50** (a further line says how many were left out), for example:
+
+```
+[CONSERVATIVE bf20…] UNEXPLAINED signal=44ff1fc1-… kind=NEW_POSITION event=2026-09-28T13:52:50Z differs=exit (exit: stored=- current=…@1790…) row_computed_at=2026-09-28T14:17:52Z sim_terminal=false lot=none last_run_started_at=2026-09-29T13:41:51Z replay_from=2026-09-28T22:20:35Z effect=none
+```
+
+(stored versus current for the part that differs: entry / exit / resolution; the execution row's `computed_at`, which is
+what change detection reads; `sim_terminal`; the lot's state; the portfolio's `last_run_started_at`; the time a replay
+would have to go back to.) The full JSON is **not** printed by default. Add `--json` (or set `AUDIT_JSON=1`): it is
+printed in chunks of 200 lines, one chunk per second, after the summary. Add `--out <file>` (implies `--json`) to write
+it to a file instead. With npm the flags go after `--`:
+
+```bash
+railway run npm run portfolio:audit                                  # summary only
+railway run npm run portfolio:audit -- --json --out audit.json       # summary + the full JSON in a file
+railway run npm run portfolio:audit -- --explain <signalId>          # one signal, every mode
+```
+
+`--explain <signalId>` is read-only and prints, for each mode: the stored decision and `input_hash`, the fingerprint the
+runner would compute now (entry fill, linked exit and its fill time, resolution), which part differs (stored versus
+current), the execution row (`status/state`, `computed_at`), `sim_terminal`, the lot, the portfolio's last run start,
+whether the next run's change detection would read the row, and the audit's verdict and effect. It is how the one
+unexplained difference of 29 Sep 2026 was pinned down (§11).
 
 **Step 5 — switch to real runs.** Railway → Variables: set `PAPER_PORTFOLIO_DRY_RUN=0` (or delete it). Deploy. Boot
 line: `portfolio: on · start … · capital $… · $…/position`.
@@ -451,7 +477,9 @@ labelled "non-causal baseline — not a strategy that could have been run", "As 
 signal, "This cycle: completed" in Health, no staleness note, "insufficient data" wherever fewer than 10 lots have
 settled (normal for the first days). After 24 hours of real runs, run the audit again (`railway run npm run
 portfolio:audit`, between two cycles); expect exit 0 and note the D13 count and earliest time. Repeat after a week.
-Exit 1: switch the feature off (§9) and report the output. Also note `rewinds in last 20 runs` for D16.
+Exit 1: read the `UNEXPLAINED` lines. With `effect=none` on every one (a decision that never opened a lot), nothing in the
+results is affected (§11, D24/D25); the owner decides whether to continue. Anything with `effect=possible`, or any `MISSING`
+line: switch the feature off (§9) and report the output (`--json --out`). Also note `rewinds in last 20 runs` for D16.
 
 ## 9. Switch-off and rollback
 
@@ -495,7 +523,8 @@ Exit 1: switch the feature off (§9) and report the output. Also note `rewinds i
 | page: "Portfolio simulation is off: PAPER_PORTFOLIO_CONFIG is not set on the worker." while in dry run | A dry run saves no snapshot. | Expected in dry run. |
 | an error containing `out of order` or `rehydration did not converge` | A bug in the runner. | Switch off (§9) and report the log. |
 | "insufficient data" | Fewer than 10 settled lots. | Not an error. |
-| audit exit 1 / 2 / 3 | Unexplained differences or missing rows / config unset or invalid / a run was in progress. | 1: stop, report the JSON. 2: run with the worker's variables. 3: run again between cycles. |
+| audit exit 1 / 2 / 3 | Unexplained differences or missing rows / config unset, invalid or an unknown argument / a run was in progress on all 3 attempts. | 1: find the `UNEXPLAINED` / `MISSING` lines (one line each; every field is on the line), then `npm run portfolio:audit -- --explain <signalId>`; `effect=none` is the D24 case below, anything else: stop and report `--json --out`. 2: run with the worker's variables (`--help` for the arguments). 3: the audit already retried 3 times; run it again between cycles. |
+| audit line `UNEXPLAINED … differs=exit` (or `resolution`), `lot=none`, `sim_terminal=false`, `effect=none` | A decision that never opened a lot kept its old `input_hash` because the input that changed (an exit, a resolution) is not in its $100 execution row, so the row never moved and nothing re-reads it (§11, D24). It changes no decision, lot or equity number. | Nothing to fix today; report the count. See D24/D25 in the plan for the owner's decisions. |
 
 ## 11. Known limitations and open decisions
 
@@ -531,6 +560,29 @@ Found while writing this page (step 9); open decisions D18–D21 are listed in t
   fee rate × (1 − price): up to $5 or $7 on a $100 order at the 5% / 7% fallback rates, otherwise the market's own rate).
 - **D21 — limits smaller than `positionUsd` are accepted** by validation; with `allowResize: false` every order is then
   rejected.
+
+Found in the first production audit (29 Sep 2026); open decisions D24–D26 in the plan, analysis in
+`docs/PHASE3_D24_ANALYSIS.md`:
+
+- **D24 — a decision that never opened a lot can keep a stale `input_hash`.** Change detection only re-reads a decision
+  when its mode's `paper_executions.computed_at` moves, and the sweep only rewrites a row when the $100 record changes.
+  A record that never entered (`NOT_ENTERED`), or one whose position is already closed, does not contain a later exit or
+  resolution, so the row never moves although the runner's fingerprint (which includes them) does. When the signal's
+  ledger row is not `sim_terminal` (another mode is still open), the audit cannot call it D13 either: it reports it as
+  unexplained. On 29 Sep 2026 that was exactly one decision in the whole database (CONSERVATIVE `44ff1fc1…`, REJECTED,
+  its $100 row `UNKNOWN`/`NOT_ENTERED`, an exit that arrived 5 minutes late). It changes no number: a decision that never
+  opens a lot does not depend on its own exit or resolution (tested exhaustively, `tests/phase3-d24.test.ts`), and a
+  fresh replay of the final inputs equals the incrementally-run database in every random world tried
+  (`tests/phase3-stale-hash.test.ts`). It does cause needless rewinds later, if the row is ever rewritten for another
+  reason. Proposed fix (owner decides): leave the exit and resolution parts out of the comparison for decisions that
+  never opened a lot.
+- **D25 — the audit gate.** Until D24 is decided, an audit with only `effect=none` unexplained differences exits 1 although
+  nothing is wrong. The owner decides whether to treat them as accepted (as D13) for the switch-on.
+- **D26 — `computed_at` has no safety margin.** The sweep stamps `computed_at` in the worker before the write commits, and
+  change detection starts at the previous run's *start* with no margin. With one worker the sweep and the portfolio job
+  never overlap, and a test shows a row rewritten while a run is in progress is read by the next run; two workers
+  overlapping during a deploy could in theory lose a row stamped just before a run started. Not observed; not the cause
+  of D24.
 
 Other limitations: IDEAL is not causal (§2); marks are the only market-value evidence (§5); spread, impact and
 liquidity are approximations (`docs/PAPER_EXECUTION.md`); `/execution` cannot tell "off" from "dry run" and keeps the

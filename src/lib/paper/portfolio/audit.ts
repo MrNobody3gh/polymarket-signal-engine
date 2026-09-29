@@ -22,16 +22,28 @@
  *
  * Read-only by construction: only `select` reads (no insert / update / upsert / delete, no RPC, no lease, no cursor).
  * Bounded memory: one page of at most AUDIT_BATCH_MAX decisions and its inputs at a time, every IN list chunked
- * (selectIn), and at most AUDIT_EXAMPLES examples per class.
+ * (selectIn), and at most AUDIT_EXAMPLES examples per class (AUDIT_EXAMPLES_KEPT for the unexplained ones and the
+ * missing rows, which are all printed, one line each).
+ *
+ * Output is built for a log service that drops lines above a rate (Railway: 500 lines/s): every summary line starts with
+ * `[MODE portfolioId]`, each unexplained or missing example is ONE line, the full JSON is opt-in (`--json` /
+ * `AUDIT_JSON=1`) and then paced or written to `--out`, and an inconclusive audit retries by itself (3 attempts, 90 s).
+ * `--explain <signalId>` prints one signal's stored versus current fingerprint for every mode.
  */
+import { writeFileSync } from "node:fs";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { MODES, type ModeName } from "../sim/config";
+import { timeline } from "../sim/execute";
 import { buildSignals, loadBatchInputs, recordHash, selectIn, simulateMode } from "../sim/run";
 import { PortfolioConfigError, portfolioDefinitions, portfolioRunConfigFromEnv, type PortfolioDefinition, type PortfolioRunConfig } from "./config";
 import { buildRequests, rewindPoint } from "./requests";
 
 export const AUDIT_BATCH_MAX = 500;
 export const AUDIT_EXAMPLES = 20;
+/** Unexplained differences and missing rows: every one is reported (one line each), up to this many. */
+export const AUDIT_EXAMPLES_KEPT = 50;
+export const AUDIT_RETRY = { attempts: 3, gapMs: 90_000, leasePollMs: 5_000, leaseWaitMs: 120_000 } as const;
+export const AUDIT_PACE_LINES = 200;
 export type FingerprintPart = "entry" | "exit" | "resolution";
 export type MismatchClass = "nextRun" | "d13" | "unexplained";
 export const MISMATCH_CLASSES: MismatchClass[] = ["d13", "nextRun", "unexplained"];
@@ -44,15 +56,25 @@ export interface AuditExample {
   /** The earliest event a replay would have to go back to for this signal. */
   rewindTo: number; rewindIso: string;
   why: string;
+  /** The stored `input_hash` and the fingerprint the runner would compute now (null: no request can be built). */
+  stored: string; current: string | null;
+  /** The mode's `paper_executions.computed_at` (what change detection reads), `paper_ledger.sim_terminal`, the lot's state. */
+  computedAt: string | null; simTerminal: boolean | null; lotState: string | null;
+  /** `none`: the decision never opened a lot and only its exit / resolution differ, so those inputs cannot change any
+   *  decision, lot or equity number (docs/PORTFOLIO.md §11, D24 analysis). `possible`: anything else. */
+  effect: "none" | "possible";
 }
-export interface ClassSummary { count: number; earliestTs: number | null; earliestIso: string | null; examples: AuditExample[] }
-export interface MissingSummary { signal: number; execution: number; examples: { signalId: string; kind: string; eventTs: number; missing: "signal" | "execution" }[] }
+export interface ClassSummary { count: number; earliestTs: number | null; earliestIso: string | null; examples: AuditExample[]; /** how many of `count` have effect "none" */ inert: number }
+export interface MissingExample { signalId: string; kind: string; eventTs: number; eventIso: string; missing: "signal" | "execution" }
+export interface MissingSummary { signal: number; execution: number; examples: MissingExample[] }
 export interface DecisionAudit {
   portfolioId: string; mode: ModeName;
   /** The portfolios row exists (the runner has run for real at least once with this exact configuration). */
   found: boolean;
   nothingToAudit: boolean; message: string | null;
   watermark: number | null; changeDetectionSince: number | null; previousRunFinished: boolean | null;
+  /** portfolio_runs.last_run_started_at (seconds), read at the start of the audit. */
+  lastRunStartedAt: number | null;
   checked: number; matches: number; mismatches: number;
   classes: Record<MismatchClass, ClassSummary>;
   missing: MissingSummary;
@@ -75,14 +97,43 @@ export function fingerprintParts(stored: string, current: string | null): Finger
   return out;
 }
 
-const emptyClass = (): ClassSummary => ({ count: 0, earliestTs: null, earliestIso: null, examples: [] });
+/** Per part, what is stored and what is current, for the parts that differ (`entry` is a hash, the others `hash@time`). */
+export interface PartDiff { part: FingerprintPart; stored: string; current: string }
+export function fingerprintPartDiffs(stored: string, current: string | null): PartDiff[] {
+  const a = stored.split("|"), b = (current ?? "|-@-|-@-").split("|"); const names: FingerprintPart[] = ["entry", "exit", "resolution"];
+  return fingerprintParts(stored, current).map((part) => { const i = names.indexOf(part); return { part, stored: a[i] ?? "?", current: current == null ? "(no request)" : b[i] ?? "?" }; });
+}
+
+const emptyClass = (): ClassSummary => ({ count: 0, earliestTs: null, earliestIso: null, examples: [], inert: 0 });
+
+
+/** What the audit knows about one decision when it classes a difference (shared with --explain). */
+interface ClassifyCtx {
+  eventTs: number; request: { key: { ts: number } } | null; lot: AuditExample["lot"];
+  computed: number | null; frozen: boolean; simHashDiffers: boolean;
+  since: number | null; crashed: boolean; W0: number | null;
+}
+/** The runner's own rules (run.ts), first match wins. Pure. */
+function classify(c: ClassifyCtx): { cls: MismatchClass; why: string } {
+  // A moved entry fill is not something the next run repairs: rewindPoint goes back to the *new* fill time, so a
+  // lot opened at the old, earlier time survives in the restored checkpoint (plan D18; docs/PORTFOLIO.md §11).
+  const moved = c.request != null && c.request.key.ts !== c.eventTs;
+  const tail = c.lot === "closed" ? "closed" : "never opened";
+  if (moved && !(c.frozen && c.lot !== "open")) return { cls: "unexplained", why: `its entry fill time moved from ${iso(c.eventTs)} to ${iso(c.request!.key.ts)}; the runner does not replay a moved entry correctly (known limitation)` };
+  if (c.since != null && c.computed != null && c.computed > c.since) return { cls: "nextRun", why: "its execution row was rewritten after the last run started, so the next run's change detection reads it" };
+  if (c.lot === "open") return { cls: "nextRun", why: "its lot is open, and every run re-links open lots to their current exit and resolution (B11)" };
+  if (c.crashed && (c.W0 == null || c.eventTs > c.W0)) return { cls: "nextRun", why: "it was decided after the watermark by a run that did not finish; the next run deletes and replays that range" };
+  if (!c.frozen && c.simHashDiffers) return { cls: "nextRun", why: "the sweep will rewrite its execution row on its next cycle (its $100 record changed); the runner then sees it" };
+  if (c.frozen) return { cls: "d13", why: `its Phase 2 record is final (sim_terminal) or it has no ledger row (never recomputed), and its lot is ${tail}: never re-examined (D13)` };
+  return { cls: "unexplained", why: `nothing will re-examine it: the sweep's $100 record is unchanged (so computed_at never moves) and its lot is ${tail}; the changed input is one the $100 record does not contain` };
+}
 
 /** Audit one portfolio. Reads only. */
 export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefinition, opts: { batchSize?: number; now?: () => number } = {}): Promise<DecisionAudit> {
   const t0 = Date.now(); const now = opts.now ?? (() => Date.now() / 1000);
   const B = Math.max(1, Math.min(AUDIT_BATCH_MAX, opts.batchSize ?? AUDIT_BATCH_MAX)); const exec = MODES[def.mode];
   const out: DecisionAudit = { portfolioId: def.id, mode: def.mode, found: false, nothingToAudit: false, message: null, watermark: null, changeDetectionSince: null, previousRunFinished: null,
-    checked: 0, matches: 0, mismatches: 0, classes: { d13: emptyClass(), nextRun: emptyClass(), unexplained: emptyClass() }, missing: { signal: 0, execution: 0, examples: [] }, inconclusive: null, batches: 0, maxBatchRows: 0, durationMs: 0 };
+    lastRunStartedAt: null, checked: 0, matches: 0, mismatches: 0, classes: { d13: emptyClass(), nextRun: emptyClass(), unexplained: emptyClass() }, missing: { signal: 0, execution: 0, examples: [] }, inconclusive: null, batches: 0, maxBatchRows: 0, durationMs: 0 };
   const must = <T>(r: { data: T; error: { message: string } | null }, what: string): T => { if (r.error) throw new Error(`${what}: ${r.error.message}`); return r.data; };
 
   const { data: p, error: pe } = await db.from("portfolios").select("id").eq("id", def.id).maybeSingle();
@@ -96,14 +147,14 @@ export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefi
   const started = secs(run0?.last_run_started_at), finished = secs(run0?.last_run_finished_at), W0 = secs(run0?.last_watermark_ts);
   const crashed = started != null && (finished == null || finished < started);
   const since = crashed ? (typeof run0?.stats?.runStartedAt === "number" ? run0.stats.runStartedAt : null) : started;
-  out.watermark = W0; out.changeDetectionSince = since; out.previousRunFinished = started == null ? null : !crashed;
+  out.lastRunStartedAt = started; out.watermark = W0; out.changeDetectionSince = since; out.previousRunFinished = started == null ? null : !crashed;
   const leaseHeld = (r: Record<string, any> | null) => { const u = secs(r?.lease_until); return u != null && u > now() ? `a portfolio run holds the lease (${r?.lease_owner ?? "?"}, until ${iso(Math.floor(u))})` : null; };
   const busy0 = leaseHeld(run0);
 
   const note = (cls: MismatchClass, ex: AuditExample) => {
-    const c = out.classes[cls]; c.count++;
+    const c = out.classes[cls]; c.count++; if (ex.effect === "none") c.inert++;
     if (c.earliestTs == null || ex.rewindTo < c.earliestTs) { c.earliestTs = ex.rewindTo; c.earliestIso = iso(ex.rewindTo); }
-    if (c.examples.length < AUDIT_EXAMPLES) c.examples.push(ex);
+    if (c.examples.length < (cls === "unexplained" ? AUDIT_EXAMPLES_KEPT : AUDIT_EXAMPLES)) c.examples.push(ex);
   };
 
   let last = "";
@@ -133,7 +184,7 @@ export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefi
       const id = String(d.signal_id); const eventTs = Math.floor(secs(d.event_ts)!); out.checked++;
       if (!present.has(id) || !execs.has(id)) {
         const missing = !present.has(id) ? "signal" : "execution"; out.missing[missing]++;
-        if (out.missing.examples.length < AUDIT_EXAMPLES) out.missing.examples.push({ signalId: id, kind: d.kind, eventTs, missing });
+        if (out.missing.examples.length < AUDIT_EXAMPLES_KEPT) out.missing.examples.push({ signalId: id, kind: d.kind, eventTs, eventIso: iso(eventTs)!, missing });
         continue;
       }
       const r = reqs.get(id) ?? null; const current = r?.fingerprint ?? null;
@@ -143,20 +194,11 @@ export async function auditDecisionInputs(db: SupabaseClient, def: PortfolioDefi
       // An entry change can move the fill in either direction: the earlier of the stored and the current time.
       const rewindTo = !r ? eventTs : parts.includes("entry") ? Math.min(eventTs, r.key.ts) : rewindPoint(d.input_hash, r) ?? eventTs;
       const x = execs.get(id)!; const l = ledger.get(id); const frozen = !l || l.sim_terminal === true;
-      const st = lots.get(id); const lot: AuditExample["lot"] = !st ? "none" : OPEN.has(st) ? "open" : "closed";
+      const stLot = lots.get(id) ?? null; const lot: AuditExample["lot"] = !stLot ? "none" : OPEN.has(stLot) ? "open" : "closed";
       const computed = secs(x.computed_at);
-      let cls: MismatchClass; let why: string;
-      // A moved entry fill is not something the next run repairs: rewindPoint goes back to the *new* fill time, so a
-      // lot opened at the old, earlier time survives in the restored checkpoint (plan D18; docs/PORTFOLIO.md §11).
-      const moved = r != null && r.key.ts !== eventTs;
-      if (moved && !(frozen && lot !== "open")) { cls = "unexplained"; why = `its entry fill time moved from ${iso(eventTs)} to ${iso(r!.key.ts)}; the runner does not replay a moved entry correctly (known limitation)`; }
-      else if (since != null && computed != null && computed > since) { cls = "nextRun"; why = "its execution row was rewritten after the last run started, so the next run's change detection reads it"; }
-      else if (lot === "open") { cls = "nextRun"; why = "its lot is open, and every run re-links open lots to their current exit and resolution (B11)"; }
-      else if (crashed && (W0 == null || eventTs > W0)) { cls = "nextRun"; why = "it was decided after the watermark by a run that did not finish; the next run deletes and replays that range"; }
-      else if (!frozen && simHash.get(id) !== (x.record_hash ?? undefined)) { cls = "nextRun"; why = "the sweep will rewrite its execution row on its next cycle (its $100 record changed); the runner then sees it"; }
-      else if (frozen) { cls = "d13"; why = `${l ? "its Phase 2 record is final (sim_terminal)" : "it has no ledger row, so the sweep never recomputes it"} and its lot is ${lot === "closed" ? "closed" : "never opened"}: never re-examined (D13)`; }
-      else { cls = "unexplained"; why = `nothing will re-examine it: the sweep's $100 record is unchanged and its lot is ${lot === "closed" ? "closed" : "never opened"}`; }
-      note(cls, { signalId: id, kind: d.kind, eventTs, eventIso: iso(eventTs)!, parts, lot, rewindTo, rewindIso: iso(rewindTo)!, why });
+      const { cls, why } = classify({ eventTs, request: r, lot, computed, frozen, simHashDiffers: !frozen && simHash.get(id) !== (x.record_hash ?? undefined), since, crashed, W0 });
+      const effect: AuditExample["effect"] = lot === "none" && parts.every((p) => p !== "entry") ? "none" : "possible";
+      note(cls, { signalId: id, kind: d.kind, eventTs, eventIso: iso(eventTs)!, parts, lot, rewindTo, rewindIso: iso(rewindTo)!, why, stored: d.input_hash, current, computedAt: computed == null ? null : iso(Math.floor(computed)), simTerminal: l ? l.sim_terminal === true : null, lotState: stLot, effect });
     }
     if (page.length < B) break;
   }
@@ -190,50 +232,206 @@ export function auditExitCode(results: DecisionAudit[]): number {
 
 const n = (v: number) => v.toLocaleString("en-US");
 const utc = (s: number | null) => (s == null ? "—" : `${new Date(s * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+/** Every summary line starts with the mode and the whole portfolio id, so interleaved logs can be told apart. */
+const tag = (r: { mode: string; portfolioId: string }) => `[${r.mode} ${r.portfolioId}]`;
+const short = (v: string | null) => (v == null ? "-" : v);
 
-/** Plain-English summary, one block per portfolio, then the verdict line. */
+/** One unexplained example, as one line. */
+export function exampleLine(r: DecisionAudit, e: AuditExample): string {
+  const diffs = fingerprintPartDiffs(e.stored, e.current).map((d) => `${d.part}: stored=${d.stored} current=${d.current}`).join(" ; ");
+  return `${tag(r)} UNEXPLAINED signal=${e.signalId} kind=${e.kind} event=${e.eventIso} differs=${e.parts.join("+")} (${diffs}) row_computed_at=${short(e.computedAt)} sim_terminal=${e.simTerminal ?? "no-ledger-row"} lot=${e.lotState ?? "none"} last_run_started_at=${short(iso(r.lastRunStartedAt))} replay_from=${e.rewindIso} effect=${e.effect}`;
+}
+export function missingLine(r: DecisionAudit, e: MissingExample): string {
+  return `${tag(r)} MISSING signal=${e.signalId} kind=${e.kind} event=${e.eventIso} missing=${e.missing} last_run_started_at=${short(iso(r.lastRunStartedAt))}`;
+}
+
+/** Compact summary: a few prefixed lines per portfolio, then every unexplained and missing example on one line, then the verdict. */
 export function formatAudit(results: DecisionAudit[], exitCode: number): string {
-  const L: string[] = ["Portfolio input audit (decision D13) — read-only: nothing was written.", ""];
+  const L: string[] = ["[audit] Portfolio input audit (decision D13) — read-only: nothing was written."];
   for (const r of results) {
-    L.push(`${r.mode} (portfolio ${r.portfolioId})`);
-    if (r.nothingToAudit) L.push(`  ${r.message}.`);
+    const t = tag(r);
+    if (r.nothingToAudit) L.push(`${t} ${r.message}.`);
     else {
-      L.push(`  as of watermark ${utc(r.watermark)} · ${n(r.checked)} decisions checked in ${n(r.batches)} page(s) · ${n(r.matches)} match · ${n(r.mismatches)} differ · ${n(r.missing.signal + r.missing.execution)} missing`);
+      L.push(`${t} as of watermark ${utc(r.watermark)} · ${n(r.checked)} checked in ${n(r.batches)} page(s) · ${n(r.matches)} match · ${n(r.mismatches)} differ · ${n(r.missing.signal + r.missing.execution)} missing · last run started ${short(iso(r.lastRunStartedAt))}`);
       const cls: [MismatchClass, string][] = [["d13", "(a) D13 — final Phase 2 record, lot closed or never opened; never re-examined (accepted)"], ["nextRun", "(b) other — the next run re-examines these anyway"], ["unexplained", "(b) other — UNEXPLAINED: nothing will re-examine these"]];
       for (const [k, label] of cls) {
         const c = r.classes[k]; if (!c.count) continue;
-        const parts = { entry: 0, exit: 0, resolution: 0 }; for (const e of c.examples) for (const p of e.parts) parts[p]++;
-        L.push(`  ${label}: ${n(c.count)} · earliest affected event ${utc(c.earliestTs)} (what a replay would have to go back to)`);
-        L.push(`    in the ${c.examples.length} example(s) below: entry differs in ${parts.entry}, exit in ${parts.exit}, resolution in ${parts.resolution}`);
-        for (const e of c.examples.slice(0, 5)) L.push(`    · ${e.signalId.slice(0, 8)} ${e.kind} at ${utc(e.eventTs)} — ${e.parts.join("+")} differ(s); lot ${e.lot}; replay from ${utc(e.rewindTo)}`);
+        L.push(`${t} ${label}: ${n(c.count)} · earliest affected event ${utc(c.earliestTs)}${k === "unexplained" ? ` · no effect on any number (no lot ever opened, only exit/resolution differ): ${n(c.inert)} of ${n(c.count)}` : ""}`);
       }
-      if (r.missing.signal) L.push(`  MISSING: ${n(r.missing.signal)} decision(s) whose signal no longer exists`);
-      if (r.missing.execution) L.push(`  MISSING: ${n(r.missing.execution)} decision(s) whose ${r.mode} execution row no longer exists`);
+      if (r.missing.signal) L.push(`${t} MISSING: ${n(r.missing.signal)} decision(s) whose signal no longer exists`);
+      if (r.missing.execution) L.push(`${t} MISSING: ${n(r.missing.execution)} decision(s) whose ${r.mode} execution row no longer exists`);
+      for (const e of r.classes.unexplained.examples) L.push(exampleLine(r, e));
+      if (r.classes.unexplained.count > r.classes.unexplained.examples.length) L.push(`${t} … ${n(r.classes.unexplained.count - r.classes.unexplained.examples.length)} more unexplained not listed (cap ${AUDIT_EXAMPLES_KEPT}); run with --json --out <file> for the rest`);
+      for (const e of r.missing.examples) L.push(missingLine(r, e));
+      if (r.missing.signal + r.missing.execution > r.missing.examples.length) L.push(`${t} … ${n(r.missing.signal + r.missing.execution - r.missing.examples.length)} more missing not listed (cap ${AUDIT_EXAMPLES_KEPT})`);
     }
-    if (r.inconclusive) L.push(`  INCONCLUSIVE: ${r.inconclusive}`);
-    L.push("");
+    if (r.inconclusive) L.push(`${t} INCONCLUSIVE: ${r.inconclusive}`);
   }
-  L.push(exitCode === AUDIT_EXIT.OK ? "Result: OK — every difference is explained (exit 0)."
-    : exitCode === AUDIT_EXIT.INCONCLUSIVE ? "Result: INCONCLUSIVE — a run was in progress; run the audit again between cycles (exit 3)."
-    : "Result: STOP — unexplained differences or missing rows (exit 1). Do not switch the feature on; see docs/PORTFOLIO.md, Troubleshooting.");
+  L.push(exitCode === AUDIT_EXIT.OK ? "[audit] Result: OK — every difference is explained (exit 0)."
+    : exitCode === AUDIT_EXIT.INCONCLUSIVE ? "[audit] Result: INCONCLUSIVE — a run was in progress on every attempt; run the audit again between cycles (exit 3)."
+    : "[audit] Result: STOP — unexplained differences or missing rows (exit 1). Do not switch the feature on; see docs/PORTFOLIO.md, Troubleshooting.");
   return L.join("\n");
+}
+
+// ───────────────────────────── --explain ─────────────────────────────
+export interface ExplainMode {
+  mode: ModeName; portfolioId: string; signalFound: boolean;
+  decision: { outcome: string; reason: string | null; eventTs: number; eventIso: string; inputHash: string } | null;
+  /** The fingerprint the runner would compute now, with what it is made of. */
+  current: { fingerprint: string; pendingEntry: boolean; exitPendingTs: number | null; exitId: string | null; exitFillTs: number | null; resolutionTs: number | null; entryFillTs: number } | null;
+  parts: PartDiff[];
+  row: { computedAt: string | null; recordHash: string | null; status: string | null; state: string | null; fillTs: string | null } | null;
+  simTerminal: boolean | null; lotState: string | null; lastRunStartedAt: number | null; lastRunFinishedAt: number | null; watermark: number | null;
+  /** Would the runner's change detection read this row next run? (computed_at after the last run's start) */
+  nextRunReadsRow: boolean | null;
+  cls: MismatchClass | "match" | null; why: string; effect: AuditExample["effect"] | null;
+}
+
+/** One signal, every mode: stored input_hash versus the current request fingerprint. Reads only. */
+export async function explainSignal(db: SupabaseClient, cfg: PortfolioRunConfig, signalId: string, opts: { modes?: ModeName[]; now?: () => number } = {}): Promise<ExplainMode[]> {
+  const out: ExplainMode[] = [];
+  const must = <T>(r: { data: T; error: { message: string } | null }, what: string): T => { if (r.error) throw new Error(`${what}: ${r.error.message}`); return r.data; };
+  const inp = await loadBatchInputs(db, [signalId]);
+  const fills = await selectIn<{ id: string; source_fill_id: string | null }>([signalId], (c) => db.from("signals").select("id,source_fill_id").in("id", c as string[]));
+  const sourceFillIds = new Map(fills.map((r) => [String(r.id), r.source_fill_id ?? null]));
+  const built = buildSignals(inp); const present = inp.signals.some((x) => String(x.id) === signalId);
+  const ledgerRow = (await selectIn<{ signal_id: string; sim_terminal: boolean | null }>([signalId], (c) => db.from("paper_ledger").select("signal_id,sim_terminal").in("signal_id", c as string[])))[0] ?? null;
+  for (const def of portfolioDefinitions(cfg, opts.modes)) {
+    const exec = MODES[def.mode];
+    const req = buildRequests(built, inp, exec, { startTs: def.startTs, sourceFillIds }).find((q) => q.signal.signalId === signalId) ?? null;
+    const dec = must(await db.from("portfolio_decisions").select("kind,event_ts,outcome,reason,input_hash").eq("portfolio_id", def.id).eq("signal_id", signalId).maybeSingle(), "portfolio_decisions read") as Record<string, any> | null;
+    const x = must(await db.from("paper_executions").select("signal_id,computed_at,record_hash,status,state,fill_ts").eq("mode", def.mode).eq("signal_id", signalId).maybeSingle(), "paper_executions read") as Record<string, any> | null;
+    const lots = await selectIn<{ signal_id: string; state: string }>([signalId], (c) => db.from("portfolio_lots").select("signal_id,state").eq("portfolio_id", def.id).in("signal_id", c as string[]));
+    const run = must(await db.from("portfolio_runs").select("last_run_started_at,last_run_finished_at,last_watermark_ts,stats").eq("portfolio_id", def.id).maybeSingle(), "portfolio_runs read") as Record<string, any> | null;
+    const started = secs(run?.last_run_started_at), finished = secs(run?.last_run_finished_at), W0 = secs(run?.last_watermark_ts);
+    const crashed = started != null && (finished == null || finished < started);
+    const since = crashed ? (typeof run?.stats?.runStartedAt === "number" ? run.stats.runStartedAt : null) : started;
+    const stLot = lots[0]?.state ?? null; const lot: AuditExample["lot"] = !stLot ? "none" : OPEN.has(stLot) ? "open" : "closed";
+    const computed = secs(x?.computed_at);
+    const frozen = !ledgerRow || ledgerRow.sim_terminal === true;
+    const base: ExplainMode = { mode: def.mode, portfolioId: def.id, signalFound: present, decision: null, current: null, parts: [], row: null, simTerminal: ledgerRow ? ledgerRow.sim_terminal === true : null, lotState: stLot,
+      lastRunStartedAt: started, lastRunFinishedAt: finished, watermark: W0, nextRunReadsRow: since != null && computed != null ? computed > since : null, cls: null, why: "", effect: null };
+    if (x) base.row = { computedAt: computed == null ? null : iso(Math.floor(computed)), recordHash: x.record_hash ?? null, status: x.status ?? null, state: x.state ?? null, fillTs: x.fill_ts == null ? null : String(x.fill_ts) };
+    if (req) base.current = { fingerprint: req.fingerprint, pendingEntry: req.pendingEntry, exitPendingTs: req.exitPendingTs, exitId: req.signal.exitId ?? null, exitFillTs: req.signal.exit ? timeline(req.signal.exit.triggerTs, req.signal.exit.triggerEvalTs, exec).fillTs : req.exitPendingTs, resolutionTs: req.signal.resolution?.ts ?? null, entryFillTs: req.key.ts };
+    if (!present) { base.why = "the signal no longer exists"; out.push(base); continue; }
+    if (!dec) { base.why = req ? "no decision stored for this signal in this portfolio (not decided yet, or excluded by D4)" : "no request can be built (excluded by D4: traded or filled before the start) and no decision is stored"; out.push(base); continue; }
+    const eventTs = Math.floor(secs(dec.event_ts)!); base.decision = { outcome: dec.outcome, reason: dec.reason ?? null, eventTs, eventIso: iso(eventTs)!, inputHash: dec.input_hash };
+    base.parts = fingerprintParts(dec.input_hash, req?.fingerprint ?? null).length ? fingerprintPartDiffs(dec.input_hash, req?.fingerprint ?? null) : [];
+    if (req && req.fingerprint === dec.input_hash) { base.cls = "match"; base.why = "the stored input_hash equals the current fingerprint"; out.push(base); continue; }
+    let simDiffers = false;
+    if (x && !frozen) simDiffers = simulateMode(built.filter((b) => b.id === signalId), inp, exec).records.map((r) => recordHash(r))[0] !== (x.record_hash ?? undefined);
+    const { cls, why } = classify({ eventTs, request: req, lot, computed, frozen, simHashDiffers: simDiffers, since, crashed, W0 });
+    base.cls = cls; base.why = why;
+    base.effect = lot === "none" && base.parts.every((d) => d.part !== "entry") ? "none" : "possible";
+    out.push(base);
+  }
+  return out;
+}
+
+/** Explain output: one line per fact, each starting with the mode and portfolio id. */
+export function formatExplain(signalId: string, rs: ExplainMode[]): string {
+  const L: string[] = [`[explain] signal ${signalId} — read-only`];
+  for (const r of rs) {
+    const t = tag(r);
+    if (!r.signalFound) { L.push(`${t} the signal does not exist`); continue; }
+    L.push(`${t} decision: ${r.decision ? `${r.decision.outcome}${r.decision.reason ? ` (${r.decision.reason})` : ""} at ${r.decision.eventIso}` : "none stored"}`);
+    if (r.decision) L.push(`${t} stored  input_hash: ${r.decision.inputHash}`);
+    if (r.current) L.push(`${t} current fingerprint: ${r.current.fingerprint} · entry fill ${iso(r.current.entryFillTs)}${r.current.exitId ? ` · linked exit ${r.current.exitId} fills ${iso(r.current.exitFillTs)}${r.current.exitPendingTs != null ? " (price pending)" : ""}` : " · no linked exit"}${r.current.resolutionTs != null ? ` · resolution at ${iso(r.current.resolutionTs)}` : " · no resolution"}${r.current.pendingEntry ? " · entry price pending" : ""}`);
+    else L.push(`${t} current fingerprint: none (no request can be built)`);
+    for (const d of r.parts) L.push(`${t} differs in ${d.part}: stored=${d.stored} current=${d.current}`);
+    L.push(`${t} execution row: ${r.row ? `${r.row.status}/${r.row.state} fill_ts=${r.row.fillTs} computed_at=${short(r.row.computedAt)} record_hash=${short(r.row.recordHash)}` : "none"} · sim_terminal=${r.simTerminal ?? "no-ledger-row"} · lot=${r.lotState ?? "none"} · last_run_started_at=${short(iso(r.lastRunStartedAt))} · next run reads this row: ${r.nextRunReadsRow == null ? "unknown" : r.nextRunReadsRow ? "yes" : "no"}`);
+    L.push(`${t} verdict: ${r.cls ?? "n/a"}${r.effect ? ` · effect=${r.effect}` : ""} — ${r.why}`);
+  }
+  return L.join("\n");
+}
+
+// ───────────────────────────── the CLI ─────────────────────────────
+export interface AuditCliOptions {
+  json: boolean; out: string | null; explain: string | null; help: boolean; error: string | null;
+}
+/** `--json`, `--out <file>`, `--explain <signalId>`; `AUDIT_JSON=1` is `--json`. Unknown arguments are an error (exit 2), never ignored. */
+export function parseAuditArgs(argv: string[], env: Record<string, string | undefined> = {}): AuditCliOptions {
+  const o: AuditCliOptions = { json: env.AUDIT_JSON === "1", out: null, explain: null, help: false, error: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]; const eq = a.indexOf("="); const [flag, inline] = eq > 0 && a.startsWith("--") ? [a.slice(0, eq), a.slice(eq + 1)] : [a, null];
+    const value = () => { if (inline != null) return inline; const v = argv[i + 1]; if (v == null || v.startsWith("--")) { o.error = `${flag} needs a value`; return null; } i++; return v; };
+    if (flag === "--json") o.json = true;
+    else if (flag === "--out") o.out = value();
+    else if (flag === "--explain") o.explain = value();
+    else if (flag === "--help" || flag === "-h") o.help = true;
+    else o.error = `unknown argument ${JSON.stringify(a)}`;
+  }
+  if (!o.error && o.out && !o.json && !o.explain) o.json = true;          // --out only makes sense for the JSON
+  return o;
+}
+export const AUDIT_USAGE = "usage: npm run portfolio:audit -- [--json] [--out <file>] [--explain <signalId>]   (AUDIT_JSON=1 is --json)";
+
+/** Print lines in chunks of `pace` lines, one chunk per second, so a log service that drops bursts keeps every line. */
+async function emit(log: (m: string) => void, lines: string[], pace: number, sleep: (ms: number) => Promise<void>) {
+  for (let i = 0; i < lines.length; i += pace) { if (i > 0) await sleep(1000); log(lines.slice(i, i + pace).join("\n")); }
+}
+
+/** Wait (bounded polls, read only) until none of these portfolios holds a lease. */
+async function waitForLease(db: SupabaseClient, ids: string[], now: () => number, sleep: (ms: number) => Promise<void>) {
+  const polls = Math.ceil(AUDIT_RETRY.leaseWaitMs / AUDIT_RETRY.leasePollMs);
+  for (let i = 0; i < polls; i++) {
+    let held = false;
+    for (const id of ids) { const { data } = await db.from("portfolio_runs").select("lease_until").eq("portfolio_id", id).maybeSingle(); const u = secs((data as Record<string, any> | null)?.lease_until); if (u != null && u > now()) held = true; }
+    if (!held) return; await sleep(AUDIT_RETRY.leasePollMs);
+  }
+}
+
+export interface AuditCliDeps {
+  db: () => SupabaseClient; log?: (m: string) => void; now?: () => number; batchSize?: number;
+  argv?: string[]; sleep?: (ms: number) => Promise<void>; writeFile?: (path: string, text: string) => void;
+  /** Test hooks: attempts and gap between them (defaults: 3 attempts, 90 s). */
+  attempts?: number; retryGapMs?: number; pace?: number;
 }
 
 /**
  * The `npm run portfolio:audit` entry point. The configuration is validated before the database client is created, so
  * an unset or invalid PAPER_PORTFOLIO_CONFIG exits 2 without touching the database. Returns the exit code.
  */
-export async function runAuditCli(env: Record<string, string | undefined>, deps: { db: () => SupabaseClient; log?: (m: string) => void; now?: () => number; batchSize?: number }): Promise<number> {
+export async function runAuditCli(env: Record<string, string | undefined>, deps: AuditCliDeps): Promise<number> {
   const log = deps.log ?? console.log; const now = deps.now ?? (() => Date.now() / 1000);
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const writeFile = deps.writeFile ?? ((p: string, t: string) => writeFileSync(p, t));
+  const pace = deps.pace ?? AUDIT_PACE_LINES;
+  const args = parseAuditArgs(deps.argv ?? [], env);
+  if (args.error || args.help) { log(`${args.error ? `portfolio audit: ${args.error}. ` : ""}${AUDIT_USAGE}. Nothing was read.`); return args.error ? AUDIT_EXIT.CONFIG : AUDIT_EXIT.OK; }
   let cfg: PortfolioRunConfig | null;
   try { cfg = portfolioRunConfigFromEnv(env, Math.floor(now())); }
   catch (e) { log(`portfolio audit: invalid configuration — ${e instanceof PortfolioConfigError ? e.message : `PAPER_PORTFOLIO_CONFIG: ${(e as Error).message}`}. Nothing was read.`); return AUDIT_EXIT.CONFIG; }
   if (!cfg) { log("portfolio audit: PAPER_PORTFOLIO_CONFIG is not set, so there is no portfolio to audit. Run it with the worker's exact variables (e.g. `railway run npm run portfolio:audit`). Nothing was read."); return AUDIT_EXIT.CONFIG; }
   const dry = env.PAPER_PORTFOLIO_DRY_RUN;
-  if (dry === "1") log("note: PAPER_PORTFOLIO_DRY_RUN=1 — a dry run writes no decisions, so this audit can only confirm the configuration and the portfolio ids. Run it again after the first real runs.\n");
-  const results = await auditPortfolios(deps.db(), cfg, { now, batchSize: deps.batchSize });
+  if (dry === "1") log("note: PAPER_PORTFOLIO_DRY_RUN=1 — a dry run writes no decisions, so this audit can only confirm the configuration and the portfolio ids. Run it again after the first real runs.");
+  const db = deps.db();
+
+  if (args.explain) {
+    const rs = await explainSignal(db, cfg, args.explain, { now });
+    const lines = formatExplain(args.explain, rs).split("\n");
+    if (args.json) lines.push(...JSON.stringify({ signalId: args.explain, modes: rs }, null, 2).split("\n"));
+    await emit(log, lines, pace, sleep);
+    return rs.some((r) => r.signalFound) ? AUDIT_EXIT.OK : AUDIT_EXIT.UNEXPECTED;
+  }
+
+  // An audit that overlapped a worker cycle is inconclusive by design: retry those modes, up to `attempts` times, waiting
+  // for the lease to be free. Exit 3 only if every attempt was inconclusive.
+  const attempts = Math.max(1, deps.attempts ?? AUDIT_RETRY.attempts); const gap = deps.retryGapMs ?? AUDIT_RETRY.gapMs;
+  let results = await auditPortfolios(db, cfg, { now, batchSize: deps.batchSize }); let attempt = 1;
+  while (results.some((r) => r.inconclusive) && attempt < attempts) {
+    const pending = results.filter((r) => r.inconclusive);
+    log(`[audit] attempt ${attempt}/${attempts}: ${pending.map((r) => `${r.mode} inconclusive`).join(", ")} (a run held the lease or started while the audit was reading); retrying in ${Math.round(gap / 1000)} s`);
+    await sleep(gap); await waitForLease(db, pending.map((r) => r.portfolioId), now, sleep);
+    const again = await auditPortfolios(db, cfg, { now, batchSize: deps.batchSize, modes: pending.map((r) => r.mode) });
+    results = results.map((r) => again.find((a) => a.mode === r.mode) ?? r); attempt++;
+  }
   const code = auditExitCode(results);
-  log(formatAudit(results, code));
-  log(`\n--- JSON ---\n${JSON.stringify({ startTs: cfg.startIso, exitCode: code, portfolios: results }, null, 2)}`);
+  const lines = formatAudit(results, code).split("\n"); lines.splice(lines.length - 1, 0, `[audit] attempts: ${attempt} of ${attempts}`);
+  const payload = JSON.stringify({ startTs: cfg.startIso, exitCode: code, attempts: attempt, portfolios: results }, null, 2);
+  if (args.json && args.out) { writeFile(args.out, payload + "\n"); lines.splice(lines.length - 1, 0, `[audit] full JSON written to ${args.out}`); }
+  else if (args.json) lines.push("--- JSON ---", ...payload.split("\n"));
+  else lines.splice(lines.length - 1, 0, "[audit] full JSON not printed: add --json (paced) or --json --out <file>");
+  await emit(log, lines, pace, sleep);
   return code;
 }

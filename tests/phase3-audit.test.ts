@@ -17,7 +17,7 @@ import { sweepSimulation } from "@/lib/paper/sim/run";
 import type { ModeName, PortfolioConfig } from "@/lib/paper/sim/config";
 import { runPortfolios } from "@/lib/paper/portfolio/run";
 import { validatePortfolioConfig, portfolioDefinitions, type PortfolioRunConfig } from "@/lib/paper/portfolio/config";
-import { auditDecisionInputs, auditPortfolios, auditExitCode, runAuditCli, fingerprintParts, formatAudit, AUDIT_EXIT, type DecisionAudit } from "@/lib/paper/portfolio/audit";
+import { auditDecisionInputs, auditPortfolios, auditExitCode, runAuditCli, fingerprintParts, fingerprintPartDiffs, formatAudit, parseAuditArgs, explainSignal, AUDIT_EXIT, AUDIT_EXAMPLES_KEPT, type DecisionAudit, type AuditCliDeps } from "@/lib/paper/portfolio/audit";
 
 const START = 1_790_000_000; // 2026-09-21T16:53:20Z
 const iso = (s: number) => new Date(s * 1000).toISOString();
@@ -98,9 +98,9 @@ const lotOf = (db: Db, pid: string, id: string) => db.T("portfolio_lots").find((
 const ledgerOf = (db: Db, id: string) => db.T("paper_ledger").find((l) => l.signal_id === id)!;
 const resolved = (db: Db, token: string) => db.T("token_resolutions").some((r) => r.token_id === token);
 const hasExit = (db: Db, e: World["entries"][number]) => db.T("signals").some((s) => s.kind === "EXIT" && s.token_id === e.token && s.wallet === e.wallet);
-const cli = async (db: Db | null, env: Record<string, string | undefined>) => {
+const cli = async (db: Db | null, env: Record<string, string | undefined>, argv: string[] = ["--json"]) => {
   const lines: string[] = []; let opened = 0;
-  const code = await runAuditCli(env, { db: () => { opened++; if (!db) throw new Error("database opened"); return db as never; }, log: (m) => lines.push(m), now: () => clock });
+  const code = await runAuditCli(env, { db: () => { opened++; if (!db) throw new Error("database opened"); return db as never; }, log: (m) => lines.push(m), now: () => clock, argv, sleep: async () => {} });
   const text = lines.join("\n"); const json = text.includes("--- JSON ---") ? JSON.parse(text.split("--- JSON ---\n")[1]) : null;
   return { code, text, json, opened };
 };
@@ -329,6 +329,163 @@ describe("D13 audit", () => {
   });
 });
 
+// ───────────────────────────── Part B: output that survives a log service that drops lines ─────────────────────────────
+describe("audit output for production logs", () => {
+  const hex32 = /^\[(IDEAL|REALISTIC|CONSERVATIVE) [0-9a-f]{32}\] /;
+  /** Make `k` never-filled, non-terminal REALISTIC decisions unexplained (a backfilled source_fill_id the $100 record does not contain). */
+  function stale(w: World, pc: PortfolioConfig, k: number) {
+    const d = def(pc, "REALISTIC"); const ids = w.entries.filter((x) => !lotOf(w.db, d.id, x.id) && ledgerOf(w.db, x.id).sim_terminal === false && decisionsOf(w.db, d.id).some((y) => y.signal_id === x.id)).map((x) => x.id);
+    expect(ids.length, "world too small for this test").toBeGreaterThanOrEqual(k);
+    for (const id of ids.slice(0, k)) w.db.T("signals").find((s) => s.id === id)!.source_fill_id = `0xbackfilled-${id.slice(-4)}`;
+    return ids.slice(0, k);
+  }
+  const run3 = async (w: World, pc: PortfolioConfig, argv: string[], extra: Partial<AuditCliDeps> = {}) => {
+    const calls: string[] = []; const sleeps: number[] = []; const files: Record<string, string> = {};
+    const deps: AuditCliDeps = { db: () => w.db as never, log: (m: string) => calls.push(m), now: () => clock, argv, sleep: async (ms: number) => { sleeps.push(ms); }, writeFile: (f: string, t: string) => { files[f] = t; }, ...extra };
+    const code = await runAuditCli(envOf(pc), deps);
+    return { code, calls, lines: calls.join("\n").split("\n"), sleeps, files };
+  };
+
+  it("every summary line carries the mode and the whole portfolio id; the JSON is not printed unless asked", async () => {
+    const pc = PCS.tight; const w = await decided(240, pc); stale(w, pc, 2);
+    const { code, lines, calls } = await run3(w, pc, []);
+    expect(code).toBe(AUDIT_EXIT.UNEXPECTED);
+    const ids = new Map(ALL.map((m) => [m, def(pc, m).id]));
+    for (const l of lines) expect(l.startsWith("[audit]") || hex32.test(l) || l === "", l).toBe(true);
+    for (const m of ALL) { const mine = lines.filter((l) => l.startsWith(`[${m} ${ids.get(m)}]`)); expect(mine.length, m).toBeGreaterThanOrEqual(1); expect(mine[0], m).toMatch(/checked/); }
+    expect(lines.join("\n")).not.toContain("--- JSON ---"); expect(lines.join("\n")).not.toMatch(/"classes"/);
+    expect(lines.join("\n")).toContain("full JSON not printed: add --json");
+    expect(lines.at(-1)).toMatch(/^\[audit\] Result: STOP/);
+    // few lines in total: the summary of a 3-portfolio audit with 2 unexplained examples
+    expect(lines.length).toBeLessThan(30); expect(calls.length).toBe(1);
+  });
+
+  it("each unexplained example is ONE line with every field the diagnosis needs", async () => {
+    const pc = PCS.tight; const w = await decided(240, pc); const [id] = stale(w, pc, 1); const d = def(pc, "REALISTIC");
+    const { lines } = await run3(w, pc, []); const all = lines.filter((l) => l.includes(" UNEXPLAINED signal="));
+    expect(all).toHaveLength(3);                                        // a signal column: the same signal in every mode, one line each
+    const ex = all.filter((l) => l.startsWith("[REALISTIC ")); expect(ex).toHaveLength(1); const l = ex[0];
+    const dec = decisionsOf(w.db, d.id).find((y) => y.signal_id === id)!; const x = w.db.T("paper_executions").find((r) => r.signal_id === id && r.mode === "REALISTIC")!; const run = w.db.T("portfolio_runs").find((r) => r.portfolio_id === d.id)!;
+    expect(l.startsWith(`[REALISTIC ${d.id}] UNEXPLAINED `)).toBe(true);
+    for (const part of [`signal=${id}`, `kind=${dec.kind}`, `event=${iso(sec(dec.event_ts)).replace(".000Z", "Z")}`, "differs=entry", `stored=${dec.input_hash.split("|")[0]}`, "current=", `row_computed_at=${iso(sec(x.computed_at)).replace(".000Z", "Z")}`, "sim_terminal=false", "lot=none", `last_run_started_at=${iso(sec(run.last_run_started_at)).replace(".000Z", "Z")}`, "effect=possible"]) expect(l, part).toContain(part);
+    expect(l).not.toContain("\n");
+  });
+
+  it("every unexplained example is printed, up to the cap of 50; beyond it the line says how many were left out", async () => {
+    const pc = PCS.tight; const w = await decided(900, pc, 11);
+    const d = def(pc, "REALISTIC");
+    const avail = w.entries.filter((x) => !lotOf(w.db, d.id, x.id) && ledgerOf(w.db, x.id).sim_terminal === false && decisionsOf(w.db, d.id).some((y) => y.signal_id === x.id)).length;
+    expect(avail).toBeGreaterThan(AUDIT_EXAMPLES_KEPT + 5);
+    const mine = (r: { lines: string[] }) => r.lines.filter((l) => l.startsWith("[REALISTIC ") && l.includes("UNEXPLAINED signal="));
+    stale(w, pc, 30); let r = await run3(w, pc, []);
+    expect(mine(r)).toHaveLength(30); expect(r.lines.join("\n")).not.toContain("more unexplained not listed");
+    stale(w, pc, AUDIT_EXAMPLES_KEPT + 7); r = await run3(w, pc, []);
+    expect(mine(r)).toHaveLength(AUDIT_EXAMPLES_KEPT);
+    expect(r.lines.filter((l) => l.startsWith("[REALISTIC ") && l.includes("… 7 more unexplained not listed (cap 50)"))).toHaveLength(1);
+    const res = await audit(w.db, pc); expect(mode(res, "REALISTIC").classes.unexplained.count).toBe(AUDIT_EXAMPLES_KEPT + 7);
+    expect(new Set(mine(r).map((l) => l.match(/signal=(\S+)/)![1])).size).toBe(AUDIT_EXAMPLES_KEPT);   // no duplicates
+    expect(mode(res, "REALISTIC").classes.d13.examples.length).toBeLessThanOrEqual(20);                                                            // the other classes keep their cap of 20
+  }, 120_000);
+
+  it("missing rows are one line each too, with the portfolio's last run start", async () => {
+    const pc = PCS.tight; const w = await decided(200, pc); const d = def(pc, "IDEAL");
+    const [d1, d2] = decisionsOf(w.db, d.id).slice(3, 5).map((x) => x.signal_id);
+    await (w.db.from("paper_executions").delete().eq("signal_id", d1).eq("mode", "IDEAL") as any); await (w.db.from("signals").delete().eq("id", d2) as any);
+    const { lines, code } = await run3(w, pc, []); const ms = lines.filter((l) => l.startsWith("[IDEAL ") && l.includes(" MISSING signal="));
+    expect(code).toBe(1); expect(ms.map((l) => l.match(/signal=(\S+) .*missing=(\w+)/)!.slice(1, 3).join(":")).sort()).toEqual([`${d1}:execution`, `${d2}:signal`].sort());
+    for (const l of ms) { expect(l.startsWith(`[IDEAL ${d.id}] MISSING `)).toBe(true); expect(l).toMatch(/kind=\w+ event=\d{4}-\d\d-\d\dT[\d:]+Z missing=(signal|execution) last_run_started_at=\d{4}/); }
+  });
+
+  it("the full JSON: only with --json or AUDIT_JSON=1, paced in chunks, or written to --out instead of the log", async () => {
+    const pc = PCS.tight; const w = await decided(200, pc); stale(w, pc, 1);
+    const plain = await run3(w, pc, []); expect(plain.calls.join("\n")).not.toContain("--- JSON ---");
+    for (const via of [{ argv: ["--json"], env: {} }, { argv: [], env: { AUDIT_JSON: "1" } }]) {
+      const calls: string[] = []; const sleeps: number[] = [];
+      const code = await runAuditCli({ ...envOf(pc), ...via.env }, { db: () => w.db as never, log: (m) => calls.push(m), now: () => clock, argv: via.argv, sleep: async (ms) => { sleeps.push(ms); }, pace: 40 });
+      expect(code).toBe(1); const text = calls.join("\n"); expect(text).toContain("--- JSON ---");
+      const json = JSON.parse(text.split("--- JSON ---\n")[1]); expect(json.portfolios).toHaveLength(3); expect(json.exitCode).toBe(1); expect(json.attempts).toBe(1);
+      for (const c of calls) expect(c.split("\n").length).toBeLessThanOrEqual(40);        // never a burst above the pace
+      expect(calls.length).toBeGreaterThan(3); expect(sleeps.length).toBe(calls.length - 1); expect(sleeps.every((x) => x === 1000)).toBe(true);
+    }
+    const out = await run3(w, pc, ["--json", "--out", "/tmp/audit.json"]);
+    expect(out.calls.join("\n")).not.toContain("--- JSON ---"); expect(out.calls.join("\n")).toContain("full JSON written to /tmp/audit.json");
+    const written = JSON.parse(out.files["/tmp/audit.json"]); expect(written.portfolios).toHaveLength(3);
+    expect((await run3(w, pc, ["--out", "/tmp/x.json"])).files["/tmp/x.json"]).toBeTruthy();   // --out alone means the JSON
+  });
+
+  it("arguments: unknown or incomplete ones are an error (exit 2, nothing read); --help prints the usage", async () => {
+    expect(parseAuditArgs(["--json"])).toMatchObject({ json: true, out: null, explain: null, error: null });
+    expect(parseAuditArgs([], { AUDIT_JSON: "1" }).json).toBe(true); expect(parseAuditArgs([], { AUDIT_JSON: "0" }).json).toBe(false);
+    expect(parseAuditArgs(["--explain", "abc"]).explain).toBe("abc"); expect(parseAuditArgs(["--explain=abc"]).explain).toBe("abc");
+    expect(parseAuditArgs(["--out", "f.json"])).toMatchObject({ out: "f.json", json: true });
+    for (const bad of [["--frobnicate"], ["--explain"], ["--out"], ["--explain", "--json"], ["stray"]]) expect(parseAuditArgs(bad).error, JSON.stringify(bad)).toBeTruthy();
+    for (const bad of [["--frobnicate"], ["--explain"]]) { const c = await cli(null, envOf(PCS.tight), bad); expect(c.code, JSON.stringify(bad)).toBe(AUDIT_EXIT.CONFIG); expect(c.opened).toBe(0); expect(c.text).toContain("Nothing was read"); }
+    const h = await cli(null, envOf(PCS.tight), ["--help"]); expect(h.code).toBe(0); expect(h.text).toContain("usage: npm run portfolio:audit"); expect(h.opened).toBe(0);
+  });
+
+  it("--explain <signalId>: stored versus current fingerprint for every mode, read-only", async () => {
+    const pc = PCS.tight; const w = await decided(240, pc); const [id] = stale(w, pc, 1);
+    const rs = await explainSignal(w.db as never, cfgOf(pc), id, { now: () => clock });
+    expect(rs.map((r) => r.mode)).toEqual(ALL); const re = rs.find((r) => r.mode === "REALISTIC")!;
+    expect(re).toMatchObject({ signalFound: true, cls: "unexplained", effect: "possible", simTerminal: false, nextRunReadsRow: false });
+    expect(re.parts).toHaveLength(1); expect(re.parts[0]).toMatchObject({ part: "entry" }); expect(re.parts[0].stored).not.toBe(re.parts[0].current);
+    expect(re.decision!.inputHash).toBe(decisionsOf(w.db, def(pc, "REALISTIC").id).find((y) => y.signal_id === id)!.input_hash);
+    expect(re.current!.fingerprint).not.toBe(re.decision!.inputHash);
+    const c = await run3(w, pc, ["--explain", id]); expect(c.code).toBe(0);
+    for (const l of c.lines) expect(l.startsWith("[explain]") || hex32.test(l), l).toBe(true);
+    expect(c.lines.filter((l) => l.startsWith(`[REALISTIC ${def(pc, "REALISTIC").id}]`)).join("\n")).toMatch(/stored  input_hash: .*\n.*current fingerprint: .*\n.*differs in entry: stored=\w+ current=\w+\n.*execution row: .*sim_terminal=false.*next run reads this row: no\n.*verdict: unexplained · effect=possible/);
+    // a matching signal, an unknown signal
+    const ok = w.entries.find((x) => x.id !== id && decisionsOf(w.db, def(pc, "IDEAL").id).some((y) => y.signal_id === x.id))!;
+    expect((await explainSignal(w.db as never, cfgOf(pc), ok.id)).map((r) => r.cls)).toEqual(expect.arrayContaining(["match"]));
+    const unknown = await run3(w, pc, ["--explain", "00000000-0000-4000-8000-00000000ffff"]); expect(unknown.code).toBe(AUDIT_EXIT.UNEXPECTED); expect(unknown.lines.join("\n")).toContain("the signal does not exist");
+    const j = await run3(w, pc, ["--explain", id, "--json"]); expect(JSON.parse(j.calls.join("\n").split("\n").slice(j.lines.findIndex((l) => l === "{")).join("\n")).modes).toHaveLength(3);
+  });
+
+  it("inconclusive: retries by itself, 3 attempts 90 s apart, only the modes that were inconclusive; exit 3 only if every attempt was", async () => {
+    const pc = PCS.tight; const w = await decided(150, pc); const d = def(pc, "IDEAL");
+    const runRow = w.db.T("portfolio_runs").find((r) => r.portfolio_id === d.id)!;
+    // held for good: 3 attempts, two 90 s waits, exit 3, the other modes' results are kept
+    runRow.lease_owner = "worker"; runRow.lease_until = iso(clock + 10 ** 6);
+    let r = await run3(w, pc, []);
+    expect(r.code).toBe(AUDIT_EXIT.INCONCLUSIVE); expect(r.sleeps.filter((x) => x === 90_000)).toHaveLength(2);
+    expect(r.lines.filter((l) => l.startsWith("[audit] attempt "))).toHaveLength(2); expect(r.lines.join("\n")).toContain("[audit] attempts: 3 of 3");
+    expect(r.lines.some((l) => l.startsWith(`[IDEAL ${d.id}] INCONCLUSIVE`))).toBe(true); expect(r.lines.some((l) => /^\[REALISTIC \w+\] INCONCLUSIVE/.test(l))).toBe(false);
+    expect(r.lines.at(-1)).toMatch(/INCONCLUSIVE.*exit 3/);
+    // the run finishes while the audit waits: attempt 2 is conclusive, exit 0 (and the wait polled the lease, read-only)
+    runRow.lease_until = iso(clock + 200);
+    const sleeps: number[] = []; const lines: string[] = [];
+    const code = await runAuditCli(envOf(pc), { db: () => w.db as never, log: (m) => lines.push(m), now: () => clock, argv: [], sleep: async (ms) => { sleeps.push(ms); setClock(clock + ms / 1000); } });
+    expect(code).toBe(AUDIT_EXIT.OK); expect(lines.join("\n")).toContain("[audit] attempts: 2 of 3"); expect(lines.join("\n")).toContain("attempt 1/3: IDEAL inconclusive"); expect(lines.join("\n")).toMatch(/retrying in 90 s/);
+    expect(sleeps[0]).toBe(90_000); expect(lines.join("\n")).not.toContain("INCONCLUSIVE:");
+    // no retry when nothing is inconclusive; attempts is honoured
+    runRow.lease_until = null; runRow.lease_owner = null; r = await run3(w, pc, []); expect(r.sleeps).toEqual([]); expect(r.code).toBe(0);
+    runRow.lease_owner = "worker"; runRow.lease_until = iso(clock + 10 ** 6); r = await run3(w, pc, [], { attempts: 1 }); expect(r.code).toBe(3); expect(r.sleeps.filter((x) => x === 90_000)).toHaveLength(0);
+  });
+
+  it("stays strictly read-only through every new path (--json --out, --explain, the retry wait): a database that throws on any write or RPC is never tripped", async () => {
+    const pc = PCS.tight; const w = await decided(150, pc); const [id] = stale(w, pc, 1); const d = def(pc, "IDEAL");
+    const runRow = w.db.T("portfolio_runs").find((r) => r.portfolio_id === d.id)!; runRow.lease_owner = "worker"; runRow.lease_until = iso(clock + 200);
+    const dumpNoRuns = () => JSON.stringify(Object.entries(w.db.tables).filter(([t, rows]) => rows.length && t !== "portfolio_runs").sort(([a], [b]) => a.localeCompare(b)));   // the test edits the lease itself
+    const calls: string[] = []; const before = dumpNoRuns(); const writes = JSON.stringify(w.db.stats.writes) + JSON.stringify(w.db.stats.deletes);
+    const spy = { rpc: (name: string) => { calls.push(`rpc:${name}`); throw new Error(`write-capable RPC ${name}`); },
+      from: (table: string) => new Proxy(w.db.from(table), { get(t, p, r) { if (["insert", "upsert", "update", "delete"].includes(String(p))) return () => { calls.push(`${String(p)}:${table}`); throw new Error(`write ${String(p)} on ${table}`); }; const v = Reflect.get(t, p, r); return typeof v === "function" ? v.bind(t) : v; } }) };
+    const sleep = async (ms: number) => { setClock(clock + ms / 1000); };
+    for (const argv of [["--json", "--out", "/tmp/a.json"], ["--explain", id], ["--json"]]) {
+      runRow.lease_until = iso(clock + 200);
+      await runAuditCli(envOf(pc), { db: () => spy as never, log: () => {}, now: () => clock, argv, sleep, writeFile: () => {} });
+    }
+    expect(calls).toEqual([]); expect(dumpNoRuns()).toBe(before);
+    expect(JSON.stringify(w.db.stats.writes) + JSON.stringify(w.db.stats.deletes)).toBe(writes);
+  });
+
+  it("fingerprintPartDiffs pairs the stored and current part of each differing part", () => {
+    expect(fingerprintPartDiffs("a|-@-|-@-", "a|b@5|-@-")).toEqual([{ part: "exit", stored: "-@-", current: "b@5" }]);
+    expect(fingerprintPartDiffs("a|b@5|c@9", "z|b@5|d@9")).toEqual([{ part: "entry", stored: "a", current: "z" }, { part: "resolution", stored: "c@9", current: "d@9" }]);
+    expect(fingerprintPartDiffs("a|b@5|c@9", null)).toEqual([{ part: "entry", stored: "a", current: "(no request)" }]);
+    expect(fingerprintPartDiffs("a|b@5|c@9", "a|b@5|c@9")).toEqual([]);
+  });
+});
+
 // ───────────────────────────── test 9: the docs cannot silently drift from the code ─────────────────────────────
 describe("docs/PORTFOLIO.md names everything the code can emit or read", () => {
   const doc = readFileSync(path.join(ROOT, "docs/PORTFOLIO.md"), "utf8");
@@ -367,6 +524,15 @@ describe("docs/PORTFOLIO.md names everything the code can emit or read", () => {
     const ok = validatePortfolioConfig({ ...ex, startTs: "2026-09-27T04:26:41Z" }, Date.parse("2026-09-28T00:00:00Z") / 1000);
     expect(ok.startIso).toBe("2026-09-27T04:26:41.000Z");
     expect(doc).toContain("example values, not a recommendation");
+  });
+  it("the audit's options, retry, output and the D24–D26 decisions are documented, and the plan and the analysis agree with them", () => {
+    const code = src("src/lib/paper/portfolio/audit.ts"); const plan = src("docs/PHASE3_PLAN.md"); const d24 = src("docs/PHASE3_D24_ANALYSIS.md");
+    for (const flag of ["--json", "--out", "--explain", "--help"]) { expect(code, flag).toContain(`"${flag}"`); expect(doc, flag).toContain(flag); }
+    for (const w of ["AUDIT_JSON", "up to 3 attempts, 90 s apart", "one line per unexplained or missing", "up to 50", "effect=none", "effect=possible", "200 lines", "unknown argument"]) expect(doc, w).toContain(w);
+    expect(code).toMatch(/attempts: 3, gapMs: 90_000/); expect(code).toContain("AUDIT_EXAMPLES_KEPT = 50"); expect(code).toContain("AUDIT_PACE_LINES = 200");
+    for (const id of ["D24", "D25", "D26"]) { expect(plan, id).toMatch(new RegExp(`^\\| ${id} \\|`, "m")); expect(doc, id).toContain(`**${id} —`); }
+    expect(doc).toContain("docs/PHASE3_D24_ANALYSIS.md"); expect(d24).toContain("analysis only"); expect(d24).toContain("adopt, with conditions");
+    expect(readFileSync(path.join(ROOT, "scripts/portfolio-audit.ts"), "utf8")).toContain("argv: process.argv.slice(2)");
   });
   it("README, PAPER_EXECUTION and DEPLOY link to it", () => {
     expect(src("README.md")).toContain("](docs/PORTFOLIO.md)"); expect(src("docs/PAPER_EXECUTION.md")).toContain("](PORTFOLIO.md)");
