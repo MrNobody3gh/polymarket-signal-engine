@@ -620,14 +620,16 @@ Found in the first production audit (29 Sep 2026); decisions D24–D26 (decided 
   When the frontier is an unpriced exit that fills before entries the book already took, the run stored the later state
   under the earlier watermark; a rewind that restored it stopped with `rehydration did not converge` on every run. Reachable
   since D24 removed the rewinds that used to go back beyond it (reproduced by `tests/phase3-job.test.ts` R4 world 29).
-  Fix: `run.ts` writes no checkpoint whose state is past its second (`tests/phase3-d27.test.ts`). **Owner: confirm.**
+  Fix: `run.ts` writes no checkpoint whose state is past its second (`tests/phase3-d27.test.ts`). **Confirmed by the owner 30 Sep 2026** (D24 needs it).
 - **D28 — one class of stale hash remains, on decisions that opened a lot.** A lot closed by a resolution, then an exit that
   arrives later: the $100 record does not contain the exit, so its row never moves; the whole hash differs; the audit reports
   it `unexplained`, `effect=possible`, exit 1 (seen in 1 of 16 synthetic worlds; numbers equal a fresh replay; none in the 29 Sep
   production data). Options: (a) leave (the gate then stops on it); (b) also compare the exit part only up to the lot's close
-  for closed lots; (c) classify it D13. **Owner decides.**
+  for closed lots; (c) classify it D13. **Decided 30 Sep 2026: (a) leave.** It is rare (none in production), the numbers
+  stay equal to a fresh replay, and the audit lists it so a person looks at it if it ever appears; revisit then.
 - **D29 — D13 narrowed to closed lots.** An entry-part change on a never-opened decision whose record is final was D13
-  (accepted); it is now `unexplained` (exit 1), as the brief's "closed lots only" requires. **Owner: confirm.**
+  (accepted); it is now `unexplained` (exit 1), as the brief's "closed lots only" requires. **Confirmed by the owner 30 Sep 2026:** reporting it is more honest than
+  accepting it.
 
 Other limitations: IDEAL is not causal (§2); marks are the only market-value evidence (§5); spread, impact and
 liquidity are approximations (`docs/PAPER_EXECUTION.md`); `/execution` cannot tell "off" from "dry run" and keeps the
