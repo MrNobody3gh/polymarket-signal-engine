@@ -47,7 +47,7 @@ Both scripts need only `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY
 
 Status: every recommendation in the third column stands as decided. D59–D62 are already implemented as described; D63–D65 and D70–D71 are carried into the build steps named in the table; D66 is revisited with S1b's `freshAtFinal`; D67–D69 and D72 are acted on in the order of the run sheet above.
 
-## Step 4.0b: new open decisions (continue from D72)
+## Step 4.0b: decisions D73–D78 (**accepted as recommended by the owner, 3 Oct 2026**)
 
 Nothing was measured by this step (no venue or database access); these are the choices the new measurements will present, with the options. The owner decides.
 
@@ -59,3 +59,5 @@ Nothing was measured by this step (no venue or database access); these are the c
 | D76 | Per-sport quota for the `gameStartTime` evidence: ≥ 100 markets from ≥ 30 distinct events | Keep; or lower for sports that cannot reach it, with the shortfall stated |
 | D77 | The US query syntax for `categories` and `sportsMarketTypes` and the archived query | Set from `docs.polymarket.us` before the targeted run (`--us-targeted`, `--us-archived-query`); the defaults are guesses |
 | D78 | Cross-venue participant matching without an alias list ("Man City" / "Manchester City" scores 0.33 and is not matched) | Accept the loss and read the matched/head-to-head counts; or add a small alias table per sport after the first run |
+
+Status: D73, D75, D76 and D78 stand as recommended. D74 is confirmed for Eastern placeholders; **whether a date-level time rule may exist at all stays open** until the 4.0b run's numbers are read. D77: the audit and the diagnostic are run with the default US queries and the queries are corrected from any errors (`--us-targeted`, `--us-archived-query`).
