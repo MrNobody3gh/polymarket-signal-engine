@@ -71,6 +71,14 @@ describe("feasibility table", () => {
   it("subset statistics", () => {
     const s = subsetStats("x", trades); expect(s).toMatchObject({ n: 40, markets: 40, wallets: 5, deff: 1 }); expect(s.meanPts).toBeCloseTo(0, 9); expect(s.sdPts).toBeCloseTo(90.1, 1); expect(s.holdP50Days).toBe(1); expect(s.holdP90Days).toBeCloseTo(1.9, 6);
   });
+  it("zero measured eligible flow is reported as unreachable, not thrown (found on the first production run)", () => {
+    const r = buildFeasibility(trades, { eligiblePerDay: { value: 0, basis: "test: no eligible signal on any complete day" } });
+    for (const sub of r.subsets) for (const d of sub.days) { expect(d.days).toBeNull(); expect(d.feasibleWithinWindow).toBe(false); expect(d.noEligibleFlow).toBe(true); }
+    expect(r.subsets[0].days.length).toBeGreaterThan(0);
+    for (const sub of r.subsets) for (const w of sub.whatChanges) expect(w.minDetectableEffectPts).toBeNull();
+    const nonsense = buildFeasibility(trades, { eligiblePerDay: { value: Number.NaN, basis: "test" } });
+    for (const d of nonsense.subsets[0].days) expect(d.feasibleWithinWindow).toBe(false);
+  });
   it("per-arm sizes use the measured SD and DEFF, and the days table follows daysToSample", () => {
     const r = buildFeasibility(trades, { eligiblePerDay: { value: 100, basis: "test" } }); const all = r.subsets[0];
     const n10 = all.sampleSize.find((x) => x.effectPts === 10)!; expect(n10.perArmIndependent).toBe(sampleSizePerArm({ sd: all.stats.sdPts!, effect: 10 })); expect(n10.perArmClustered).toBe(n10.perArmIndependent);

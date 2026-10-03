@@ -26,7 +26,7 @@ export const ACCEPT_RATES = [0.1, 0.25, 0.5] as const;
 
 export interface SubsetStats { name: string; n: number; markets: number; wallets: number; meanPts: number | null; sdPts: number | null; icc: number | null; deff: number; deffNote: string | null; holdP50Days: number | null; holdP90Days: number | null }
 export interface EffectRow { effectPts: number; perArmIndependent: number | null; perArmClustered: number | null }
-export interface DaysRow { effectPts: number; acceptRate: number; lag: "median" | "p90"; lagDays: number; perArm: number; days: number | null; feasibleWithinWindow: boolean | null }
+export interface DaysRow { effectPts: number; acceptRate: number; lag: "median" | "p90"; lagDays: number; perArm: number; days: number | null; feasibleWithinWindow: boolean | null; /** true when the measured eligible flow is zero: the sample is unreachable, which is a result, not an error */ noEligibleFlow?: boolean }
 export interface WhatChanges { effectPts: number; acceptRate: number; /** eligible signals per day needed to reach perArm inside the window with the p90 lag */ requiredEligiblePerDay: number | null; /** smallest effect (points) detectable inside the window at the measured eligible rate and the p90 lag */ minDetectableEffectPts: number | null }
 export interface FeasibilityResult {
   windowDays: number; eligiblePerDay: { value: number; basis: string } | null; settledShare: number;
@@ -49,8 +49,10 @@ export function buildFeasibility(trades: SettledTrade[], o: { eligiblePerDay: { 
     const days: DaysRow[] = []; const whatChanges: WhatChanges[] = [];
     for (const row of sampleSize) for (const a of ACCEPT_RATES) for (const [lag, lagDays] of [["median", stats.holdP50Days ?? 0], ["p90", stats.holdP90Days ?? 0]] as const) {
       const perArm = row.perArmClustered!;
-      const d = o.eligiblePerDay ? daysToSample({ perArm, eligiblePerDay: o.eligiblePerDay.value, acceptRate: a, settlementLagDays: lagDays, settledShare: share }) : null;
-      days.push({ effectPts: row.effectPts, acceptRate: a, lag, lagDays, perArm, days: d, feasibleWithinWindow: d === null ? null : d <= W });
+      // A measured eligible flow of exactly zero (or not a positive number) makes the sample unreachable: report it, never throw.
+      const flow = o.eligiblePerDay ? o.eligiblePerDay.value : null; const noFlow = flow !== null && !(flow > 0);
+      const d = flow !== null && !noFlow ? daysToSample({ perArm, eligiblePerDay: flow, acceptRate: a, settlementLagDays: lagDays, settledShare: share }) : null;
+      days.push({ effectPts: row.effectPts, acceptRate: a, lag, lagDays, perArm, days: d, feasibleWithinWindow: noFlow ? false : d === null ? null : d <= W, ...(noFlow ? { noEligibleFlow: true } : {}) });
     }
     const lag90 = stats.holdP90Days ?? 0;
     for (const row of sampleSize) for (const a of ACCEPT_RATES) {
