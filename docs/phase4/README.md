@@ -25,7 +25,7 @@ Both scripts need only `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY
 
 **Not run.** The authoring environment's network policy returned `403 Host not in allowlist` for every venue host (Gamma, `docs.polymarket.us`, `gateway.polymarket.us`, `api.polymarket.us`) and no database was configured. See S1a §1 for the exact attempts. Everything else (libraries, scripts, tests, Part A and Part D) is complete.
 
-## New open decisions (continue from D58)
+## Decisions D59–D72 (**accepted as recommended by the owner, 3 Oct 2026**)
 
 | # | Decision | Recommendation |
 |---|---|---|
@@ -43,3 +43,5 @@ Both scripts need only `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY
 | D70 | A watchlist-freshness gate (GAP_REPORT A4): reject when `wallets.scored_at` is older than N hours | Yes, small, in 4.2 |
 | D71 | A "recent performance window" in the wallet context (A5): add a stored 7/30-day value or drop the words | Drop from V1 unless S1b shows a gradient |
 | D72 | Book-capture cadence, N levels, raw retention, REJECT-arm `FILL_PROBE` (S1c §8) | As proposed in S1c |
+
+Status: every recommendation in the third column stands as decided. D59–D62 are already implemented as described; D63–D65 and D70–D71 are carried into the build steps named in the table; D66 is revisited with S1b's `freshAtFinal`; D67–D69 and D72 are acted on in the order of the run sheet above.
