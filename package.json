@@ -15,7 +15,10 @@
     "bot": "tsx scripts/bot-poll.ts",
     "tg:setup": "tsx scripts/telegram-setup.ts",
     "portfolio:audit": "tsx scripts/portfolio-audit.ts",
-    "db:push": "supabase db push"
+    "db:push": "supabase db push",
+    "phase4:ts-audit": "tsx scripts/phase4/timestamp-audit.ts",
+    "phase4:coverage": "tsx scripts/phase4/coverage-probe.ts",
+    "phase4:mutations": "tsx scripts/phase4/mutation-check.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

@@ -1,0 +1,812 @@
+[
+ {
+  "id": "us-500001",
+  "slug": "nba-0",
+  "question": "Lakers vs Celtics (0)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-10T15:15:00+00:00",
+  "closeTime": "2026-10-10T18:15:00Z",
+  "event": {
+   "id": "ev-0",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500002",
+  "slug": "nba-1",
+  "question": "Warriors vs Knicks (1)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-18T11:30:00+00:00",
+  "closeTime": "2026-09-18T14:30:00Z",
+  "settledAt": "2026-09-18T14:54:32Z",
+  "event": {
+   "id": "ev-1",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500003",
+  "slug": "nba-2",
+  "question": "Bulls vs Heat (2)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-10T00:35:00+00:00",
+  "closeTime": "2026-10-10T03:30:00Z",
+  "event": {
+   "id": "ev-2",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500004",
+  "slug": "nba-3",
+  "question": "Nets vs Suns (3)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-26T14:40:00+00:00",
+  "closeTime": "2026-09-26T17:45:00Z",
+  "settledAt": "2026-09-26T18:38:36Z",
+  "event": {
+   "id": "ev-3",
+   "title": "Nets vs Suns"
+  }
+ },
+ {
+  "id": "us-500005",
+  "slug": "nba-4",
+  "question": "Mavericks vs Clippers (4)",
+  "outcomes": "[\"Mavericks\",\"Clippers\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-23T12:25:00+00:00",
+  "closeTime": "2026-10-23T15:15:00Z",
+  "event": {
+   "id": "ev-4",
+   "title": "Mavericks vs Clippers"
+  }
+ },
+ {
+  "id": "us-500006",
+  "slug": "nba-5",
+  "question": "Spurs vs Jazz (5)",
+  "outcomes": "[\"Spurs\",\"Jazz\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-18T07:05:00+00:00",
+  "closeTime": "2026-09-18T10:15:00Z",
+  "settledAt": "2026-09-18T10:35:30Z",
+  "event": {
+   "id": "ev-5",
+   "title": "Spurs vs Jazz"
+  }
+ },
+ {
+  "id": "us-500007",
+  "slug": "nba-6",
+  "question": "Hawks vs Magic (6)",
+  "outcomes": "[\"Hawks\",\"Magic\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-07T08:20:00+00:00",
+  "closeTime": "2026-10-07T11:00:00Z",
+  "event": {
+   "id": "ev-6",
+   "title": "Hawks vs Magic"
+  }
+ },
+ {
+  "id": "us-500008",
+  "slug": "nba-7",
+  "question": "Pistons vs Raptors (7)",
+  "outcomes": "[\"Pistons\",\"Raptors\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-23T20:45:00+00:00",
+  "closeTime": "2026-09-24T00:15:00Z",
+  "settledAt": "2026-09-24T00:15:39Z",
+  "event": {
+   "id": "ev-7",
+   "title": "Pistons vs Raptors"
+  }
+ },
+ {
+  "id": "us-500009",
+  "slug": "nba-8",
+  "question": "Lakers vs Celtics (8)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-12T11:45:00+00:00",
+  "closeTime": "2026-10-12T14:45:00Z",
+  "event": {
+   "id": "ev-8",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500010",
+  "slug": "nba-9",
+  "question": "Warriors vs Knicks (9)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-25T18:15:00+00:00",
+  "closeTime": "2026-09-25T21:00:00Z",
+  "settledAt": "2026-09-25T21:43:28Z",
+  "event": {
+   "id": "ev-9",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500011",
+  "slug": "nba-10",
+  "question": "Bulls vs Heat (10)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-16T12:15:00+00:00",
+  "closeTime": "2026-10-16T15:15:00Z",
+  "event": {
+   "id": "ev-10",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500012",
+  "slug": "nba-11",
+  "question": "Nets vs Suns (11)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-20T12:15:00+00:00",
+  "closeTime": "2026-09-20T15:15:00Z",
+  "settledAt": "2026-09-20T15:30:31Z",
+  "event": {
+   "id": "ev-11",
+   "title": "Nets vs Suns"
+  }
+ },
+ {
+  "id": "us-500013",
+  "slug": "nba-12",
+  "question": "Mavericks vs Clippers (12)",
+  "outcomes": "[\"Mavericks\",\"Clippers\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-09T19:35:00+00:00",
+  "closeTime": "2026-10-09T22:30:00Z",
+  "event": {
+   "id": "ev-12",
+   "title": "Mavericks vs Clippers"
+  }
+ },
+ {
+  "id": "us-500014",
+  "slug": "nba-13",
+  "question": "Spurs vs Jazz (13)",
+  "outcomes": "[\"Spurs\",\"Jazz\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-25T07:40:00+00:00",
+  "closeTime": "2026-09-25T10:45:00Z",
+  "settledAt": "2026-09-25T11:04:11Z",
+  "event": {
+   "id": "ev-13",
+   "title": "Spurs vs Jazz"
+  }
+ },
+ {
+  "id": "us-500015",
+  "slug": "nba-14",
+  "question": "Hawks vs Magic (14)",
+  "outcomes": "[\"Hawks\",\"Magic\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-17T23:10:00+00:00",
+  "closeTime": "2026-10-18T02:00:00Z",
+  "event": {
+   "id": "ev-14",
+   "title": "Hawks vs Magic"
+  }
+ },
+ {
+  "id": "us-500016",
+  "slug": "nba-15",
+  "question": "Pistons vs Raptors (15)",
+  "outcomes": "[\"Pistons\",\"Raptors\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-23T06:50:00+00:00",
+  "closeTime": "2026-09-23T10:00:00Z",
+  "settledAt": "2026-09-23T10:26:15Z",
+  "event": {
+   "id": "ev-15",
+   "title": "Pistons vs Raptors"
+  }
+ },
+ {
+  "id": "us-500017",
+  "slug": "nba-16",
+  "question": "Lakers vs Celtics (16)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-06T15:20:00+00:00",
+  "closeTime": "2026-10-06T18:00:00Z",
+  "event": {
+   "id": "ev-16",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500018",
+  "slug": "nba-17",
+  "question": "Warriors vs Knicks (17)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-14T23:45:00+00:00",
+  "closeTime": "2026-09-15T03:15:00Z",
+  "settledAt": "2026-09-15T03:36:53Z",
+  "event": {
+   "id": "ev-17",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500019",
+  "slug": "nba-18",
+  "question": "Bulls vs Heat (18)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-16T07:00:00+00:00",
+  "closeTime": "2026-10-16T10:00:00Z",
+  "event": {
+   "id": "ev-18",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500020",
+  "slug": "nba-19",
+  "question": "Nets vs Suns (19)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-26T03:45:00+00:00",
+  "closeTime": "2026-09-26T06:30:00Z",
+  "settledAt": "2026-09-26T07:24:17Z",
+  "event": {
+   "id": "ev-19",
+   "title": "Nets vs Suns"
+  }
+ },
+ {
+  "id": "us-500021",
+  "slug": "nba-20",
+  "question": "Mavericks vs Clippers (20)",
+  "outcomes": "[\"Mavericks\",\"Clippers\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-15T23:30:00+00:00",
+  "closeTime": "2026-10-16T02:30:00Z",
+  "event": {
+   "id": "ev-20",
+   "title": "Mavericks vs Clippers"
+  }
+ },
+ {
+  "id": "us-500022",
+  "slug": "nba-21",
+  "question": "Spurs vs Jazz (21)",
+  "outcomes": "[\"Spurs\",\"Jazz\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-28T02:00:00+00:00",
+  "closeTime": "2026-09-28T05:00:00Z",
+  "settledAt": "2026-09-28T05:12:35Z",
+  "event": {
+   "id": "ev-21",
+   "title": "Spurs vs Jazz"
+  }
+ },
+ {
+  "id": "us-500023",
+  "slug": "nba-22",
+  "question": "Hawks vs Magic (22)",
+  "outcomes": "[\"Hawks\",\"Magic\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-16T16:05:00+00:00",
+  "closeTime": "2026-10-16T19:00:00Z",
+  "event": {
+   "id": "ev-22",
+   "title": "Hawks vs Magic"
+  }
+ },
+ {
+  "id": "us-500024",
+  "slug": "nba-23",
+  "question": "Pistons vs Raptors (23)",
+  "outcomes": "[\"Pistons\",\"Raptors\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-15T06:55:00+00:00",
+  "closeTime": "2026-09-15T10:00:00Z",
+  "settledAt": "2026-09-15T10:52:22Z",
+  "event": {
+   "id": "ev-23",
+   "title": "Pistons vs Raptors"
+  }
+ },
+ {
+  "id": "us-500025",
+  "slug": "nba-24",
+  "question": "Lakers vs Celtics (24)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-12T16:10:00+00:00",
+  "closeTime": "2026-10-12T19:00:00Z",
+  "event": {
+   "id": "ev-24",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500026",
+  "slug": "nba-25",
+  "question": "Warriors vs Knicks (25)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-01T13:05:00+00:00",
+  "closeTime": "2026-10-01T16:15:00Z",
+  "settledAt": "2026-10-01T16:49:10Z",
+  "event": {
+   "id": "ev-25",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500027",
+  "slug": "nba-26",
+  "question": "Bulls vs Heat (26)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-09T13:20:00+00:00",
+  "closeTime": "2026-10-09T16:00:00Z",
+  "event": {
+   "id": "ev-26",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500028",
+  "slug": "nba-27",
+  "question": "Nets vs Suns (27)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-02T02:45:00+00:00",
+  "closeTime": "2026-10-02T06:15:00Z",
+  "settledAt": "2026-10-02T06:21:22Z",
+  "event": {
+   "id": "ev-27",
+   "title": "Nets vs Suns"
+  }
+ },
+ {
+  "id": "us-500029",
+  "slug": "nba-28",
+  "question": "Mavericks vs Clippers (28)",
+  "outcomes": "[\"Mavericks\",\"Clippers\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-20T03:00:00+00:00",
+  "closeTime": "2026-10-20T06:00:00Z",
+  "event": {
+   "id": "ev-28",
+   "title": "Mavericks vs Clippers"
+  }
+ },
+ {
+  "id": "us-500030",
+  "slug": "nba-29",
+  "question": "Spurs vs Jazz (29)",
+  "outcomes": "[\"Spurs\",\"Jazz\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-04T11:30:00+00:00",
+  "closeTime": "2026-10-04T14:15:00Z",
+  "settledAt": "2026-10-04T14:20:34Z",
+  "event": {
+   "id": "ev-29",
+   "title": "Spurs vs Jazz"
+  }
+ },
+ {
+  "id": "us-500031",
+  "slug": "nba-30",
+  "question": "Hawks vs Magic (30)",
+  "outcomes": "[\"Hawks\",\"Magic\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-09T03:30:00+00:00",
+  "closeTime": "2026-10-09T06:30:00Z",
+  "event": {
+   "id": "ev-30",
+   "title": "Hawks vs Magic"
+  }
+ },
+ {
+  "id": "us-500032",
+  "slug": "nba-31",
+  "question": "Pistons vs Raptors (31)",
+  "outcomes": "[\"Pistons\",\"Raptors\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-18T05:30:00+00:00",
+  "closeTime": "2026-09-18T08:30:00Z",
+  "settledAt": "2026-09-18T08:51:02Z",
+  "event": {
+   "id": "ev-31",
+   "title": "Pistons vs Raptors"
+  }
+ },
+ {
+  "id": "us-500033",
+  "slug": "nba-32",
+  "question": "Lakers vs Celtics (32)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-15T12:20:00+00:00",
+  "closeTime": "2026-10-15T15:15:00Z",
+  "event": {
+   "id": "ev-32",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500034",
+  "slug": "nba-33",
+  "question": "Warriors vs Knicks (33)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-02T08:10:00+00:00",
+  "closeTime": "2026-10-02T11:15:00Z",
+  "settledAt": "2026-10-02T11:40:37Z",
+  "event": {
+   "id": "ev-33",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500035",
+  "slug": "nba-34",
+  "question": "Bulls vs Heat (34)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-22T05:55:00+00:00",
+  "closeTime": "2026-10-22T08:45:00Z",
+  "event": {
+   "id": "ev-34",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500036",
+  "slug": "nba-35",
+  "question": "Nets vs Suns (35)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-23T12:20:00+00:00",
+  "closeTime": "2026-09-23T15:30:00Z",
+  "settledAt": "2026-09-23T15:35:59Z",
+  "event": {
+   "id": "ev-35",
+   "title": "Nets vs Suns"
+  }
+ },
+ {
+  "id": "us-500037",
+  "slug": "nba-36",
+  "question": "Mavericks vs Clippers (36)",
+  "outcomes": "[\"Mavericks\",\"Clippers\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-22T03:20:00+00:00",
+  "closeTime": "2026-10-22T06:00:00Z",
+  "event": {
+   "id": "ev-36",
+   "title": "Mavericks vs Clippers"
+  }
+ },
+ {
+  "id": "us-500038",
+  "slug": "nba-37",
+  "question": "Spurs vs Jazz (37)",
+  "outcomes": "[\"Spurs\",\"Jazz\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-02T17:15:00+00:00",
+  "closeTime": "2026-10-02T20:45:00Z",
+  "settledAt": "2026-10-02T21:35:45Z",
+  "event": {
+   "id": "ev-37",
+   "title": "Spurs vs Jazz"
+  }
+ },
+ {
+  "id": "us-500039",
+  "slug": "nba-38",
+  "question": "Hawks vs Magic (38)",
+  "outcomes": "[\"Hawks\",\"Magic\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-10T16:45:00+00:00",
+  "closeTime": "2026-10-10T19:45:00Z",
+  "event": {
+   "id": "ev-38",
+   "title": "Hawks vs Magic"
+  }
+ },
+ {
+  "id": "us-500040",
+  "slug": "nba-39",
+  "question": "Pistons vs Raptors (39)",
+  "outcomes": "[\"Pistons\",\"Raptors\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-29T18:15:00+00:00",
+  "closeTime": "2026-09-29T21:00:00Z",
+  "settledAt": "2026-09-29T21:41:20Z",
+  "event": {
+   "id": "ev-39",
+   "title": "Pistons vs Raptors"
+  }
+ },
+ {
+  "id": "us-500041",
+  "slug": "nba-40",
+  "question": "Lakers vs Celtics (40)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-21T05:45:00+00:00",
+  "closeTime": "2026-10-21T08:45:00Z",
+  "event": {
+   "id": "ev-40",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500042",
+  "slug": "nba-41",
+  "question": "Warriors vs Knicks (41)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-20T04:30:00+00:00",
+  "closeTime": "2026-09-20T07:30:00Z",
+  "settledAt": "2026-09-20T08:05:35Z",
+  "event": {
+   "id": "ev-41",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500043",
+  "slug": "nba-42",
+  "question": "Bulls vs Heat (42)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-09T02:35:00+00:00",
+  "closeTime": "2026-10-09T05:30:00Z",
+  "event": {
+   "id": "ev-42",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500044",
+  "slug": "nba-43",
+  "question": "Nets vs Suns (43)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-02T15:55:00+00:00",
+  "closeTime": "2026-10-02T19:00:00Z",
+  "settledAt": "2026-10-02T19:16:01Z",
+  "event": {
+   "id": "ev-43",
+   "title": "Nets vs Suns"
+  }
+ },
+ {
+  "id": "us-500045",
+  "slug": "nba-44",
+  "question": "Mavericks vs Clippers (44)",
+  "outcomes": "[\"Mavericks\",\"Clippers\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-18T11:40:00+00:00",
+  "closeTime": "2026-10-18T14:30:00Z",
+  "event": {
+   "id": "ev-44",
+   "title": "Mavericks vs Clippers"
+  }
+ },
+ {
+  "id": "us-500046",
+  "slug": "nba-45",
+  "question": "Spurs vs Jazz (45)",
+  "outcomes": "[\"Spurs\",\"Jazz\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-15T08:05:00+00:00",
+  "closeTime": "2026-09-15T11:15:00Z",
+  "settledAt": "2026-09-15T11:57:27Z",
+  "event": {
+   "id": "ev-45",
+   "title": "Spurs vs Jazz"
+  }
+ },
+ {
+  "id": "us-500047",
+  "slug": "nba-46",
+  "question": "Hawks vs Magic (46)",
+  "outcomes": "[\"Hawks\",\"Magic\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-22T17:20:00+00:00",
+  "closeTime": "2026-10-22T20:00:00Z",
+  "event": {
+   "id": "ev-46",
+   "title": "Hawks vs Magic"
+  }
+ },
+ {
+  "id": "us-500048",
+  "slug": "nba-47",
+  "question": "Pistons vs Raptors (47)",
+  "outcomes": "[\"Pistons\",\"Raptors\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-18T18:45:00+00:00",
+  "closeTime": "2026-09-18T22:15:00Z",
+  "settledAt": "2026-09-18T22:45:02Z",
+  "event": {
+   "id": "ev-47",
+   "title": "Pistons vs Raptors"
+  }
+ },
+ {
+  "id": "us-500049",
+  "slug": "nba-48",
+  "question": "Lakers vs Celtics (48)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-25T10:15:00+00:00",
+  "closeTime": "2026-10-25T13:15:00Z",
+  "event": {
+   "id": "ev-48",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500050",
+  "slug": "nba-49",
+  "question": "Warriors vs Knicks (49)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-16T12:45:00+00:00",
+  "closeTime": "2026-09-16T15:30:00Z",
+  "settledAt": "2026-09-16T15:32:56Z",
+  "event": {
+   "id": "ev-49",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500051",
+  "slug": "nba-50",
+  "question": "Bulls vs Heat (50)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-11T08:45:00+00:00",
+  "closeTime": "2026-10-11T11:45:00Z",
+  "event": {
+   "id": "ev-50",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500052",
+  "slug": "nba-51",
+  "question": "Nets vs Suns (51)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-03T13:15:00+00:00",
+  "closeTime": "2026-10-03T16:15:00Z",
+  "settledAt": "2026-10-03T17:14:04Z",
+  "event": {
+   "id": "ev-51",
+   "title": "Nets vs Suns"
+  }
+ },
+ {
+  "id": "us-500053",
+  "slug": "nba-52",
+  "question": "Mavericks vs Clippers (52)",
+  "outcomes": "[\"Mavericks\",\"Clippers\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-24T17:05:00+00:00",
+  "closeTime": "2026-10-24T20:00:00Z",
+  "event": {
+   "id": "ev-52",
+   "title": "Mavericks vs Clippers"
+  }
+ },
+ {
+  "id": "us-500054",
+  "slug": "nba-53",
+  "question": "Spurs vs Jazz (53)",
+  "outcomes": "[\"Spurs\",\"Jazz\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-29T00:10:00+00:00",
+  "closeTime": "2026-09-29T03:15:00Z",
+  "settledAt": "2026-09-29T04:05:41Z",
+  "event": {
+   "id": "ev-53",
+   "title": "Spurs vs Jazz"
+  }
+ },
+ {
+  "id": "us-500055",
+  "slug": "nba-54",
+  "question": "Hawks vs Magic (54)",
+  "outcomes": "[\"Hawks\",\"Magic\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-14T06:40:00+00:00",
+  "closeTime": "2026-10-14T09:30:00Z",
+  "event": {
+   "id": "ev-54",
+   "title": "Hawks vs Magic"
+  }
+ },
+ {
+  "id": "us-500056",
+  "slug": "nba-55",
+  "question": "Pistons vs Raptors (55)",
+  "outcomes": "[\"Pistons\",\"Raptors\"]",
+  "status": "settled",
+  "eventStartTime": "2026-10-04T19:05:00+00:00",
+  "closeTime": "2026-10-04T22:15:00Z",
+  "settledAt": "2026-10-04T23:02:51Z",
+  "event": {
+   "id": "ev-55",
+   "title": "Pistons vs Raptors"
+  }
+ },
+ {
+  "id": "us-500057",
+  "slug": "nba-56",
+  "question": "Lakers vs Celtics (56)",
+  "outcomes": "[\"Lakers\",\"Celtics\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-18T12:05:00+00:00",
+  "closeTime": "2026-10-18T14:45:00Z",
+  "event": {
+   "id": "ev-56",
+   "title": "Lakers vs Celtics"
+  }
+ },
+ {
+  "id": "us-500058",
+  "slug": "nba-57",
+  "question": "Warriors vs Knicks (57)",
+  "outcomes": "[\"Warriors\",\"Knicks\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-26T23:45:00+00:00",
+  "closeTime": "2026-09-27T03:15:00Z",
+  "settledAt": "2026-09-27T03:22:36Z",
+  "event": {
+   "id": "ev-57",
+   "title": "Warriors vs Knicks"
+  }
+ },
+ {
+  "id": "us-500059",
+  "slug": "nba-58",
+  "question": "Bulls vs Heat (58)",
+  "outcomes": "[\"Bulls\",\"Heat\"]",
+  "status": "open",
+  "eventStartTime": "2026-10-23T09:15:00+00:00",
+  "closeTime": "2026-10-23T12:15:00Z",
+  "event": {
+   "id": "ev-58",
+   "title": "Bulls vs Heat"
+  }
+ },
+ {
+  "id": "us-500060",
+  "slug": "nba-59",
+  "question": "Nets vs Suns (59)",
+  "outcomes": "[\"Nets\",\"Suns\"]",
+  "status": "settled",
+  "eventStartTime": "2026-09-28T07:30:00+00:00",
+  "closeTime": "2026-09-28T10:15:00Z",
+  "settledAt": "2026-09-28T10:48:32Z",
+  "event": {
+   "id": "ev-59",
+   "title": "Nets vs Suns"
+  }
+ }
+]

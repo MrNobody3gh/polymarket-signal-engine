@@ -1,0 +1,372 @@
+{
+ "matchedPairs": [
+  {
+   "gammaId": "0x8d09148c978be655934c18706ab9ba3c9507922ad072a67ee919344b41c121ce",
+   "usId": "us-500001",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xebf82cbe3edef963894a1ad0d08f6fd304e4fe61b9648bdc57f6ef93a4532512",
+   "usId": "us-500002",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x52c654fa1515c891311a6ae0b7bcfda263756d4086f443f15406df2e35e5e7cf",
+   "usId": "us-500003",
+   "diffMin": 5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x9b6538efdcebe5cf3917adf2df1d9e93cffc024db81d7f0642ff6a5626be51f8",
+   "usId": "us-500004",
+   "diffMin": -5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xda8826df6e75484471d1fa1a746cceb1d00f3d3547ebf902f48d9c0034947b7d",
+   "usId": "us-500005",
+   "diffMin": 10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xb55e3661d34fac630c94765f8e5098f0633983b47442d82215fa262a1abf4b0e",
+   "usId": "us-500006",
+   "diffMin": -10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x4248490b7870c8c95373ad7d73a419873c54000683dbbffbd6616506aee9f9fe",
+   "usId": "us-500007",
+   "diffMin": 20,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x97e3da78281e7e8eacebc4b82778607c0b97d6e127b1c8c9711a5da799cad3d1",
+   "usId": "us-500008",
+   "diffMin": -30,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xf62244f2f710d2fed76c159c8fe2db45e65efb1411272eb7060e24013048d863",
+   "usId": "us-500009",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xf3cfbfd165950cf76bf787d0537f10b2ff061570d856742319cb2c171d4a3f96",
+   "usId": "us-500010",
+   "diffMin": 15,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x3479a2afe2fb566f9795e8ee653328e4b70b6ec3cae6bb25c4676d82a5e003bf",
+   "usId": "us-500011",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x6fbab37adec68ece4bf0a1f77160946cc8d828b5ce92c797ed95f6c18af85e0f",
+   "usId": "us-500012",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x537b96f1e13b5aa98e8986aaee9475c5c7b933ec8b1084de977c6ab8f136f5aa",
+   "usId": "us-500013",
+   "diffMin": 5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x3c224a78b2c9b289216f42d77fb629b5fbe1a90a9e2408d672251628b9bbf442",
+   "usId": "us-500014",
+   "diffMin": -5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xa3d02d523cdb35f71b5166bbd4c7b1d25b823bfad44801729cca81a288571c4e",
+   "usId": "us-500015",
+   "diffMin": 10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x8975b59d3fc73a15f9b076d6d686ca1738ffa60a7ffbddc83c7a1e847e744342",
+   "usId": "us-500016",
+   "diffMin": -10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xf50cb646fd7b54d9a4b6d24a4425ec5af9fa7a29399a27cb4d26e630eeaf85b1",
+   "usId": "us-500017",
+   "diffMin": 20,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xa4d0591a367e05579aa88541f9f0e7c9c5c5ef071b8f09ba4006f7d7c03a7e6b",
+   "usId": "us-500018",
+   "diffMin": -30,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xf156718ce02de14a758962cce7b59cc7ddc65f5c47ea20f9b597da80429cb26a",
+   "usId": "us-500019",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xae2145ee3b54db17784a96348b520176192945374c4858b0d40fdf8e131c9737",
+   "usId": "us-500020",
+   "diffMin": 15,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x2698e4f0ed50728067cb07ddd33b385337fa290dc19f8195d1f6579ff6bfb3d3",
+   "usId": "us-500021",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x46317610a4e9fec7781b79fc2226cff161df9c3685a8b5a366fc8a38505b8a4c",
+   "usId": "us-500022",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xf09fa8fa49f9174afec61a5952992a45cc78299f0e1a664d595defee942b4673",
+   "usId": "us-500023",
+   "diffMin": 5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x8aecb3b6cc34ff24335ca3caa5ac149649eac515792b377d365df03e0f60650e",
+   "usId": "us-500024",
+   "diffMin": -5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xcea71169738de53736ef28d8622f7191d51aaf313202cdadfd0eef250d31f94e",
+   "usId": "us-500025",
+   "diffMin": 10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x82a085f57cd8cacbaf3e7f3302c309cbf7fa244794be1b8bec72c7ad58efbbd1",
+   "usId": "us-500026",
+   "diffMin": -10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x5dd41d6693da668af07bec479ef20b8f7b5002eb4d585c9be8f6d2e1b6ced966",
+   "usId": "us-500027",
+   "diffMin": 20,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x63e613278fa4d993559e02c770861b661becc0f088751670ae3564d5ea4053f4",
+   "usId": "us-500028",
+   "diffMin": -30,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x3206450d7c09ef44fc3b72761b54601cdd7d4dfb649d1660b1caf40d8f6d3bf1",
+   "usId": "us-500029",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x9104e1cc0d3a990a0172fd992ce139408f4576f5fc7b7e6505c0faad8df9d602",
+   "usId": "us-500030",
+   "diffMin": 15,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xbcd710e771724aabefaed0f7bfbe98bdd8245205fb6a0c3a981ad673e9d7384f",
+   "usId": "us-500031",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x8efd2464344a82f321945ffa77e49ada793f7bcb4ffa7cdfba07502f05b16225",
+   "usId": "us-500032",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xa47b2b597f2d05e39706a4b0bb930f4aa48a35b13f75db2c7e9a9873a31042d7",
+   "usId": "us-500033",
+   "diffMin": 5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xeb3762be976762793455f949123968193edd9aa1e0d335b404e002caf59eb4de",
+   "usId": "us-500034",
+   "diffMin": -5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x89e3f901b690e63a4c5470e9331a2efcf2a416fb58ba203a88a3cdf8633fe8f0",
+   "usId": "us-500035",
+   "diffMin": 10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x038b13d2e772e52cc063a104066ef96d7a5971b0d53b322fdddcf7d8ad33681d",
+   "usId": "us-500036",
+   "diffMin": -10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xec0ede5c6eb3ba9a3be7767c18d01b5bafb4d16ef6e63ff63958ec9eb100ea0a",
+   "usId": "us-500037",
+   "diffMin": 20,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xde80a30b324b7af09f97d6145c81932a8d7bc6fe654c6a82dd7a8383b66cb4d9",
+   "usId": "us-500038",
+   "diffMin": -30,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x6be8f467f7c06bc30228cdb4623bbbb0f5a985c19a6a42cf899d01a10dd8370e",
+   "usId": "us-500039",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xdeec6b61698464ced7eafa699495493e09391b1cfab0b0abe9ef6e446bdd4c10",
+   "usId": "us-500040",
+   "diffMin": 15,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x295aeaf0c8837b09691c30943730fb634af527ce4b86235e8102cfc3f551e6a7",
+   "usId": "us-500041",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x10d285a9c9da36b44a2a57776ecab3146e649b686e83b892d33496ad16d48fc6",
+   "usId": "us-500042",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x9021c25be7bcce0aa2615c3383bbec2501ab8bc54c90e6f07f5bee480e3555ee",
+   "usId": "us-500043",
+   "diffMin": 5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x6fc582c0a5e9a9b2b7975702c6a2f3805e40993e3c430c6a97ef2234940c9db5",
+   "usId": "us-500044",
+   "diffMin": -5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xafb495e3cd712070c0ebfa9865e029d9ce99c922a294f307a1f5ffa10b885521",
+   "usId": "us-500045",
+   "diffMin": 10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x5fb809018604ac80cb5b06544071de53b9acd862d9827439beb7e6d53a8eab0f",
+   "usId": "us-500046",
+   "diffMin": -10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x7c953184cb15b0ef605e5bfa19dc76407d01b3795e076d8d8cf188da1949357b",
+   "usId": "us-500047",
+   "diffMin": 20,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xf4b735ae122d187b8c8319927749d42ce63536afe27f8d925bf395b616c86e61",
+   "usId": "us-500048",
+   "diffMin": -30,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x150eba8ce2a0963c0a1780338a4dc415080c2ba67a98d98ecb185b4a1a5448ab",
+   "usId": "us-500049",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x071ca6a16b64f9a433d49c8125c7879f98649b09c5a2dbb06fc05a3143987fee",
+   "usId": "us-500050",
+   "diffMin": 15,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xe869d069a6056c11828ed08103abe0c7ee6199bd5c022a4a202bea5404803086",
+   "usId": "us-500051",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xe807d7567d12503e16bda4f2b4c6a92df86db4bdad6198b94048653790968097",
+   "usId": "us-500052",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x373dee39c9359ef17bc4ece72e5b9f5fc4f9227dcf152f304f1a4752f886d036",
+   "usId": "us-500053",
+   "diffMin": 5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xa966b4b186d75d55b29e6300d34ceb57cafe6128401a22a189222184d731f6a0",
+   "usId": "us-500054",
+   "diffMin": -5,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x2003a90c4b0ea8425695a4b64294e3c7e27430be5c1285d7117c352abd57a129",
+   "usId": "us-500055",
+   "diffMin": 10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xa2921d2b6b2ebdea3abb2ac020be2e9547779fec17af705b0cb5a2cb17dedfaf",
+   "usId": "us-500056",
+   "diffMin": -10,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x0f23523433c282dfed6570d11bc96db02d1fd2bec27d9ec972d3db784e2ce0c9",
+   "usId": "us-500057",
+   "diffMin": 20,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0xb6ff74d09b091d5b4cdfcc87be97c4bb18ae5389b0b7859baa53b82e55042e2e",
+   "usId": "us-500058",
+   "diffMin": -30,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x7a1880fbabdb5a32e98d280f5e3b5a4f54a3c27eeb8611ca8c33d3e6bfe24cf0",
+   "usId": "us-500059",
+   "diffMin": 0,
+   "stratum": "sports:basketball"
+  },
+  {
+   "gammaId": "0x9a66d4cde0ca1cb551a8868f54bf89751d1d77dcba95feb7c4b933e37b435b69",
+   "usId": "us-500060",
+   "diffMin": 15,
+   "stratum": "sports:basketball"
+  }
+ ],
+ "stratumCounts": {
+  "sports:basketball": 62,
+  "sports:soccer": 64,
+  "esports": 64,
+  "crypto_short_term": 64,
+  "politics": 64,
+  "culture_other": 64
+ }
+}
