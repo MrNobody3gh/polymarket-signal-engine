@@ -11,6 +11,7 @@ simulation or threshold changed. Plan: `docs/PHASE4_PLAN.md` (v2).
 | C S1b coverage probe and feasibility | [`S1b_COVERAGE.md`](S1b_COVERAGE.md) | `src/lib/phase4/{mapping,funnel,feasibility,stats,probe,readonly-db}.ts` | `npm run phase4:coverage` |
 | D S1c book and fee capture design | [`S1c_BOOK_AND_FEE_CAPTURE.md`](S1c_BOOK_AND_FEE_CAPTURE.md) | — (design only) | — |
 | 4.0b event-level S1a, diagnostic | sections 8 of the S1a and S1b documents | `src/lib/phase4/{events,diagnose}.ts`, `audit.ts`, `mapping.ts`, `funnel.ts`, `probe.ts`, `cli.ts` | `npm run phase4:ts-audit -- --us-targeted default`, `npm run phase4:coverage -- --diagnose`, `--print-files a,b` |
+| 4.0c Kalshi, title search, corrected US queries, per-candidate verdicts, compact results | [`KALSHI_API.md`](KALSHI_API.md), [`VENUE_SURVEY.md`](VENUE_SURVEY.md), section 9 of the S1a and S1b documents | `src/lib/phase4/{venue-kalshi,venue-funnel,title-search,us-sports,compact}.ts`, `audit.ts`, `events.ts`, `venues.ts`, `http.ts`, `cli.ts` | `npm run phase4:ts-audit -- --us-targeted default --kalshi`, `npm run phase4:coverage -- --diagnose --kalshi`, `npm run phase4:title-search` |
 | tests | `tests/phase4-*.test.ts`, `tests/helpers/phase4*.ts`, `tests/fixtures/phase4/` | | `npm test` |
 | mutation check | every rule above, broken on purpose | `scripts/phase4/mutation-check.ts` | `npm run phase4:mutations` |
 
@@ -61,3 +62,50 @@ Nothing was measured by this step (no venue or database access); these are the c
 | D78 | Cross-venue participant matching without an alias list ("Man City" / "Manchester City" scores 0.33 and is not matched) | Accept the loss and read the matched/head-to-head counts; or add a small alias table per sport after the first run |
 
 Status: D73, D75, D76 and D78 stand as recommended. D74 is confirmed for Eastern placeholders; **whether a date-level time rule may exist at all stays open** until the 4.0b run's numbers are read. D77: the audit and the diagnostic are run with the default US queries and the queries are corrected from any errors (`--us-targeted`, `--us-archived-query`).
+
+## Step 4.0c: the second candidate venue, correct US queries, title search for every pair, per-candidate verdicts
+
+Same rules as 4.0 and 4.0b: public unauthenticated GETs only, ≤ 2 requests per second per host (the US origin slower, see below), no keys, accounts, identity verification or orders, a refusal is reported and never worked around, read-only database, no migration, production change, environment variable or dependency, no change to signal rules, scoring, portfolio, simulation or thresholds. Console output of every script is ≤ 60 lines; details go to files. **No policy is decided and no legal conclusion is given here.**
+
+### Run sheet (production infrastructure; each command prints ≤ 60 lines)
+```
+# 1. time fields: US sports API (open + ended events), Kalshi, in-play, schedule sources; writes S1_COMPACT.md
+npm run phase4:ts-audit -- --with-db --us-targeted default --kalshi --print-files S1_COMPACT.md
+# 2. coverage: US exchange and Kalshi from one signal window, one category table; refreshes S1_COMPACT.md
+npm run phase4:coverage -- --diagnose --kalshi --print-files S1_COMPACT.md
+# 3. title search for every pair on both venues (~15 minutes for the US search at 60 requests/minute)
+npm run phase4:title-search -- --print-files s1b_title_search_summary.json
+```
+Flags added: `--kalshi`, `--kalshi-max 40000` (listing cap, markets), `--kalshi-base URL`, `--us-sports-max-requests 400`, `--search-max-requests 2000`, `--all-scores`, `--venue us|kalshi|both` (title search), `--us-search-path`. `--print-files a,b` keeps working (paced, ≤ 200 lines per second): useful names are `S1_COMPACT.md`, `S1a_RESULTS.md`, `s1a_summary.json`, `s1b_funnel_kalshi.json`, `s1b_title_search_summary.json`, `s1b_title_search_polymarket_us.csv`, `s1b_title_search_kalshi.csv`, `s1a_inplay_us.json`. Run 1 before run 2: the coverage script reads `s1a_summary.json` (S1a recommendations per venue). Memory: everything is slimmed on arrival and capped (US 40,000 markets in diagnostic mode, Kalshi 40,000 by default; the production heap limit is about 500 MB).
+
+| Output | Where | Read it for |
+|---|---|---|
+| `S1_COMPACT.md` | the output directory | one row per venue x stratum x slot (best passing field, verdict, events, the deciding rule and what the other candidates failed on) and one funnel table; at most 80 lines |
+| `S1a_RESULTS.md`, `s1a_<venue>.json` | same | every candidate field per slot, the Kalshi listing by category, FUTURES versus single-game, the `live` / `ended` report, the schedule sources, the sports API requests |
+| `s1b_funnel_kalshi.json`, `s1b_mapping_review_kalshi.csv` | same | the Kalshi funnel and its PROBABLE candidates for the owner's eye |
+| `s1b_title_search_<venue>.csv`, `s1b_title_search_summary.json` | same | the per-pair title search: bands, any candidate, the best three candidates per pair |
+
+### What changed in the code
+- **Per-candidate slot verdicts (Part D1).** Every candidate field is judged for every slot with the unchanged thresholds; the best passing one is `bestField`; a candidate with no ordering evidence is `INSUFFICIENT_DATA`, not "unusable". Cause of the 4.0b misreading: S1a section 9.1.
+- **Corrected US queries and the sports API (Part C1).** Category slugs (`sports`, `crypto`), the documented `sportsMarketTypes`, sports, leagues and events by sport and league slug, open and ended; the broken default is gone; `--us-targeted` still overrides.
+- **Kalshi (Part A).** Adapter, audit, funnel and category table; the API as recorded is **not verified**: [`KALSHI_API.md`](KALSHI_API.md).
+- **Title search (Part B).** `npm run phase4:title-search`.
+- **`live` / `ended`, schedule sources, FUTURES (Parts C2, C3, D2); `S1_COMPACT.md` (D3); venue survey (Part E).**
+- **Pacing.** `PoliteHttp` takes a slower gap per origin; the US exchange's origin runs at 1.1 s per request because a summary of its documentation states 60 requests per minute (**not verified**).
+- **Categoriser.** A title or slug with esports words is esports even when the venue's own tag is a plain "Sports" (Kalshi files esports there).
+
+### Status of the measurements: nothing was measured by the step that wrote this
+The authoring environment's network policy answered 403 for every venue host (`gateway.polymarket.us`, `api.elections.kalshi.com`, `docs.polymarket.us`, `docs.kalshi.com`, Gamma) and the documentation-fetch tool was blocked the same way; the documentation facts come from search-engine summaries and are marked **not verified**. Delivered and tested on fixtures with hand-derived answers: all code, the documents, the mutation checks. **Remaining measurements, to be run on production infrastructure:** the three commands above. The tests do not prove any statement about Kalshi's or the US exchange's real responses.
+
+### New open decisions (continue from D78; the owner decides)
+| # | Decision | Options, with what the run will show |
+|---|---|---|
+| D79 | Which Kalshi base URL and facts stand: the two documented hosts, public data without authentication, the cursor key, `with_nested_markets`, milestones | Read `S1a_RESULTS.md` "Not established" and `fetch.*` for kalshi; correct `KALSHI_API.md`; if public data needs authentication that part stops (rule) |
+| D80 | The pace for the US exchange's origin: 1.1 s per request (its documented 60 per minute, not verified) versus the brief's 2 per second | Keep 1.1 s (default, about 15 minutes for 740 searches); or confirm the real limit on the first run (any 429 shows in `http.byKind`) and set it |
+| D81 | May `gameStartTime` fill slot 1 for **single-game market types only** (FUTURES excluded)? | After the run: `bestField` per sport and `futuresVerdicts`; options (a) yes for the sports whose verdict is `SINGLE_GAME_ONLY` or `NO_DIFFERENCE_OBSERVED` with ≥ 30 events per class, (b) also require the schedule source to agree within 15 minutes, (c) no, keep `INSUFFICIENT_DATA` strata rejected |
+| D82 | May Kalshi's `event.strike_date`, or a milestone's `start_date`, fill slot 1? | Only if its per-candidate verdict passes and the schedule comparison shows a time of day and agreement; otherwise Kalshi stays on `close_time` (slot 2, deadline-type markets) |
+| D83 | Kalshi has no identifier shared with Polymarket: only PROBABLE exists. How is a Kalshi mapping verified (extends D59)? | Human review of each pair (the review CSV and the title-search CSV list them: the count is the cost); an allow-list of reviewed pairs before any can pass E2; or no Kalshi execution |
+| D84 | Title wording across venues ("Winner?" suffixes, team aliases) lowers similarity (extends D78) | Keep the strict function and read the near-miss list; or add a small normalisation / alias table per sport after reading the 10 near-misses per venue |
+| D85 | Use the US exchange's `live` / `ended` flags as a **second** in-play check beside plan §3.4's `time_to_event <= 0`? | After the run: false positives (live before the start), false negatives (started, neither live nor ended) and the `ended` agreement with resolved status; options (a) not used, (b) used only to reject (a flagged live event is rejected even if the clock says not started), (c) adopted as the primary check |
+| D86 | Listing caps: US 40,000 and Kalshi 40,000 markets give lower bounds when cut off | Raise `--us-max` / `--kalshi-max` (memory permitting) or accept lower bounds with the shortfall stated |
+| D87 | D53 (venue) with the new numbers: the US exchange, Kalshi, both, or neither | Decided by the owner from the funnels, the category table and the title-search bands, and by G1 (a New York-qualified lawyer, with [`VENUE_SURVEY.md`](VENUE_SURVEY.md) as input). **No recommendation is made here** |

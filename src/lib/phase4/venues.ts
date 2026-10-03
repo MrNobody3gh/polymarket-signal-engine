@@ -29,7 +29,11 @@ export interface UsConfig {
   /** Query for archived markets (diagnostic runs only). UNVERIFIED default; null skips it. */
   archivedQuery: string | null;
   limitParam: string; pageParam: string | null; pageSize: number;
+  /** 4.0c: the documented events, sports, leagues and search endpoints (paths as named by search-engine summaries of docs.polymarket.us; UNVERIFIED). */
+  eventsPath: string; sportsPath: string; leaguesPath: string; searchPath: string;
 }
+/** The US exchange's documented public rate limit is 60 requests/minute (summary of its introduction page; UNVERIFIED): its origin is paced slower than the brief's 2/second ceiling. */
+export const US_MIN_INTERVAL_MS = 1100;
 /** Memory bound for the diagnostic (found on the first production run: the uncapped full US listing exhausted a ~500 MB heap after about 12 minutes of paging). */
 export const NORMAL_CAP = 6000;
 export const DIAGNOSE_DEFAULT_CAP = 40_000;
@@ -48,9 +52,9 @@ export function slimRaw(v: unknown, depth = 0): unknown {
   for (const [k, x] of Object.entries(v as Record<string, unknown>)) { if (depth > 0 && k === "markets") continue; out[k] = slimRaw(x, depth + 1); }
   return out;
 }
-export const US_DEFAULTS: UsConfig = { base: "https://gateway.polymarket.us", marketsPath: "/v1/markets", openQuery: "active=true&closed=false", closedQuery: "closed=true", archivedQuery: "archived=true", limitParam: "limit", pageParam: "offset", pageSize: 100 };
+export const US_DEFAULTS: UsConfig = { base: "https://gateway.polymarket.us", marketsPath: "/v1/markets", openQuery: "active=true&closed=false", closedQuery: "closed=true", archivedQuery: "archived=true", limitParam: "limit", pageParam: "offset", pageSize: 100, eventsPath: "/v1/events", sportsPath: "/v2/sports", leaguesPath: "/v2/leagues", searchPath: "/v1/search" };
 /** Where the owner should confirm every US default. */
-export const US_DOCS = ["https://docs.polymarket.us"];
+export const US_DOCS = ["https://docs.polymarket.us", "https://docs.polymarket.us/api-reference/events/overview", "https://docs.polymarket.us/api-reference/sports/overview", "https://docs.polymarket.us/api-reference/search/overview", "https://docs.polymarket.us/api-reference/introduction"];
 export const INTL_DOCS = ["https://docs.polymarket.com"];
 
 export interface FetchNotes { endpoint: string; pages: number; records: number; cursorKey: string | null; filterHonoured: boolean | null; stoppedBecause: string; errors: string[] }
@@ -96,8 +100,8 @@ export async function fetchGamma(http: PoliteHttp, o: { closed: boolean; max: nu
 }
 
 /** Page the US venue's markets listing with the configured (unverified) parameters. */
-export async function fetchUs(http: PoliteHttp, cfg: UsConfig, o: { closed: boolean; max: number; maxPages?: number; /** slim each market on arrival (diagnostic mode: bounds memory) */ slim?: boolean; /** a query string that replaces the configured open/closed one (targeted fetches); `closed` is then only used to judge whether the venue honoured a filter */ query?: string; /** stop as soon as this returns true for the markets fetched so far (a per-sport quota) */ enough?: (markets: RawMarket[]) => boolean }): Promise<Fetched> {
-  const endpoint = `${cfg.base}${cfg.marketsPath}`; const notes: FetchNotes = { endpoint, pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "", errors: [] };
+export async function fetchUs(http: PoliteHttp, cfg: UsConfig, o: { closed: boolean; max: number; maxPages?: number; /** slim each market on arrival (diagnostic mode: bounds memory) */ slim?: boolean; /** a query string that replaces the configured open/closed one (targeted fetches); `closed` is then only used to judge whether the venue honoured a filter */ query?: string; /** an endpoint path that replaces `cfg.marketsPath` (the sports and league events endpoints) */ path?: string; /** stop as soon as this returns true for the markets fetched so far (a per-sport quota) */ enough?: (markets: RawMarket[]) => boolean }): Promise<Fetched> {
+  const endpoint = `${cfg.base}${o.path ?? cfg.marketsPath}`; const notes: FetchNotes = { endpoint, pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "", errors: [] };
   const out: RawMarket[] = []; const seen = new Set<string>(); let offset = 0; let cursor: string | null = null;
   // a finite cap pages as far as it needs (never fewer than the old 40); only an explicit maxPages or an infinite cap differ
   const maxPages = o.maxPages ?? (o.max === Infinity ? 5000 : Math.max(40, Math.ceil(o.max / cfg.pageSize) + 2));
@@ -191,14 +195,22 @@ export function listingTotals(markets: RawMarket[]): ListingTotals {
 }
 
 export interface TargetedQuery { sport: string; query: string }
+/** The market types the US documentation lists for `sportsMarketTypes`. */
+export const US_SPORTS_MARKET_TYPES = ["MONEYLINE", "SPREAD", "TOTAL", "PROP"] as const;
+const typesQuery = US_SPORTS_MARKET_TYPES.map((t) => `sportsMarketTypes=${t}`).join("&");
 /**
- * Per-sport queries for the US listing. The brief names the filters `sportsMarketTypes` (MONEYLINE, SPREAD, TOTAL, PROP) and `categories`;
- * their SYNTAX and the category values are NOT verified here (docs.polymarket.us was unreachable), so these defaults are guesses to be
- * replaced from the documentation with `--us-targeted "sport=query|sport=query"`. A wrong query returns an error or an empty page, is
- * reported, and the stratum is then reported as unable to reach its quota.
+ * Per-category queries for the US listing, CORRECTED in 4.0c from the official documentation (D77): `categories` takes CATEGORY SLUGS such as
+ * `sports` and `crypto`, not sport names (the 4.0b guess `categories=football` returned HTTP 400), and `sportsMarketTypes` takes MONEYLINE, SPREAD,
+ * TOTAL, PROP. Per-SPORT samples come from the sports API (`us-sports.ts`: sports, leagues, events by sport slug), not from this list. The queries
+ * here are the fallback when that discovery fails, and each category is asked for both its open and its ended side so that resolved events
+ * give the ordering evidence the slot rules need. Override with `--us-targeted "name=query|name=query"`.
  */
 export function defaultTargetedQueries(): TargetedQuery[] {
-  return ["football", "basketball", "baseball", "hockey", "soccer", "tennis", "combat"].map((sport) => ({ sport, query: `categories=${sport}&sportsMarketTypes=MONEYLINE&sportsMarketTypes=SPREAD&sportsMarketTypes=TOTAL&sportsMarketTypes=PROP&active=true` }));
+  return [
+    { sport: "sports", query: `categories=sports&${typesQuery}&active=true` },
+    { sport: "sports:ended", query: `categories=sports&${typesQuery}&closed=true` },
+    { sport: "crypto", query: "categories=crypto&active=true" },
+  ];
 }
 export function parseTargeted(spec: string): TargetedQuery[] { return spec.split("|").map((x) => x.trim()).filter(Boolean).map((x) => { const i = x.indexOf("="); return { sport: x.slice(0, i), query: x.slice(i + 1) }; }).filter((q) => q.sport && q.query); }
 export interface TargetedResult { sport: string; query: string; markets: RawMarket[]; notes: FetchNotes; reachedQuota: boolean; events: number }

@@ -39,7 +39,7 @@ describe("S1a script (timestamp audit)", () => {
 
   it("full run against the synthetic venues: exit 0, documented files, ≤ 60 lines, the expected verdicts and venue agreement", async () => {
     const r = await run(venueHandler); expect(r.code).toBe(EXIT.OK); expect(r.lines.length).toBeLessThanOrEqual(60);
-    expect(Object.keys(r.files).sort()).toEqual(["docs/phase4/data/S1a_RESULTS.md", "docs/phase4/data/s1a_polymarket_intl.json", "docs/phase4/data/s1a_polymarket_us.json", "docs/phase4/data/s1a_summary.json", "tests/fixtures/phase4/s1a_polymarket_intl_open.json", "tests/fixtures/phase4/s1a_polymarket_intl_resolved.json", "tests/fixtures/phase4/s1a_polymarket_us_open.json", "tests/fixtures/phase4/s1a_polymarket_us_resolved.json"]);
+    expect(Object.keys(r.files).sort()).toEqual(["docs/phase4/data/S1_COMPACT.md", "docs/phase4/data/S1a_RESULTS.md", "docs/phase4/data/s1a_polymarket_intl.json", "docs/phase4/data/s1a_polymarket_us.json", "docs/phase4/data/s1a_summary.json", "tests/fixtures/phase4/s1a_polymarket_intl_open.json", "tests/fixtures/phase4/s1a_polymarket_intl_resolved.json", "tests/fixtures/phase4/s1a_polymarket_us_open.json", "tests/fixtures/phase4/s1a_polymarket_us_resolved.json"]);
     const summary = JSON.parse(r.files["docs/phase4/data/s1a_summary.json"]); const intl = summary.venues.find((v: any) => v.venue === "polymarket_intl"); const us = summary.venues.find((v: any) => v.venue === "polymarket_us");
     expect(intl.counts).toMatchObject({ open: 191, resolved: 191 }); expect(us.counts).toMatchObject({ open: 30, resolved: 30 });
     const pick = (v: any, st: string, slot: number) => v.recommendations.find((x: SlotVerdict) => x.stratum === st && x.slot === slot);
@@ -149,7 +149,7 @@ describe("S1b script (coverage probe)", () => {
 
   it("funnel on the fixture world, every stage with a hand-derived answer, and the documented files", async () => {
     const r = await run(); expect(r.code).toBe(EXIT.OK); expect(r.lines.length).toBeLessThanOrEqual(60);
-    expect(Object.keys(r.files).sort()).toEqual(["docs/phase4/data/s1b_feasibility.json", "docs/phase4/data/s1b_funnel.json", "docs/phase4/data/s1b_mapping_review.csv"]);
+    expect(Object.keys(r.files).sort()).toEqual(["docs/phase4/data/S1_COMPACT.md", "docs/phase4/data/s1b_feasibility.json", "docs/phase4/data/s1b_funnel.json", "docs/phase4/data/s1b_mapping_review.csv"]);
     const j = JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]); const ex = j.funnel.variants.EXACT;
     // 8 entry signals in the window (the EXIT and the 04:28:37 signal are out); score ≥ 68: s1 s2 s3 s4 s6 s7 s8 = 7; mapped (token ids): all but s6 = 6;
     // tradable: all but s8 (settled before the signal) = 5; usable timestamp: all but s7 (no time field) = 4; not started: all but s3 = 3; within 24 h: all but s4 = 2; lead ≥ 300 s: all but s2 = 1 (s1)
@@ -220,7 +220,7 @@ describe("4.0b: diagnostic mode, the date-level row, targeted US queries and --p
   };
   it("--diagnose pages the whole listing (no cap), runs the timestamp-free matcher over the score ≥ 68 pairs and writes the diagnostic files", async () => {
     const r = await run0({ argv: ["--diagnose"] }); expect(r.code).toBe(0); expect(r.lines.length).toBeLessThanOrEqual(60);
-    expect(Object.keys(r.files).sort()).toEqual(["docs/phase4/data/s1b_diagnostic.json", "docs/phase4/data/s1b_feasibility.json", "docs/phase4/data/s1b_funnel.json", "docs/phase4/data/s1b_mapping_diagnostic.csv", "docs/phase4/data/s1b_mapping_review.csv"]);
+    expect(Object.keys(r.files).sort()).toEqual(["docs/phase4/data/S1_COMPACT.md", "docs/phase4/data/s1b_diagnostic.json", "docs/phase4/data/s1b_feasibility.json", "docs/phase4/data/s1b_funnel.json", "docs/phase4/data/s1b_mapping_diagnostic.csv", "docs/phase4/data/s1b_mapping_review.csv"]);
     const j = JSON.parse(r.files["docs/phase4/data/s1b_diagnostic.json"]); expect(j.listing.open.markets).toBe(3); expect(j.listing.closed.markets).toBe(1); expect(j.listing.archived).not.toBeNull();
     // 5 pairs (market + outcome) behind score >= 68 signals: Lakers (s1-s3), Warriors, Unknown game, Bulls, Nets. Four share a token id with the venue: PROBABLE by identifier; the unknown game is NONE.
     expect(j.diagnostic).toMatchObject({ pairs: 5, probable: 4, none: 1, identifierMatches: 4 }); expect(j.sampled).toBe(5); expect(j.diagnostic.definition).toMatch(/NO DATE CHECKED/); expect(r.files["docs/phase4/data/s1b_mapping_diagnostic.csv"]).toContain("Unknown game xyz");
@@ -294,7 +294,7 @@ describe("4.0b: S1a targeted US queries, event counts and --print-files", () => 
     const r = await run1(venueHandler, ["--no-fixtures"]); const intl = JSON.parse(r.files["docs/phase4/data/s1a_polymarket_intl.json"]);
     for (const v of intl.recommendations) { expect(v.events).toBeGreaterThan(0); expect(v.markets).toBeGreaterThanOrEqual(v.events); expect(typeof v.decidedBy).toBe("string"); expect(Array.isArray(v.failedRules)).toBe(true); }
     expect(intl.strata["sports:basketball"]).toMatchObject({ markets: 62, events: 62 }); expect(intl.recommendations.find((x: { stratum: string; slot: number }) => x.stratum === "sports:basketball" && x.slot === 1)).toMatchObject({ decidedBy: "allPassed" });
-    expect(r.lines.join("\n")).toMatch(/distinct events: /); expect(r.lines.join("\n")).toMatch(/by allPassed|by usableShare|by placeholderShare|by eventTypeGap/); expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toContain("### Date-level alternative (SHOWN, NOT RECOMMENDED");
+    expect(r.lines.join("\n")).toMatch(/distinct events: /); expect(r.lines.join("\n")).toMatch(/\[[^\]]*(OK|usableShare|placeholderShare|eventTypeGap|minEvents)/); expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toContain("### Date-level alternative (SHOWN, NOT RECOMMENDED");
   });
   it("the same event on both venues, by participant names and Eastern date, is in the results (US synthetic events carry eventStartTime)", async () => {
     const r = await run1(venueHandler, ["--no-fixtures"]); const s = JSON.parse(r.files["docs/phase4/data/s1a_summary.json"]); expect(s.eventAgreement === undefined || s.eventAgreement === null || typeof s.eventAgreement.matched === "number").toBe(true); expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toContain("## The same event on both venues");

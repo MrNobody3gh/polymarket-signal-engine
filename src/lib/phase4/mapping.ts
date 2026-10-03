@@ -232,8 +232,10 @@ export function diagCandidates(sig: DiagSignal, idx: DiagIndex, limit = 60): Ven
   return [...out.values()];
 }
 /** Probe-only diagnostic: how similar is the nearest venue market to a signal's market, with no timestamp required. Deterministic; PROBABLE or NONE only. */
-export function diagnoseSignal(sig: DiagSignal, idx: DiagIndex, topN = 3): DiagResult {
-  const cid = (sig.conditionId ?? "").toLowerCase(); const cands = diagCandidates(sig, idx);
+export function diagnoseSignal(sig: DiagSignal, idx: DiagIndex, topN = 3): DiagResult { return diagnoseCandidates(sig, diagCandidates(sig, idx), topN); }
+/** The same scoring for candidates obtained elsewhere (4.0c: the results of a venue's search endpoint). */
+export function diagnoseCandidates(sig: DiagSignal, cands: VenueMarketRef[], topN = 3): DiagResult {
+  const cid = (sig.conditionId ?? "").toLowerCase();
   const scored: DiagCandidate[] = cands.map((c) => {
     const t = titleSimilarity(sig.title, c.question); const ps = participantSimilarity(sig.title, c.question);
     const identifierMatch = (!!cid && (c.conditionIds ?? []).some((x) => x.toLowerCase() === cid)) || (!!sig.tokenId && (c.tokenIds ?? []).includes(sig.tokenId)) || (!!sig.slug && !!c.slug && c.slug.toLowerCase() === sig.slug.toLowerCase());

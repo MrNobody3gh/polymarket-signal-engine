@@ -10,7 +10,7 @@
  * (and ours), and apply the explicit, exported RECOMMEND_RULES to propose a field per slot or "unreliable: reject".
  */
 import { categorize, stratum } from "./categorize";
-import { classifyFieldName, easternParts, easternPlaceholder, impliedEasternDate, parseTimestamp, placeholderKind, repeatedInstants, timeOfDayProfile, type FieldRole, type PlaceholderKind, type RepeatedInstant } from "./timestamps";
+import { classifyFieldName, classifyFieldNameFor, easternParts, easternPlaceholder, impliedEasternDate, parseTimestamp, placeholderKind, repeatedInstants, timeOfDayProfile, type FieldRole, type PlaceholderKind, type RepeatedInstant } from "./timestamps";
 import { quantile } from "./stats";
 
 export type RawMarket = Record<string, unknown>;
@@ -93,7 +93,7 @@ export function buildInventory(markets: AuditMarket[]): FieldInventory[] {
     }
     const prof = timeOfDayProfile(rows.map((r) => r.v));
     out.push({
-      path, role: classifyFieldName(path), presence: { overall: { present: rows.length, total: markets.length, rate: share(rows.length, markets.length) }, byStratum },
+      path, role: classifyFieldNameFor(markets[0]?.venue, path), presence: { overall: { present: rows.length, total: markets.length, rate: share(rows.length, markets.length) }, byStratum },
       formats, precision, offsets, placeholders, placeholderShare: share(ph, rows.length),
       timeOfDay: { datetime: prof.datetime, dateOnly: prof.dateOnly, topClocks: prof.byClock.slice(0, 5) },
       repeated: repeatedInstants(rows.map((r) => ({ group: r.m.group, raw: r.v }))).slice(0, 10),
@@ -175,8 +175,19 @@ export interface SlotVerdict {
   etPlaceholderShare: number | null;
   /** Which rule decided the verdict, and every rule that failed. */
   decidedBy: RuleKey; failedRules: RuleKey[];
+  /** EVERY candidate field judged for this slot (4.0c), each with its own verdict and deciding rule; the best passing one first. `field` above keeps the single field the older reports printed. */
+  candidates?: CandidateVerdict[];
+  /** The best PASSING candidate (RECOMMEND), or null when none passes. This, not `field`, is the answer to "which field fills the slot". */
+  bestField?: string | null;
+}
+/** One candidate field's verdict for one slot of one stratum (the same rules, thresholds and per-event evaluation as `SlotVerdict`). */
+export interface CandidateVerdict {
+  field: string; role: FieldRole; verdict: Verdict; decidedBy: RuleKey; failedRules: RuleKey[]; failed: string[];
+  presentEvents: number; usableShare: number | null; presentShare: number | null; placeholderShare: number | null; etPlaceholderShare: number | null;
+  evidence: Record<string, number | string | null>; best: boolean;
 }
 
+const RANK: Record<Verdict, number> = { RECOMMEND: 0, INSUFFICIENT_DATA: 1, UNRELIABLE_REJECT: 2 };
 const earliestRefMs = (m: AuditMarket, refs: ResolutionReference[]): number | null => { const v = refs.map((r) => r.get(m)).filter((x): x is number => x !== null); return v.length ? Math.min(...v) : null; };
 
 /**
@@ -196,8 +207,9 @@ export function recommendSlots(venue: string, ms: AuditMarket[], inv: FieldInven
     const allMarkets = ms.filter((m) => m.stratum === st); const sm = collapseToEvents(allMarkets); const counts = { events: sm.length, markets: allMarkets.length };
     for (const slot of [1, 2] as const) {
       const role: FieldRole = slot === 1 ? "START_LIKE" : "CLOSE_LIKE";
-      const cands = inv.filter((f) => f.role === role);
-      if (!cands.length) { out.push({ venue, stratum: st, slot, field: null, verdict: "UNRELIABLE_REJECT", usableShare: null, presentShare: null, placeholderShare: null, failed: [`no ${role} field exists on the venue's objects`], evidence: {}, needsHumanReview: false, ...counts, etPlaceholderShare: null, decidedBy: "noField", failedRules: ["noField"] }); continue; }
+      // slot 1 also judges neutrally named time fields (OTHER_TIME, e.g. an event's `strike_date`): they pass only by the same rules, none is assumed
+      const cands = inv.filter((f) => f.role === role || (slot === 1 && f.role === "OTHER_TIME"));
+      if (!cands.length) { out.push({ venue, stratum: st, slot, field: null, verdict: "UNRELIABLE_REJECT", usableShare: null, presentShare: null, placeholderShare: null, failed: [`no ${role} field exists on the venue's objects`], evidence: {}, needsHumanReview: false, ...counts, etPlaceholderShare: null, decidedBy: "noField", failedRules: ["noField"], candidates: [], bestField: null }); continue; }
       const scored = cands.map((f) => {
         const vals = sm.map((m) => m.flat[f.path]).filter((v) => v !== undefined && v !== null && v !== "");
         const usable = vals.filter((v) => { const p = parseTimestamp(v); return (p.kind === "datetime") && !placeholderKind(v); }).length;
@@ -230,10 +242,13 @@ export function recommendSlots(venue: string, ms: AuditMarket[], inv: FieldInven
       const ok = scored.filter((s) => !s.insufficient && !s.failed.length).sort((a, b) => b.usable - a.usable || (a.f.path < b.f.path ? -1 : 1));
       const pick = ok[0] ?? [...scored].sort((a, b) => Number(a.insufficient) - Number(b.insufficient) || a.failed.length - b.failed.length || b.usable - a.usable || (a.f.path < b.f.path ? -1 : 1))[0];
       const verdict: Verdict = ok[0] ? "RECOMMEND" : pick.insufficient ? "INSUFFICIENT_DATA" : "UNRELIABLE_REJECT";
+      const rd = (x: number) => Math.round(x * 1000) / 1000;
+      const candidates: CandidateVerdict[] = scored.map((c) => { const passed = !c.insufficient && !c.failed.length; return { field: c.f.path, role: c.f.role, verdict: (passed ? "RECOMMEND" : c.insufficient ? "INSUFFICIENT_DATA" : "UNRELIABLE_REJECT") as Verdict, decidedBy: c.failedRules[0] ?? "allPassed", failedRules: c.failedRules, failed: c.failed, presentEvents: c.vals.length, usableShare: rd(share(c.usable, sm.length)), presentShare: rd(share(c.vals.length, sm.length)), placeholderShare: c.vals.length ? rd(share(c.phs, c.vals.length)) : null, etPlaceholderShare: c.vals.length ? rd(share(c.et, c.vals.length)) : null, evidence: c.evidence, best: ok[0] === c }; })
+        .sort((a, b) => Number(b.best) - Number(a.best) || (RANK[a.verdict] - RANK[b.verdict]) || b.presentEvents - a.presentEvents || (a.field < b.field ? -1 : 1));
       out.push({ venue, stratum: st, slot, field: pick.f.path, verdict, usableShare: Math.round(share(pick.usable, sm.length) * 1000) / 1000, presentShare: Math.round(share(pick.vals.length, sm.length) * 1000) / 1000, placeholderShare: pick.vals.length ? Math.round(share(pick.phs, pick.vals.length) * 1000) / 1000 : null, failed: pick.failed, evidence: pick.evidence,
         // slot 2 has no ordering rule that can be asserted without evidence of what the venue's deadline means: a human reads the relations
         needsHumanReview: slot === 2 && verdict === "RECOMMEND", ...counts, etPlaceholderShare: pick.vals.length ? Math.round(share(pick.et, pick.vals.length) * 1000) / 1000 : null,
-        decidedBy: pick.failedRules[0] ?? "allPassed", failedRules: pick.failedRules });
+        decidedBy: pick.failedRules[0] ?? "allPassed", failedRules: pick.failedRules, candidates, bestField: ok[0]?.f.path ?? null });
     }
   }
   return out;

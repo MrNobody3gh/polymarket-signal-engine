@@ -155,3 +155,30 @@ Then the result is stated as it is: the best-band table, the category mix and th
 
 ### 8.6 Not measured by the step that wrote this
 No venue or database was reachable: every number above is to be produced by the run. The tests (`tests/phase4-diagnose.test.ts`, `tests/phase4-scripts.test.ts`) run the whole path on fixtures with hand-derived answers, including a zero listing, a 7,000-market listing, an explicit cap and a database that throws on any write.
+
+## 9. Step 4.0c: Kalshi funnel, title search for every pair, one category table
+
+Nothing here was measured by the step that wrote it; the tests run every path on fixtures with hand-derived answers.
+
+### 9.1 The Kalshi funnel (`--kalshi`)
+`src/lib/phase4/venue-funnel.ts`. The same stages, in the same order, from the **same signal window** as the US run (the combined command passes the US run's end to the Kalshi run), with the same caveats printed. Differences that are facts of the venue, not choices:
+- **Kalshi shares no identifier with Polymarket**, so `EXACT` is structurally 0 and only `PROBABLE` (title ≥ 0.85, equal numbers and negations, dates within one day, the outcome label among the market's labels: `Yes`, `No`, `yes_sub_title`, `no_sub_title`) can map. Read the `EXACT+PROBABLE` column; PROBABLE is never verified.
+- **Tradable at the signal's evaluation time** = opened (`open_time` ≤ evaluation) and not closed (evaluation < `close_time`); an open market with no close time counts as tradable; otherwise unknown (a reject once measured). Resolution-like fields (`expected_expiration_time`, `latest_expiration_time`) are never consulted.
+- **Event time** from the S1a recommendations for Kalshi (`s1a_summary.json`, venue `kalshi`) through the same §3.3 pipeline; without them the timestamp and later stages are `n/m`, and PROBABLE falls back to a close-like date.
+- A listing cut off at the cap (`--kalshi-max`, default 40,000) is reported: mapped counts are a lower bound.
+Outputs: `s1b_funnel_kalshi.json`, `s1b_mapping_review_kalshi.csv`. The combined run prints one summary of ≤ 60 lines: both funnels side by side, the mapping and timestamp-free diagnostic lines, the Kalshi listing counts, and the table of 9.3.
+
+### 9.2 Title search for every pair (`npm run phase4:title-search`)
+`src/lib/phase4/title-search.ts`. The 4.0b diagnostic compared titles with a **sample** of each listing; this asks the venue. For each distinct market+outcome pair behind our entry signals with score ≥ 68 (all scores with `--all-scores`, after the high-score ones, while the budget lasts) a **short normalised query** is built (head-to-head titles become the two sides only; other titles keep their first distinct content words, numbers included; a name outcome is added; ≤ 80 characters) and sent to:
+- the **US exchange**'s documented `GET /v1/search?query=…&limit=10` (the response shape is unverified, so events and markets are both read), paced at its documented 60 requests per minute (~740 queries ≈ 14 minutes);
+- **Kalshi**: no free-text market search appears in the published documentation as far as the summaries show (not verified), so the lookup is in the **complete bounded listing** fetched in Part A (`mode: "listing"`, stated in the output); where that listing was cut off, its result is a lower bound.
+Candidates are scored with the existing similarity function (`diagnoseCandidates`); bands ≥ 0.90, 0.70–0.90, 0.50–0.70, 0.30–0.50, < 0.30; how many pairs return any candidate; `PROBABLE` keeps its definition (no date is checked: `dateChecked` is the literal false; nothing is verified). A **hard total-request budget** (`--search-max-requests`, default 2,000) stops the run with a message naming how many pairs were searched and how many were not; a refusal (401/403/451) ends that venue's search at once, no workaround. Outputs: `s1b_title_search_<venue>.csv` (our title, outcome, stratum, score, signals, wallet, the query, band, label, candidates returned, the best three candidates with similarity, category and id), `s1b_title_search_summary.json`; the console shows the 15 best matches and the 10 near-misses per venue (≤ 60 lines in all) so the owner can judge by eye.
+
+### 9.3 One category table
+Our score ≥ 68 flow, the Kalshi listing and the US-exchange listing by stratum in one table (counts and shares, each side over its own total; `n/m` where a listing was not fetched). The US column needs `--diagnose` (it uses that run's listing totals). Strata are our keyword heuristic over Kalshi's event category, title and ticker words (an esports title filed under "Sports" is recognised); its error rate is unmeasured.
+
+### 9.4 Running it
+```
+npm run phase4:coverage -- --diagnose --kalshi --print-files S1_COMPACT.md
+npm run phase4:title-search -- --print-files s1b_title_search_summary.json
+```

@@ -21,18 +21,18 @@ export type HttpResult<T = unknown> =
 export interface HttpEvent { url: string; ok: boolean; kind: string; status: number | null; attempts: number }
 export interface PoliteHttpOptions {
   fetch?: typeof fetch; sleep?: (ms: number) => Promise<void>; now?: () => number;
-  userAgent?: string; minIntervalMs?: number; maxAttempts?: number; timeoutMs?: number; blockedStop?: number; maxRetryAfterMs?: number;
+  userAgent?: string; minIntervalMs?: number; /** a SLOWER gap for one origin (e.g. a venue whose documented limit is 60 requests/minute); never faster than the 500 ms floor */ originGapMs?: Record<string, number>; maxAttempts?: number; timeoutMs?: number; blockedStop?: number; maxRetryAfterMs?: number;
 }
 
 export class PoliteHttp {
   private f: typeof fetch; private sleep: (ms: number) => Promise<void>; private now: () => number;
   private ua: string; private gap: number; private maxAttempts: number; private timeoutMs: number; private blockedStop: number; private maxRetryAfterMs: number;
-  private lastStart = -Infinity; private blockedRun = new Map<string, number>(); private stopped = new Set<string>();
+  private originGaps = new Map<string, number>(); private lastStart = -Infinity; private blockedRun = new Map<string, number>(); private stopped = new Set<string>();
   /** Every request outcome, in order (urls without credentials by construction). Scripts summarise it. */
   readonly events: HttpEvent[] = []; requests = 0;
   constructor(o: PoliteHttpOptions = {}) {
     this.f = o.fetch ?? globalThis.fetch.bind(globalThis); this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))); this.now = o.now ?? (() => Date.now());
-    this.ua = o.userAgent ?? DEFAULT_USER_AGENT;
+    this.ua = o.userAgent ?? DEFAULT_USER_AGENT; for (const [k, v] of Object.entries(o.originGapMs ?? {})) this.originGaps.set(k, Math.max(500, v));
     // The 2 requests/second ceiling is a hard floor on the gap: a caller may be slower, never faster.
     this.gap = Math.max(500, o.minIntervalMs ?? 500); this.maxAttempts = Math.max(1, Math.min(3, o.maxAttempts ?? 3));
     this.timeoutMs = o.timeoutMs ?? 20_000; this.blockedStop = Math.max(1, o.blockedStop ?? 2); this.maxRetryAfterMs = o.maxRetryAfterMs ?? 30_000;
@@ -40,8 +40,8 @@ export class PoliteHttp {
   isStopped(origin: string): boolean { return this.stopped.has(origin); }
   private originOf(url: string): string { try { return new URL(url).origin; } catch { return url; } }
 
-  private async pace() {
-    const wait = this.lastStart + this.gap - this.now(); if (wait > 0) await this.sleep(wait);
+  private async pace(origin: string) {
+    const wait = this.lastStart + Math.max(this.gap, this.originGaps.get(origin) ?? 0) - this.now(); if (wait > 0) await this.sleep(wait);
     this.lastStart = this.now();
   }
 
@@ -51,7 +51,7 @@ export class PoliteHttp {
     if (this.stopped.has(origin)) return done({ ok: false, kind: "BLOCKED_SKIPPED", status: null, message: `skipped: ${origin} refused access earlier in this run and is not asked again`, attempts: 0 }, 0);
     let last: HttpResult<T> = { ok: false, kind: "NETWORK", status: null, message: "no attempt made", attempts: 0 };
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
-      await this.pace(); this.requests++;
+      await this.pace(origin); this.requests++;
       const t0 = this.now(); let retryAfterMs = 0;
       try {
         const res = await this.f(url, { method: "GET", headers: { Accept: "application/json", "User-Agent": this.ua }, signal: AbortSignal.timeout(this.timeoutMs), redirect: "follow" });

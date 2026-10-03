@@ -18,6 +18,7 @@
     "db:push": "supabase db push",
     "phase4:ts-audit": "tsx scripts/phase4/timestamp-audit.ts",
     "phase4:coverage": "tsx scripts/phase4/coverage-probe.ts",
+    "phase4:title-search": "tsx scripts/phase4/title-search.ts",
     "phase4:mutations": "tsx scripts/phase4/mutation-check.ts"
   },
   "dependencies": {

@@ -104,13 +104,28 @@ const leaf = (name: string) => name.split(".").pop()!.replace(/\[\]/g, "").repla
 export function classifyFieldName(name: string): FieldRole {
   const n = leaf(name);
   if (!n) return "NOT_TIME";
-  if (/resol|settle|payout|redeem|finaliz|^uma|closed(time|at|date|ts|timestamp)?$|closedtime|ended(at|time)|finished|concluded|completed/.test(n)) return "RESOLUTION_LIKE";
-  if (/creat|listed|published|deployed|inserted/.test(n)) return "CREATION_LIKE";
+  // Kalshi (documented field names, UNVERIFIED here): expected_expiration_time is "when the outcome is expected to be known" (a forecast of the
+  // RESOLUTION, a few hours after a game's start), latest_expiration_time is the settlement backstop (the deprecated expiration_time too, see KALSHI_ROLE_OVERRIDES: a generic `expirationTime` stays close-like), settlement_ts
+  // the settlement itself: all after-the-fact times, never a start or a close.
+  if (/resol|settle|payout|redeem|finaliz|^uma|closed(time|at|date|ts|timestamp)?$|closedtime|ended(at|time)|finished|concluded|completed|expectedexpiration|latestexpiration|determinationtime/.test(n)) return "RESOLUTION_LIKE";
+  // open_time is when trading in the market opens: a listing-like time, never an event start (a start that coincides with it is a listing time).
+  if (/creat|listed|published|deployed|inserted|^open(time|date|ts|at|timestamp)$/.test(n)) return "CREATION_LIKE";
   if (/updat|modif|refresh|fetched|synced|lasttrade|lastupdate/.test(n)) return "UPDATE_LIKE";
   if (/gamestart|eventstart|matchstart|kickoff|scheduledstart|startsat|starttime|startdate|startat|^start|start(ts|timestamp)$/.test(n)) return "START_LIKE";
   if (/end|close|clos|deadline|expir|until|cutoff/.test(n) && /(date|time|at|ts|timestamp|iso|^end|^close|deadline|expir|cutoff)/.test(n)) return "CLOSE_LIKE";
   if (/(time|date|timestamp|at|ts)$/.test(n) || /timestamp/.test(n)) return "OTHER_TIME";
   return "NOT_TIME";
+}
+
+/**
+ * Venue-specific roles for names that are generic elsewhere. Kalshi's deprecated `expiration_time` is documented (UNVERIFIED here) as the legacy
+ * latest-expiration (settlement backstop) time, so it is RESOLUTION_LIKE on that venue and never a close time.
+ */
+export const KALSHI = "kalshi";
+export const KALSHI_ROLE_OVERRIDES: Readonly<Record<string, FieldRole>> = { expirationtime: "RESOLUTION_LIKE" };
+export function classifyFieldNameFor(venue: string | undefined, name: string): FieldRole {
+  if (venue === KALSHI) { const o = KALSHI_ROLE_OVERRIDES[leaf(name)]; if (o) return o; }
+  return classifyFieldName(name);
 }
 
 /** Roles that can never fill a hierarchy slot, whatever the audit measured. */

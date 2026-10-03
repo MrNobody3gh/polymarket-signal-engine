@@ -42,7 +42,24 @@ export interface GameStartDive {
   resolutionMinusStart: { sport: string; events: number; positiveShare: number | null; within12hShare: number | null; within24hShare: number | null; p10Hours: number | null; p50Hours: number | null; p90Hours: number | null }[];
   /** Time of day per DISTINCT EVENT (UTC and Eastern), by sport. */
   clockPerEvent: ClockRow[]; clockPerEventEastern: ClockRow[];
+  /** `gameStartTime` on single-game market types (MONEYLINE, SPREAD, TOTAL, PROP, …) versus FUTURES markets, per sport (4.0c, Part D2). */
+  futures: FuturesRow[];
 }
+/** The classes of market type the comparison separates. */
+export type MarketClass = "single_game" | "futures" | "unclassified";
+export const marketClassOf = (type: string): MarketClass => (/FUTURE/.test(type) ? "futures" : type === "(unknown)" || type === "(none)" ? "unclassified" : "single_game");
+export interface FuturesRow {
+  sport: string; class: MarketClass; events: number; withField: number; distinctClocks: number; topClock: string | null; topClockShare: number | null;
+  /** gameStartTime minus the creation-like field, hours (positive = the game starts after the market was created), per event */
+  startMinusCreationHours: { p10: number | null; p50: number | null; p90: number | null } | null;
+  /** Share of events whose gameStartTime is within 60 minutes of a creation-like field (a listing time, not a kick-off). */
+  withinHourOfCreationShare: number | null;
+  /** resolution − gameStartTime, hours, per resolved event */
+  resolutionMinusStartHours: { n: number; p10: number | null; p50: number | null; p90: number | null; within24hShare: number | null } | null;
+}
+export interface FuturesVerdict { sport: string; verdict: "SINGLE_GAME_ONLY" | "NO_DIFFERENCE_OBSERVED" | "INSUFFICIENT_DATA"; rule: string }
+/** The fixed rule for the verdict (a report of what differs, not a policy): see `futuresVerdicts`. */
+export const FUTURES_RULE = { minEventsPerClass: 30, maxMedianResolutionGapHoursSingleGame: 24, listingTimeShare: 0.5 } as const;
 const round = (x: number | null, d = 1) => (x === null ? null : Math.round(x * 10 ** d) / 10 ** d);
 const clockRows = (rows: { sport: string; clock: string }[]): ClockRow[] => {
   const by = new Map<string, Map<string, number>>(); for (const r of rows) { const m = by.get(r.sport) ?? new Map<string, number>(); m.set(r.clock, (m.get(r.clock) ?? 0) + 1); by.set(r.sport, m); }
@@ -68,7 +85,42 @@ export function gameStartDeepDive(venue: string, ms: AuditMarket[], inv: FieldIn
   const rm = sports.map((sp) => { const rows = withField.filter((m) => sportOf(m) === sp && m.resolved).flatMap((m) => { const refMs = (() => { const v = refs.map((r) => r.get(m)).filter((x): x is number => x !== null); return v.length ? Math.min(...v) : null; })(); return refMs === null ? [] : [(refMs - instantOf(m.flat[field!])!) / 3_600_000]; });
     return { sport: sp, events: rows.length, positiveShare: rows.length ? round(rows.filter((h) => h > 0).length / rows.length, 3) : null, within12hShare: rows.length ? round(rows.filter((h) => h > 0 && h <= 12).length / rows.length, 3) : null, within24hShare: rows.length ? round(rows.filter((h) => h > 0 && h <= 24).length / rows.length, 3) : null, p10Hours: round(quantile(rows, 0.1)), p50Hours: round(quantile(rows, 0.5)), p90Hours: round(quantile(rows, 0.9)) }; }).filter((r) => r.events > 0);
   const clocks = withField.map((m) => { const ms0 = instantOf(m.flat[field!])!; return { sport: sportOf(m), utc: new Date(ms0).toISOString().slice(11, 19), et: easternParts(ms0).time }; });
-  return { venue, field, eventStartField: evStart, marketTypeField: mt, presence, reach, vsEventStart, vsCreation, resolutionMinusStart: rm, clockPerEvent: clockRows(clocks.map((c) => ({ sport: c.sport, clock: c.utc }))), clockPerEventEastern: clockRows(clocks.map((c) => ({ sport: c.sport, clock: c.et }))) };
+  return { venue, field, eventStartField: evStart, marketTypeField: mt, presence, reach, vsEventStart, vsCreation, resolutionMinusStart: rm, clockPerEvent: clockRows(clocks.map((c) => ({ sport: c.sport, clock: c.utc }))), clockPerEventEastern: clockRows(clocks.map((c) => ({ sport: c.sport, clock: c.et }))), futures: futuresComparison(ms, inv, field, mt, sports) };
+}
+
+/** `gameStartTime` per sport for single-game market types versus FUTURES markets: time-of-day spread, relation to creation and to resolution (events are counted once per class). */
+export function futuresComparison(ms: AuditMarket[], inv: FieldInventory[], field: string | null, marketTypeField: string | null, sports: string[]): FuturesRow[] {
+  if (!field) return []; const refs = resolutionReferences(inv); const creations = inv.filter((f) => f.role === "CREATION_LIKE"); const out: FuturesRow[] = [];
+  for (const sp of sports) for (const cls of ["single_game", "futures", "unclassified"] as MarketClass[]) {
+    const sel = ms.filter((m) => m.stratum === sp && marketClassOf(rawMarketType(m, marketTypeField)) === cls); if (!sel.length) continue;
+    const evs = collapseToEvents(sel); const has = evs.filter((m) => instantOf(m.flat[field]) !== null); const clock = new Map<string, number>(); for (const m of has) { const c = new Date(instantOf(m.flat[field])!).toISOString().slice(11, 19); clock.set(c, (clock.get(c) ?? 0) + 1); }
+    const top = [...clock.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0];
+    const cre = has.flatMap((m) => { const t = instantOf(m.flat[field])!; const c = creations.map((f) => instantOf(m.flat[f.path])).filter((x): x is number => x !== null); return c.length ? [{ gap: (t - Math.min(...c)) / 3_600_000 }] : []; });
+    const res = has.filter((m) => m.resolved).flatMap((m) => { const v = refs.map((r) => r.get(m)).filter((x): x is number => x !== null); return v.length ? [(Math.min(...v) - instantOf(m.flat[field])!) / 3_600_000] : []; });
+    out.push({ sport: sp, class: cls, events: evs.length, withField: has.length, distinctClocks: clock.size, topClock: top?.[0] ?? null, topClockShare: top ? round(top[1] / has.length, 3) : null,
+      startMinusCreationHours: cre.length ? { p10: round(quantile(cre.map((x) => x.gap), 0.1)), p50: round(quantile(cre.map((x) => x.gap), 0.5)), p90: round(quantile(cre.map((x) => x.gap), 0.9)) } : null,
+      withinHourOfCreationShare: cre.length ? round(cre.filter((x) => Math.abs(x.gap) <= 1).length / cre.length, 3) : null,
+      resolutionMinusStartHours: res.length ? { n: res.length, p10: round(quantile(res, 0.1)), p50: round(quantile(res, 0.5)), p90: round(quantile(res, 0.9)), within24hShare: round(res.filter((h) => h > 0 && h <= 24).length / res.length, 3) } : null });
+  }
+  return out;
+}
+/**
+ * Per sport: can `gameStartTime` be trusted only for single-game market types? A rule, stated so it can be argued with:
+ *  - INSUFFICIENT_DATA when either class has fewer than 30 events carrying the field;
+ *  - SINGLE_GAME_ONLY when the single-game class looks like a start (median resolution − start within 24 h) and the futures class does not
+ *    (median resolution − start above 24 h, or more than half of the futures events have a value within an hour of creation);
+ *  - NO_DIFFERENCE_OBSERVED otherwise.
+ */
+export function futuresVerdicts(rows: FuturesRow[]): FuturesVerdict[] {
+  const R = FUTURES_RULE; const out: FuturesVerdict[] = [];
+  for (const sp of [...new Set(rows.map((r) => r.sport))].sort()) {
+    const sg = rows.find((r) => r.sport === sp && r.class === "single_game"), fu = rows.find((r) => r.sport === sp && r.class === "futures");
+    if (!sg || !fu || sg.withField < R.minEventsPerClass || fu.withField < R.minEventsPerClass) { out.push({ sport: sp, verdict: "INSUFFICIENT_DATA", rule: `needs ≥ ${R.minEventsPerClass} events with the field in both classes (single-game ${sg?.withField ?? 0}, futures ${fu?.withField ?? 0})` }); continue; }
+    const sgOk = sg.resolutionMinusStartHours !== null && sg.resolutionMinusStartHours.p50 !== null && sg.resolutionMinusStartHours.p50 <= R.maxMedianResolutionGapHoursSingleGame && sg.resolutionMinusStartHours.p50 > 0;
+    const fuBad = (fu.resolutionMinusStartHours?.p50 ?? 0) > R.maxMedianResolutionGapHoursSingleGame || (fu.withinHourOfCreationShare ?? 0) > R.listingTimeShare;
+    out.push(sgOk && fuBad ? { sport: sp, verdict: "SINGLE_GAME_ONLY", rule: `single-game median resolution−start ${sg.resolutionMinusStartHours!.p50} h ≤ ${R.maxMedianResolutionGapHoursSingleGame} h; futures median ${fu.resolutionMinusStartHours?.p50 ?? "n/m"} h, ${((fu.withinHourOfCreationShare ?? 0) * 100).toFixed(0)} % within an hour of creation` } : { sport: sp, verdict: "NO_DIFFERENCE_OBSERVED", rule: `single-game median ${sg.resolutionMinusStartHours?.p50 ?? "n/m"} h; futures median ${fu.resolutionMinusStartHours?.p50 ?? "n/m"} h, ${((fu.withinHourOfCreationShare ?? 0) * 100).toFixed(0)} % within an hour of creation` });
+  }
+  return out;
 }
 
 // ───────────────────────────────────────────── the same event on both venues ────────────────────────────

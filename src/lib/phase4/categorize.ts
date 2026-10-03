@@ -37,6 +37,8 @@ export function categorize(m: { title?: string | null; slug?: string | null; tag
     if (has(CRYPTO, fromTags) || /crypto/.test(fromTags)) return { category: has(SHORT_TERM, hay) ? "crypto_short_term" : "crypto_other", sport: null, basis: "tags" };
     if (/politic|election|geopolit|world affairs|government/.test(fromTags)) return { category: "politics", sport: null, basis: "tags" };
     const sp = /sports?|nba|nfl|mlb|nhl|soccer|football|tennis|ufc|mma|cricket|golf|f1|basketball|baseball|hockey/.test(fromTags);
+    // a venue whose category is a plain "Sports" (Kalshi) also files esports there: the title and slug decide between the two
+    if (sp && has(ESPORTS, hay)) return { category: "esports", sport: null, basis: slug ? "slug" : "title" };
     if (sp) return { category: "sports", sport: sportOf(fromTags) ?? sportOf(slug) ?? sportOf(hay) ?? "other_sport", basis: "tags" };
   }
   if (has(ESPORTS, hay)) return { category: "esports", sport: null, basis: slug ? "slug" : "title" };
