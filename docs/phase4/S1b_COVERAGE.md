@@ -81,6 +81,8 @@ Without `s1a_summary.json` the timestamp stage is reported not measured and only
 
 ## 6. Results
 
+*Update (4.0b): the owner ran the scripts on production infrastructure on 3 Oct 2026 and reported findings; those result files are not committed here, so this page still shows no measured value. Section 8 below describes the method added in response.*
+
 **Not measured in this step.** The fields below are what the run will fill.
 
 | Item | Value |
@@ -121,3 +123,35 @@ Reading it (conditional on those inputs, not a finding): at 110 a day, 10 points
 | How wrong is the category heuristic? | Hand-label 50 signals from `s1b_mapping_review.csv`'s category column |
 | Does the settlement lag of settled trades understate the real lag (selection)? | Compare the median hold of settled trades with the age of still-open trades in the same window (a one-line query on `paper_executions`) |
 | Is the eligible-like proxy close to the venue-measured eligible flow? | Both are printed side by side by the same run |
+
+## 8. Step 4.0b: why did nothing map? (`--diagnose`)
+
+The first production run (3 Oct 2026, reported by the owner) found 1,181 entry signals with score ≥ 68 and **0 mapped** (EXACT 0, PROBABLE 0; 727 distinct market+outcome pairs NONE), the venue's open and closed listings each cut off at 3,000 markets, and no review pairs. A zero can be a true absence of overlap or a constraint of the matcher (the strict PROBABLE needs a date on both sides and there was almost no usable venue timestamp). This step adds a diagnostic that **does not need a timestamp**. It makes no policy: it shows what overlaps.
+
+```
+npm run phase4:coverage -- --diagnose --print-files s1b_diagnostic.json,s1b_funnel.json,s1b_mapping_diagnostic.csv
+# --diagnose            full venue listing (pages until it ends, ≤ 2 requests/second), the timestamp-free matcher, s1b_diagnostic.json, s1b_mapping_diagnostic.csv
+# --us-max N            an explicit cap, also in diagnostic mode (the cut-off is then reported as a lower bound)
+# --us-archived-query   query string for archived markets (UNVERIFIED default "archived=true"; "none" skips it)
+# --diagnostic-sample N sample size for the CSV (default 100)
+```
+
+### 8.1 Full listing and totals
+Without a cap the open, closed and (if the query works) archived listings are fetched until the venue's listing ends. `s1b_diagnostic.json` records, per list and overall: markets, distinct events, counts **by the venue's own status**, by our category heuristic, and by the venue's own category/tag labels (`categories`, `tags`, event tags). Without `--diagnose` the cap is unchanged (6,000 in total).
+
+### 8.2 The diagnostic matcher (probe only; `diagnoseSignal` in `mapping.ts`)
+Candidates are generated **without any timestamp**: shared identifiers (condition id, token id, slug, event slug) and the venue markets sharing the most content tokens with the title (at most 60, ties broken by market id). For each candidate: title similarity, participant similarity (home/away order ignored), whether numbers and negations agree, outcome match, category match and identifier match. The label is **`PROBABLE` or `NONE` only**: PROBABLE here means an identifier match, or title similarity ≥ 0.85 with equal numbers and negations and a matching outcome, **with no date checked** (`dateChecked` is the literal `false`); never `EXACT`, never verified. The funnel's own PROBABLE definition (dates within a day on both sides) is **unchanged**; nothing was loosened to produce a number. A pair is also flagged `sameParticipants` when the teams match but the title does not (same game, different market type).
+For the 727-style set (every market+outcome behind a score ≥ 68 signal) the file reports the **number of pairs by best-candidate similarity band** (≥ 0.90, 0.70–0.90, 0.50–0.70, 0.30–0.50, < 0.30), the number of candidates generated in each band, how many pairs are PROBABLE / identifier matches / same participants (and of those how many differ in title), how often the best candidate has the same category, and the same table by our category.
+
+### 8.3 To judge by eye: `s1b_mapping_diagnostic.csv` and the category mix
+A **stratified random sample of 100 of our signal markets** (strata: our category × score ≥ 68 or not; reproducible: seeded by the window start), each with our title, outcome and slug, and its **nearest 3 venue titles** with title and participant similarity, the venue's category and market id/url, and empty reviewer columns. `s1b_diagnostic.json` also holds the **category mix of our flow versus the venue's listing** (share of all signals, of score ≥ 68 signals and of distinct markets, against the venue's share, open/closed): for example short-term crypto "up or down" markets against what the venue lists.
+
+### 8.4 A second funnel line, not the V1 policy (`funnel.dateLevel`)
+In `s1b_funnel.json` and the summary: all → score → mapped → tradable → **an Eastern calendar date is implied by a placeholder or date-only close-like field of the mapped venue market** → **that date is the evaluation's Eastern date or the next**. Labelled `NOT THE V1 POLICY`; the in-play check and the lead time are marked **cannot be evaluated at date level**; reported per day like the V1 funnel, in both variants (EXACT; EXACT + PROBABLE). It is **never** an input to the feasibility table (the eligible rate there still comes from the V1 funnel or the labelled proxy; `tests/phase4-scripts.test.ts` pins this).
+To let the strict matcher compare dates when no timestamp field is recommended, the candidate's date is taken from the recommended field if there is one, else from a close-like field (the Eastern date it implies, or the Eastern date of a real close time). The rule itself, a date within one day on both sides, is unchanged, and the matched candidates are counted by how their date was obtained (`dateBasis`: `implied`, `close_date`, `none`).
+
+### 8.5 If a mapping cannot be established
+Then the result is stated as it is: the best-band table, the category mix and the CSV are the evidence (for example most pairs in the lowest band and a category mix with little overlap). Nothing in the code produces a number by relaxing a rule; PROBABLE is never reported as a mapping. Whether anything can be done about it is the owner's decision.
+
+### 8.6 Not measured by the step that wrote this
+No venue or database was reachable: every number above is to be produced by the run. The tests (`tests/phase4-diagnose.test.ts`, `tests/phase4-scripts.test.ts`) run the whole path on fixtures with hand-derived answers, including a zero listing, a 7,000-market listing, an explicit cap and a database that throws on any write.

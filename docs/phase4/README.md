@@ -10,6 +10,7 @@ simulation or threshold changed. Plan: `docs/PHASE4_PLAN.md` (v2).
 | B S1a timestamp audit | [`S1a_TIMESTAMP_AUDIT.md`](S1a_TIMESTAMP_AUDIT.md) | `src/lib/phase4/{timestamps,audit,s1a,venues,http,categorize}.ts` | `npm run phase4:ts-audit` |
 | C S1b coverage probe and feasibility | [`S1b_COVERAGE.md`](S1b_COVERAGE.md) | `src/lib/phase4/{mapping,funnel,feasibility,stats,probe,readonly-db}.ts` | `npm run phase4:coverage` |
 | D S1c book and fee capture design | [`S1c_BOOK_AND_FEE_CAPTURE.md`](S1c_BOOK_AND_FEE_CAPTURE.md) | — (design only) | — |
+| 4.0b event-level S1a, diagnostic | sections 8 of the S1a and S1b documents | `src/lib/phase4/{events,diagnose}.ts`, `audit.ts`, `mapping.ts`, `funnel.ts`, `probe.ts`, `cli.ts` | `npm run phase4:ts-audit -- --us-targeted default`, `npm run phase4:coverage -- --diagnose`, `--print-files a,b` |
 | tests | `tests/phase4-*.test.ts`, `tests/helpers/phase4*.ts`, `tests/fixtures/phase4/` | | `npm test` |
 | mutation check | every rule above, broken on purpose | `scripts/phase4/mutation-check.ts` | `npm run phase4:mutations` |
 
@@ -23,7 +24,7 @@ Both scripts need only `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY
 
 ## Status of the measurements
 
-**Not run.** The authoring environment's network policy returned `403 Host not in allowlist` for every venue host (Gamma, `docs.polymarket.us`, `gateway.polymarket.us`, `api.polymarket.us`) and no database was configured. See S1a §1 for the exact attempts. Everything else (libraries, scripts, tests, Part A and Part D) is complete.
+**Not run by the authoring environment** (and the owner ran the scripts once on 3 Oct 2026: both venues reachable, results reported in the 4.0b brief; the result files are not in this repository, so these pages do not reproduce them). The authoring environment's network policy returned `403 Host not in allowlist` for every venue host (Gamma, `docs.polymarket.us`, `gateway.polymarket.us`, `api.polymarket.us`) and no database was configured. See S1a §1 for the exact attempts. Everything else (libraries, scripts, tests, Part A and Part D) is complete.
 
 ## Decisions D59–D72 (**accepted as recommended by the owner, 3 Oct 2026**)
 
@@ -45,3 +46,16 @@ Both scripts need only `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY
 | D72 | Book-capture cadence, N levels, raw retention, REJECT-arm `FILL_PROBE` (S1c §8) | As proposed in S1c |
 
 Status: every recommendation in the third column stands as decided. D59–D62 are already implemented as described; D63–D65 and D70–D71 are carried into the build steps named in the table; D66 is revisited with S1b's `freshAtFinal`; D67–D69 and D72 are acted on in the order of the run sheet above.
+
+## Step 4.0b: new open decisions (continue from D72)
+
+Nothing was measured by this step (no venue or database access); these are the choices the new measurements will present, with the options. The owner decides.
+
+| # | Decision | Options |
+|---|---|---|
+| D73 | Event level as the unit of every S1a reliability rule, with a minimum of 30 distinct events (implemented as the brief asks; the thresholds are unchanged) | Confirm; or also choose how an event whose markets disagree on a field is treated (today: the first market represents it, no flag) |
+| D74 | Eastern-time date placeholders (`ET_MIDNIGHT` / `ET_END_OF_DAY`) are date-only values for every purpose | Confirm; and whether a **date-level** time rule may exist at all. Options after the run: (a) V1 stays timestamp-only, with the flow `s1b_funnel.json` shows; (b) a date-level rule with the in-play check obtained elsewhere (the date alone cannot give it); (c) other venues or sources of start times |
+| D75 | The date-level funnel row (not the V1 policy) and the diagnostic's timestamp-free PROBABLE are reporting only | Confirm: neither is an input to eligibility or to the feasibility table |
+| D76 | Per-sport quota for the `gameStartTime` evidence: ≥ 100 markets from ≥ 30 distinct events | Keep; or lower for sports that cannot reach it, with the shortfall stated |
+| D77 | The US query syntax for `categories` and `sportsMarketTypes` and the archived query | Set from `docs.polymarket.us` before the targeted run (`--us-targeted`, `--us-archived-query`); the defaults are guesses |
+| D78 | Cross-venue participant matching without an alias list ("Man City" / "Manchester City" scores 0.33 and is not matched) | Accept the loss and read the matched/head-to-head counts; or add a small alias table per sport after the first run |

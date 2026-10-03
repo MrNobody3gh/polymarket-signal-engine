@@ -102,6 +102,8 @@ npm run phase4:ts-audit -- --with-db        # needs NEXT_PUBLIC_SUPABASE_URL and
 
 ## 6. Results
 
+*Update (4.0b): the owner ran the scripts on production infrastructure on 3 Oct 2026 and reported findings; those result files are not committed here, so this page still shows no measured value. Section 8 below describes the method added in response.*
+
 **None.** The tables below are what the run fills in; they are deliberately empty rather than guessed.
 
 | Venue | Stratum | Slot 1 field | Slot 2 field | Usable share | Start disagreement vs the other venue (p50 / p95 / max, min) |
@@ -121,3 +123,53 @@ npm run phase4:ts-audit -- --with-db        # needs NEXT_PUBLIC_SUPABASE_URL and
 | Is the public US market-data API really keyless and are automated reads permitted by its terms? | Read the terms at docs.polymarket.us before the first run; the first unauthenticated GET shows the key question |
 | Do `lenient` formats (space separator, `+00`) occur, and may they be accepted? | `formats` per field in the inventory; `lenientFormatShare` in the recommendation evidence; accept per field only when 100 % lenient *and* consistent |
 | Time zone of date-only values (`endDateIso`) | Irrelevant to the rules (date-only is never used) but needed to read the proxy; compare `endDateIso` with the UTC date of `endDate` where both exist |
+
+## 8. Step 4.0b: event-level reliability, Eastern-time placeholders, `gameStartTime`, venue agreement
+
+Why: the first production run (3 Oct 2026, reported by the owner; its result files are not in this repository) showed that in most strata one clock time held most values (04:59:00, 03:59:00, 04:00:00 UTC …), and raised a method concern: the rules counted **markets**, but markets of one event share their times. That concern was right: with the market as the unit, a sample dominated by a few events looked like "one clock time holds more than half" even for a genuine start time. Nothing in this section was measured by the step that wrote it (no venue access); it is code, fixture tests and method.
+
+### 8.1 Every rule is evaluated per distinct event (`recommendSlots`, `collapseToEvents`)
+
+- The event of a market is the venue's event identifier (`events[].id`/`slug` on the international venue, `event.id`/`eventSlug` on the US venue), else a key from the **normalised title and the end date** (`eventFallbackKey`); never the market's own slug or id.
+- **One representative market per event** (the first in input order) carries the event into every rule: presence, usable share, placeholder share, dominant clock time, ordering against resolution, coincidence with a creation time, the start→resolution gap, the start-before-close comparison. Limitation: a field that differs between the markets of one event is not flagged; the first market's value is used.
+- The minimum is now **30 distinct events** (was 30 markets), for presence and for the resolved events used as ordering evidence. The thresholds themselves are **unchanged** (owner decision D68; `tests/phase4-events.test.ts` pins them).
+- Test on a hand-built world (`tests/helpers/phase4EventWorld.ts`): 6 events × 20 markets with 100 of 120 markets sharing one clock time is **INSUFFICIENT_DATA (6 < 30 events)**, not a placeholder; 60 distinct events all at 04:59 UTC is rejected; 60 events with varied kick-offs is recommended; 29 events × 10 markets stays insufficient; 30 events × 1 market is enough.
+- **Every verdict row now carries** `events`, `markets` (in the stratum), `etPlaceholderShare`, `decidedBy` (the first failing rule: `minEvents`, `usableShare`, `placeholderShare`, `topClock`, `orderedShare`, `creationCoincidence`, `eventTypeGap`, `startBeforeClose`, `evidenceGap`, or `allPassed`) and `failedRules`. The printed summary shows them; the results page has the full table. `S1a_RESULTS.md` also lists markets and **distinct events per stratum**.
+- Sampling: within each stratum the quota is spent on the first market of every distinct event before any second market of an event (`stratifiedSample`), so a fixed sample size reaches as many events as the listing holds.
+- If you think a threshold is wrong: this step could not assess that without data. One observation from the method, not a recommendation: at event level the 50 % dominant-clock rule is a statement about distinct events, which is what it was meant to be; whether 50 % is the right level can only be read from event-level counts in a real run.
+
+### 8.2 Eastern-time date placeholders (`easternPlaceholder`, `impliedEasternDate`, `ET_MIDNIGHT` / `ET_END_OF_DAY`)
+
+A value whose **America/New_York wall clock** is exactly `00:00:00` (`ET_MIDNIGHT`: 04:00Z in summer, 05:00Z in winter) or `23:59:00`/`23:59:59` (`ET_END_OF_DAY`: 03:59Z / 04:59Z of the next UTC day) is a date written as a time. The offset comes from the IANA zone (Node's `Intl`), so the daylight-saving change is handled by the rules of the zone, not by a fixed offset: tests cover both offsets, the autumn change (1 Nov 2026) and the spring change (8 Mar 2026), and the wrong-offset look-alikes (04:00Z in winter is 23:00 the evening before: not a placeholder).
+
+- **Implied calendar date**: the Eastern date of the instant (`ET_MIDNIGHT`), the date that is ending (`ET_END_OF_DAY`: 03:59Z on the 6th implies the 5th), a date-only value as written, `null` for a genuine time of day. It is a date, never a time.
+- `placeholderKind` now returns the ET kinds (after the UTC and wall-clock kinds), so these values count as placeholders in the usable and placeholder shares; the inventory lists them per field, and every verdict row shows `etPlaceholderShare`.
+- **Date-level alternative rows** (`dateLevelRows`, section "Date-level alternative" of the results page): per stratum, the close-like or start-like field whose values most often imply an Eastern date, how many distinct events that covers, split by kind (ET midnight / ET end of day / date-only), whether the implied date is not after the Eastern date of the resolution (and the median days before it). **Shown, never recommended**: `recommended` is the literal `false`, the label is `ALTERNATIVE_DATE_LEVEL`, and each row says the in-play check cannot be evaluated at date level (a date cannot say whether the event has started or how long before it an order would fill). The verdict rules are untouched.
+
+### 8.3 `gameStartTime` deep dive (`gameStartDeepDive`, per venue, in `s1a_<venue>.json` under `gameStart`)
+
+Presence by sport and by market type (markets and distinct events; the market-type field is looked for in the market objects: `sportsMarketType(s)`, `marketType`, `market_type`); which sports reach **≥ 100 markets from ≥ 30 distinct events** (both required; a sport that cannot is reported as not reaching it); agreement with the event-level `startTime` (one pair per event, equal within a minute); the relation to every creation-like field; **resolution minus game start per sport** (positive share, share within 12 h and 24 h, p10/p50/p90 in hours: it should be positive and bounded by a game's length); the time of day **per distinct event**, in UTC and in Eastern.
+
+**US filters.** The brief names `sportsMarketTypes` (MONEYLINE, SPREAD, TOTAL, PROP) and `categories`; their query syntax and category values are **not verified here**. `--us-targeted default` sends one query per major sport (football, basketball, baseball, hockey, soccer, tennis, combat) built from those names (a guess); `--us-targeted "sport=query|sport=query"` replaces them with queries written from `docs.polymarket.us`. Each targeted query is paged until it has ≥ 100 markets from ≥ 30 distinct events or the listing ends (≤ 2 requests/second); the markets are added to the US sample whole; the results page lists, per sport, markets, events, whether the quota was **reached** and why it stopped; a wrong query shows as an error or an empty page and the stratum is reported as unable to reach it.
+
+### 8.4 The same event on both venues (`matchEventsAcrossVenues`)
+
+Events (not markets) are matched by **participant names** parsed from "A vs B" titles (either home/away order, the part before a colon or bracket only, similarity ≥ 0.8 on both sides) and by **Eastern date** (within one day). A tie between two equally good candidates is counted as ambiguous and skipped, never picked. For matched events with a start time on both venues (`gameStartTime`, else an event-level `startTime`, else `eventStartTime`; never `startDate`, which is a listing time) the spread of the start-time differences is reported overall and by stratum (|diff| p50/p90/p95/p99/max, share within 15 and 60 minutes): the input to D51. Names that differ in spelling ("Man City" / "Manchester City" scores 0.33) are **not** matched without an alias list; the counts of head-to-head events per venue and of matched and ambiguous events show how much that costs.
+
+### 8.5 Running it and getting the results back
+
+```
+npm run phase4:ts-audit -- --with-db --us-targeted default --print-files S1a_RESULTS.md,s1a_summary.json
+# --print-files a,b,c  prints the named files after the summary between =====FILE name / =====END name markers, ≤ 200 lines per second, lines over 3,000 characters split (default off)
+```
+Verdict rows and the full tables are in `S1a_RESULTS.md`; per-venue details (inventory, evidence, `gameStart`, `dateLevel`, `targeted`) in `s1a_<venue>.json`.
+
+### 8.6 New ambiguities
+
+| Ambiguity | Cheapest test |
+|---|---|
+| Are the clock times that dominate (03:59/04:59/04:00 UTC) really dates in Eastern, or event times? | `etPlaceholderShare` per stratum and the date-level rows; for ET placeholders the implied date should equal the date of the resolution or one day before it |
+| Does `gameStartTime` agree with `events[].startTime` where both exist? | `gameStart.vsEventStart` per venue |
+| Do the two venues' start times for the same game agree within 15 minutes? | `eventAgreement.overall` and by stratum (needs ≥ 30 matched pairs per sport to read) |
+| Are the 100-markets / 30-events quotas reachable per sport on the US venue? | `targeted[].reachedQuota` after the real filter syntax is set |
+| Do markets of one event ever disagree on a field? | Not measured (the first market represents the event); a 5-line diff over `m.group` in the sample would show it |
