@@ -194,3 +194,8 @@ It is **off** until `PAPER_PORTFOLIO_CONFIG` is set on the worker (no defaults);
 - `npm run portfolio:audit` — read-only check of stored decisions against their current inputs (decision D13), part
   of the switch-on runbook.
 - Code: `src/lib/paper/portfolio/`; migrations `0008`–`0011`.
+
+## Phase 4.0 (read-only audits; no trading exists)
+
+- Gap report, venue timestamp audit, coverage probe and capture design for the planned live-execution phase: **[`docs/phase4/README.md`](docs/phase4/README.md)**; plan: `docs/PHASE4_PLAN.md`.
+- `npm run phase4:ts-audit` and `npm run phase4:coverage` — read-only (select-only database access, public GET only); `npm run phase4:mutations` — mutation check of their tests. Code: `src/lib/phase4/`. Nothing here is wired into the worker, the Vercel routes or any production path.
