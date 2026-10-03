@@ -97,7 +97,7 @@ Flags added: `--kalshi`, `--kalshi-max 40000` (listing cap, markets), `--kalshi-
 ### Status of the measurements: nothing was measured by the step that wrote this
 The authoring environment's network policy answered 403 for every venue host (`gateway.polymarket.us`, `api.elections.kalshi.com`, `docs.polymarket.us`, `docs.kalshi.com`, Gamma) and the documentation-fetch tool was blocked the same way; the documentation facts come from search-engine summaries and are marked **not verified**. Delivered and tested on fixtures with hand-derived answers: all code, the documents, the mutation checks. **Remaining measurements, to be run on production infrastructure:** the three commands above. The tests do not prove any statement about Kalshi's or the US exchange's real responses.
 
-### New open decisions (continue from D78; the owner decides)
+### Decisions D79–D87 (the owner decides; **D80 and D86 settled 3 Oct 2026**: D80 keep 1.1 s per request on the US origin; D86 run with the 40,000-market caps first and raise them only if the run reports being cut off; D79 and D81–D85 and D87 are decided from the run's output)
 | # | Decision | Options, with what the run will show |
 |---|---|---|
 | D79 | Which Kalshi base URL and facts stand: the two documented hosts, public data without authentication, the cursor key, `with_nested_markets`, milestones | Read `S1a_RESULTS.md` "Not established" and `fetch.*` for kalshi; correct `KALSHI_API.md`; if public data needs authentication that part stops (rule) |
