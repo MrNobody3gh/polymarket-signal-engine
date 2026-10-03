@@ -16,6 +16,8 @@
 import { GAMMA_API } from "../polymarket/client";
 import type { PoliteHttp } from "./http";
 import type { RawMarket } from "./audit";
+import { normalizeTitle } from "./mapping";
+import { categorize, stratum } from "./categorize";
 
 export const INTERNATIONAL = "polymarket_intl";
 export const US_EXCHANGE = "polymarket_us";
@@ -24,9 +26,11 @@ export interface UsConfig {
   base: string; marketsPath: string;
   /** Query-string fragments (without `?`). UNVERIFIED defaults; override from the documentation. */
   openQuery: string; closedQuery: string;
+  /** Query for archived markets (diagnostic runs only). UNVERIFIED default; null skips it. */
+  archivedQuery: string | null;
   limitParam: string; pageParam: string | null; pageSize: number;
 }
-export const US_DEFAULTS: UsConfig = { base: "https://gateway.polymarket.us", marketsPath: "/v1/markets", openQuery: "active=true&closed=false", closedQuery: "closed=true", limitParam: "limit", pageParam: "offset", pageSize: 100 };
+export const US_DEFAULTS: UsConfig = { base: "https://gateway.polymarket.us", marketsPath: "/v1/markets", openQuery: "active=true&closed=false", closedQuery: "closed=true", archivedQuery: "archived=true", limitParam: "limit", pageParam: "offset", pageSize: 100 };
 /** Where the owner should confirm every US default. */
 export const US_DOCS = ["https://docs.polymarket.us"];
 export const INTL_DOCS = ["https://docs.polymarket.com"];
@@ -74,17 +78,19 @@ export async function fetchGamma(http: PoliteHttp, o: { closed: boolean; max: nu
 }
 
 /** Page the US venue's markets listing with the configured (unverified) parameters. */
-export async function fetchUs(http: PoliteHttp, cfg: UsConfig, o: { closed: boolean; max: number; maxPages?: number }): Promise<Fetched> {
+export async function fetchUs(http: PoliteHttp, cfg: UsConfig, o: { closed: boolean; max: number; maxPages?: number; /** a query string that replaces the configured open/closed one (targeted fetches); `closed` is then only used to judge whether the venue honoured a filter */ query?: string; /** stop as soon as this returns true for the markets fetched so far (a per-sport quota) */ enough?: (markets: RawMarket[]) => boolean }): Promise<Fetched> {
   const endpoint = `${cfg.base}${cfg.marketsPath}`; const notes: FetchNotes = { endpoint, pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "", errors: [] };
   const out: RawMarket[] = []; const seen = new Set<string>(); let offset = 0; let cursor: string | null = null;
-  for (let page = 0; page < (o.maxPages ?? 40) && out.length < o.max; page++) {
-    let url = `${endpoint}?${o.closed ? cfg.closedQuery : cfg.openQuery}&${cfg.limitParam}=${cfg.pageSize}`;
+  const maxPages = o.maxPages ?? (o.max === Infinity ? 5000 : 40);
+  for (let page = 0; page < maxPages && out.length < o.max; page++) {
+    let url = `${endpoint}?${o.query ?? (o.closed ? cfg.closedQuery : cfg.openQuery)}&${cfg.limitParam}=${cfg.pageSize}`;
     if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`; else if (cfg.pageParam && page > 0) url += `&${cfg.pageParam}=${offset}`;
     const r = await http.getJson(url); notes.pages++;
     if (!r.ok) { notes.errors.push(`${r.kind}${r.status ? ` ${r.status}` : ""}: ${r.message}`); notes.stoppedBecause = `error (${r.kind})`; break; }
     const { records } = extractRecords(r.json); const c = cursorOf(r.json); if (c) notes.cursorKey = c.key;
     let fresh = 0; for (const m of records) { const id = usIdOf(m); if (id && seen.has(id)) continue; if (id) seen.add(id); out.push(m); fresh++; if (out.length >= o.max) break; }
-    if (page === 0 && records.length) notes.filterHonoured = records.every((m) => usIsResolved(m) === o.closed);
+    if (page === 0 && records.length && o.query === undefined) notes.filterHonoured = records.every((m) => usIsResolved(m) === o.closed);
+    if (o.enough?.(out)) { notes.stoppedBecause = "quota reached"; break; }
     if (!records.length) { notes.stoppedBecause = "empty page"; break; }
     if (!fresh) { notes.stoppedBecause = "page repeated (paging parameter ignored?)"; break; }
     if (c) cursor = c.value; else if (cfg.pageParam) offset += records.length; else { notes.stoppedBecause = "no paging mechanism"; break; }
@@ -100,12 +106,14 @@ const first = (m: RawMarket, ...keys: string[]): string | null => { for (const k
 /** Collect label strings from tag arrays on a market or its first event (`tags[].label|slug|name` or plain strings). */
 export function tagsOf(m: RawMarket): string[] {
   const out: string[] = []; const take = (a: unknown) => { if (Array.isArray(a)) for (const t of a) { if (typeof t === "string") out.push(t); else if (t && typeof t === "object") for (const k of ["label", "slug", "name"]) { const v = str((t as RawMarket)[k]); if (v) out.push(v); } } };
-  take(m.tags); const ev = Array.isArray(m.events) ? (m.events[0] as RawMarket | undefined) : (m.event as RawMarket | undefined); take(ev?.tags); take((ev as RawMarket | undefined)?.categories); return out;
+  take(m.tags); take(m.categories); { const c = str(m.category); if (c) out.push(c); } const ev = Array.isArray(m.events) ? (m.events[0] as RawMarket | undefined) : (m.event as RawMarket | undefined); take(ev?.tags); take((ev as RawMarket | undefined)?.categories); return out;
 }
 export const gammaIdOf = (m: RawMarket) => String(m.conditionId ?? m.condition_id ?? m.id ?? "");
 export const gammaIsResolved = (m: RawMarket) => m.closed === true;
 export const gammaTitleOf = (m: RawMarket) => first(m, "question", "title");
-export const gammaGroupOf = (m: RawMarket) => { const ev = Array.isArray(m.events) ? (m.events[0] as RawMarket | undefined) : undefined; return String(ev?.id ?? ev?.slug ?? m.slug ?? gammaIdOf(m)); };
+/** The event a market belongs to: the venue's event id or slug, else a key from the normalised title and the end date (markets of one event share both). Never the market's own slug or id. */
+export const eventFallbackKey = (title: string | null, date: unknown, id: string): string => { const t = normalizeTitle(title); return t ? `title:${t}|${typeof date === "string" ? date.slice(0, 10) : ""}` : `market:${id}`; };
+export const gammaGroupOf = (m: RawMarket) => { const ev = Array.isArray(m.events) ? (m.events[0] as RawMarket | undefined) : undefined; const id = ev?.id ?? ev?.slug; return id !== undefined && id !== null && id !== "" ? String(id) : eventFallbackKey(gammaTitleOf(m), m.endDateIso ?? m.endDate, gammaIdOf(m)); };
 /** CLOB token ids of a Gamma market (`clobTokenIds` is a JSON-encoded string or an array). */
 export const gammaTokenIds = (m: RawMarket): string[] => { const raw = m.clobTokenIds; const arr = Array.isArray(raw) ? raw : typeof raw === "string" ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []; return Array.isArray(arr) ? arr.map(String) : []; };
 export const gammaOutcomes = (m: RawMarket): string[] => { const raw = m.outcomes; const arr = Array.isArray(raw) ? raw : typeof raw === "string" ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []; return Array.isArray(arr) ? arr.map(String) : []; };
@@ -118,7 +126,13 @@ export function usIsResolved(m: RawMarket): boolean {
   for (const k of ["status", "state", "marketState", "market_state"]) { const v = str(m[k]); if (v && /resolv|settled|closed|final|expired|ended/i.test(v)) return true; }
   return false;
 }
-export const usGroupOf = (m: RawMarket) => { const ev = (m.event ?? m.eventId ?? m.event_id) as unknown; if (ev && typeof ev === "object") return String((ev as RawMarket).id ?? (ev as RawMarket).slug ?? usIdOf(m)); return String(ev ?? m.eventSlug ?? m.slug ?? usIdOf(m)); };
+export const usGroupOf = (m: RawMarket) => {
+  const ev = (m.event ?? m.eventId ?? m.event_id) as unknown;
+  if (ev && typeof ev === "object") { const id = (ev as RawMarket).id ?? (ev as RawMarket).slug; if (id !== undefined && id !== null && id !== "") return String(id); }
+  else if (ev !== undefined && ev !== null && ev !== "") return String(ev);
+  if (typeof m.eventSlug === "string" && m.eventSlug) return m.eventSlug;
+  return eventFallbackKey(usTitleOf(m), m.endDate ?? m.endDateIso ?? m.gameStartTime, usIdOf(m));
+};
 export const usOutcomes = (m: RawMarket): string[] => gammaOutcomes(m);
 
 /** Keep an object's shape for a fixture but drop bulk and anything that is not needed to test time handling: long text is truncated, images/descriptions removed. */
@@ -131,4 +145,47 @@ export function sanitizeSample(v: unknown, depth = 0): unknown {
   }
   if (typeof v === "string") return v.length > 160 ? v.slice(0, 157) + "..." : v;
   return v;
+}
+
+
+// ───────────────────────────────────────── listing totals and targeted fetches (4.0b) ────────────────────────
+
+/** The venue's own status label for a market: `archived`, `closed`/`resolved`, `open`, or the raw status string. UNVERIFIED heuristic over conventional fields. */
+export function usStatusLabel(m: RawMarket): string {
+  if (m.archived === true) return "archived";
+  for (const k of ["status", "state", "marketState", "market_state"]) { const v = str(m[k]); if (v) return v.toLowerCase(); }
+  if (m.closed === true || m.resolved === true || m.isResolved === true) return "closed";
+  if (m.closed === false || m.active === true) return "open";
+  return "unknown";
+}
+export interface ListingTotals { markets: number; byStatus: Record<string, number>; byStratum: Record<string, number>; byVenueCategory: Record<string, number>; distinctEvents: number }
+/** Totals of a full listing: by the venue's status, by our category heuristic, by the venue's own category/tag labels. */
+export function listingTotals(markets: RawMarket[]): ListingTotals {
+  const byStatus: Record<string, number> = {}, byStratum: Record<string, number> = {}, byCat: Record<string, number> = {}; const events = new Set<string>();
+  for (const m of markets) {
+    const st = usStatusLabel(m); byStatus[st] = (byStatus[st] ?? 0) + 1;
+    const tags = tagsOf(m); const k = stratum(categorize({ title: usTitleOf(m), slug: typeof m.slug === "string" ? m.slug : null, tags })); byStratum[k] = (byStratum[k] ?? 0) + 1;
+    for (const t of new Set(tags.map((x) => x.toLowerCase()))) byCat[t] = (byCat[t] ?? 0) + 1; events.add(usGroupOf(m));
+  }
+  const top = (o: Record<string, number>, n = 60) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, n));
+  return { markets: markets.length, byStatus: top(byStatus), byStratum: top(byStratum), byVenueCategory: top(byCat), distinctEvents: events.size };
+}
+
+export interface TargetedQuery { sport: string; query: string }
+/**
+ * Per-sport queries for the US listing. The brief names the filters `sportsMarketTypes` (MONEYLINE, SPREAD, TOTAL, PROP) and `categories`;
+ * their SYNTAX and the category values are NOT verified here (docs.polymarket.us was unreachable), so these defaults are guesses to be
+ * replaced from the documentation with `--us-targeted "sport=query|sport=query"`. A wrong query returns an error or an empty page, is
+ * reported, and the stratum is then reported as unable to reach its quota.
+ */
+export function defaultTargetedQueries(): TargetedQuery[] {
+  return ["football", "basketball", "baseball", "hockey", "soccer", "tennis", "combat"].map((sport) => ({ sport, query: `categories=${sport}&sportsMarketTypes=MONEYLINE&sportsMarketTypes=SPREAD&sportsMarketTypes=TOTAL&sportsMarketTypes=PROP&active=true` }));
+}
+export function parseTargeted(spec: string): TargetedQuery[] { return spec.split("|").map((x) => x.trim()).filter(Boolean).map((x) => { const i = x.indexOf("="); return { sport: x.slice(0, i), query: x.slice(i + 1) }; }).filter((q) => q.sport && q.query); }
+export interface TargetedResult { sport: string; query: string; markets: RawMarket[]; notes: FetchNotes; reachedQuota: boolean; events: number }
+/** Page one targeted query until ≥ minMarkets markets from ≥ minEvents distinct events, or the listing ends. */
+export async function fetchUsTargeted(http: PoliteHttp, cfg: UsConfig, q: TargetedQuery, o: { minMarkets?: number; minEvents?: number; maxPages?: number } = {}): Promise<TargetedResult> {
+  const minM = o.minMarkets ?? 100, minE = o.minEvents ?? 30; const enough = (ms: RawMarket[]) => ms.length >= minM && new Set(ms.map(usGroupOf)).size >= minE;
+  const r = await fetchUs(http, cfg, { closed: false, max: Infinity, maxPages: o.maxPages ?? 40, query: q.query, enough });
+  return { sport: q.sport, query: q.query, markets: r.markets, notes: r.notes, reachedQuota: enough(r.markets), events: new Set(r.markets.map(usGroupOf)).size };
 }

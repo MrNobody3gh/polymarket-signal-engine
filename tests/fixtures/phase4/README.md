@@ -9,3 +9,4 @@
   venue: the first ≤ 40 raw market objects of each sample, sanitised (long strings truncated, images/descriptions
   removed; public data, no secrets), each file ≤ 380 kB. **None exist yet**: the authoring environment's network policy
   blocked every venue host. When they are committed, tests that use them become real-format tests.
+- `tests/helpers/phase4EventWorld.ts` (4.0b) builds **synthetic** event-level markets in the tests themselves (events with many markets sharing a start, Eastern-time placeholders on both sides of the daylight-saving change, `gameStartTime` by sport and market type); nothing is committed from it.

@@ -8,7 +8,7 @@
  * measure is reported as null, and so is every stage after it; it is never counted as zero or guessed.
  */
 import type { Confidence } from "./mapping";
-import { DAY_MS, MAX_HORIZON_MS, MIN_LEAD_MS } from "./timestamps";
+import { DAY_MS, MAX_HORIZON_MS, MIN_LEAD_MS, easternParts } from "./timestamps";
 
 export const SCORE_MIN = 68;
 export const MAX_SIGNAL_AGE_MS = 600_000;
@@ -43,6 +43,8 @@ export interface FunnelRow {
   proxyWithin24h?: boolean | null;
   /** True when `evalMs` is the observed `signals.evaluated_at` (so evalMs − createdAtMs is a real detection lag); false/undefined: the lag is unknown. */
   lagObserved?: boolean;
+  /** For the date-level row only (NOT the V1 policy): the Eastern calendar date (YYYY-MM-DD) the venue candidate's placeholder or date-only field implies; null = none. */
+  impliedDateEt?: string | null;
 }
 export interface FunnelConfig {
   startMs: number; endMs: number;
@@ -75,6 +77,17 @@ export interface FunnelResult {
   measured: FunnelConfig["measured"];
   variants: Record<VariantName, VariantResult>;
   proxy: { definition: string; scoreAndProxy: number | null; perDay: PerDay | null };
+  /** A SECOND funnel line, NOT THE V1 POLICY: time eligibility from the Eastern date implied by placeholder fields. Never an input to the feasibility table. */
+  dateLevel: DateLevelFunnel;
+}
+export const DATE_LEVEL_STAGES = [
+  { key: "all", label: "all entry signals" }, { key: "score", label: "copy score ≥ 68" }, { key: "mapped", label: "market mapped" }, { key: "tradable", label: "venue market tradable" },
+  { key: "impliedDate", label: "an Eastern calendar date is implied by a placeholder / date-only field" }, { key: "dateToday", label: "that date is the evaluation's Eastern date or the next day" },
+] as const;
+export interface DateLevelFunnel {
+  label: "NOT THE V1 POLICY"; definition: string;
+  inPlayCheck: "cannot be evaluated at date level"; leadCheck: "cannot be evaluated at date level";
+  stages: typeof DATE_LEVEL_STAGES; variants: Record<VariantName, { counts: (number | null)[]; perDay: PerDay | null }>;
 }
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -135,11 +148,22 @@ export function computeFunnel(rows: FunnelRow[], cfg: FunnelConfig): FunnelResul
     const freshAtFinal = finalReached ? { maxSignalAgeMs: maxAge, finalCount: finals.length, lagObserved: observed.length, withinAge: fresh.length, perDay: perDayStats(fresh.map((r) => r.createdAtMs), cfg.startMs, cfg.endMs) } : null;
     variants[v] = { counts, perDay, byKind, byCategory, wallets, top3Share: finalReached && total ? top.slice(0, 3).reduce((a, b) => a + b.count, 0) / total : null, topWallets: finalReached ? top : [], exits, freshAtFinal };
   }
+  const nextDay = (d: string) => new Date(Date.parse(d + "T00:00:00Z") + DAY_MS).toISOString().slice(0, 10);
+  const dateDepth = (r: FunnelRow, v: VariantName): number => {
+    const d = deepestStage(r, v, { ...c, measured: { mapping: c.measured.mapping, tradable: c.measured.tradable, timestamp: false } });
+    if (d < 3 || !c.measured.mapping || !c.measured.tradable) return d;
+    if (!r.impliedDateEt) return 3;
+    const today = easternParts(r.evalMs).date; return r.impliedDateEt === today || r.impliedDateEt === nextDay(today) ? 5 : 4;
+  };
+  const dlLimit = !c.measured.mapping ? 2 : !c.measured.tradable ? 3 : DATE_LEVEL_STAGES.length;
+  const dateVariants = {} as DateLevelFunnel["variants"];
+  for (const v of ["EXACT", "EXACT_PLUS_PROBABLE"] as VariantName[]) { const dd = inWin.map((r) => dateDepth(r, v)); dateVariants[v] = { counts: DATE_LEVEL_STAGES.map((_, s) => (s >= dlLimit && s >= 2 ? null : dd.filter((x) => x >= s).length)), perDay: dlLimit >= DATE_LEVEL_STAGES.length ? perDayStats(inWin.filter((_, i) => dd[i] >= 5).map((r) => r.createdAtMs), cfg.startMs, cfg.endMs) : null }; }
   const known = inWin.filter((r) => r.proxyWithin24h !== undefined);
   const proxyRows = known.filter((r) => r.copyScore !== null && r.copyScore >= c.scoreMin && r.proxyWithin24h === true);
   return {
     window: { startMs: cfg.startMs, endMs: cfg.endMs, elapsedDays: Math.max(0, (cfg.endMs - cfg.startMs) / DAY_MS), completeUtcDays: Math.max(0, Math.floor(cfg.endMs / DAY_MS) - Math.ceil(cfg.startMs / DAY_MS)) },
     stages: STAGES, measured: cfg.measured, variants,
+    dateLevel: { label: "NOT THE V1 POLICY", definition: "time eligibility from the Eastern calendar date implied by a placeholder or date-only field (the evaluation's Eastern date or the next); no timestamp is verified", inPlayCheck: "cannot be evaluated at date level", leadCheck: "cannot be evaluated at date level", stages: DATE_LEVEL_STAGES, variants: dateVariants },
     proxy: { definition: "copy score ≥ min and the stored markets.end_date is the signal's UTC day or the next UTC day (date level; includes events that have already started)", scoreAndProxy: known.length ? proxyRows.length : null, perDay: known.length ? perDayStats(proxyRows.map((r) => r.createdAtMs), cfg.startMs, cfg.endMs) : null },
   };
 }

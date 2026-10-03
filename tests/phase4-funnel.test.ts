@@ -117,4 +117,33 @@ describe("supplementary E1: detection lag within MAX_SIGNAL_AGE among the final-
   it("a custom maximum age is honoured", () => { const f = computeFunnel([lagRow(1, 100), lagRow(2, 200)], { startMs: START, endMs: END, measured: ALL, maxSignalAgeMs: 150_000 }).variants.EXACT.freshAtFinal!; expect(f.withinAge).toBe(1); });
 });
 
+describe("the date-level row (NOT the V1 policy): Eastern calendar date implied by placeholder fields", () => {
+  const noon = (day: number) => Date.UTC(2026, 8, day, 12, 0, 0); // 12:00Z = 08:00 Eastern: the same calendar date in both zones
+  const row = (id: number, o: Partial<FunnelRow> = {}): FunnelRow => ({ signalId: `d${id}`, createdAtMs: noon(29), evalMs: noon(29), kind: "NEW_POSITION", wallet: `w${id}`, category: "sports:basketball", copyScore: 80, mapping: "EXACT", tradable: true, eventMs: null, impliedDateEt: "2026-09-29", ...o });
+  const rows: FunnelRow[] = [
+    row(1),                                         // date = the evaluation's Eastern date                         → 5
+    row(2, { impliedDateEt: "2026-09-30" }),        // the next day                                                  → 5
+    row(3, { impliedDateEt: "2026-10-01" }),        // two days ahead                                                → 4
+    row(4, { impliedDateEt: "2026-09-28" }),        // the day before                                                → 4
+    row(5, { impliedDateEt: null }),                // no date implied                                               → 3
+    row(6, { tradable: false }),                    // not tradable                                                  → 2
+    row(7, { mapping: "NONE" }),                    // not mapped                                                    → 1
+    row(8, { copyScore: 50 }),                      // score below 68                                                → 0
+    row(9, { mapping: "PROBABLE" }),                // PROBABLE with a date today: only in the +PROBABLE variant     → 1 / 5
+    // evaluation at 02:00Z on 30 Sep = 22:00 Eastern on 29 Sep: the Eastern date is the 29th, not the UTC 30th
+    row(10, { createdAtMs: Date.UTC(2026, 8, 30, 2, 0, 0), evalMs: Date.UTC(2026, 8, 30, 2, 0, 0), impliedDateEt: "2026-09-29" }),   // today (Eastern)   → 5
+    row(11, { createdAtMs: Date.UTC(2026, 8, 30, 2, 0, 0), evalMs: Date.UTC(2026, 8, 30, 2, 0, 0), impliedDateEt: "2026-10-02" }),   // Eastern today + 3  → 4 (outside under either reading of "today")
+  ];
+  const f = computeFunnel(rows, { startMs: START, endMs: END, measured: ALL }); const dl = f.dateLevel;
+  it("is labelled, and says that in-play and lead time cannot be evaluated at date level", () => { expect(dl.label).toBe("NOT THE V1 POLICY"); expect(dl.inPlayCheck).toBe("cannot be evaluated at date level"); expect(dl.leadCheck).toBe("cannot be evaluated at date level"); expect(dl.definition).toMatch(/no timestamp is verified/); expect(dl.stages.map((s) => s.key)).toEqual(["all", "score", "mapped", "tradable", "impliedDate", "dateToday"]); });
+  it("counts each stage on a world with hand-derived answers, using the EASTERN date of the evaluation", () => {
+    // score >= 68: all but 8 = 10; mapped (EXACT): 1-6, 10, 11 = 8; tradable: all but 6 = 7; implied date: all but 5 = 6; today/tomorrow Eastern: 1, 2, 10 = 3
+    expect(dl.variants.EXACT.counts).toEqual([11, 10, 8, 7, 6, 3]);
+    expect(dl.variants.EXACT_PLUS_PROBABLE.counts).toEqual([11, 10, 9, 8, 7, 4]);
+  });
+  it("gives eligible signals per day for the date-level row, from whole UTC days", () => { const pd = dl.variants.EXACT.perDay!; expect(pd.perElapsedDay).toBeCloseTo(3 / 3, 12); expect(pd.completeDays.n).toBe(3); expect(pd.completeDays.max).toBe(2); });
+  it("is independent of the V1 funnel: with no usable timestamp the V1 final stage is 0 while the date-level row is not", () => { expect(f.variants.EXACT.counts[7]).toBe(0); expect(dl.variants.EXACT.counts[5]).toBe(3); });
+  it("unmeasured stages are null here too", () => { const g = computeFunnel(rows, { startMs: START, endMs: END, measured: { mapping: false, tradable: false, timestamp: false } }).dateLevel.variants.EXACT; expect(g.counts).toEqual([11, 10, null, null, null, null]); expect(g.perDay).toBeNull(); });
+});
+
 describe("stage table", () => { it("is the brief's order", () => { expect(STAGES.map((s) => s.key)).toEqual(["all", "score", "mapped", "tradable", "timestamp", "notStarted", "within24h", "minLead"]); }); });

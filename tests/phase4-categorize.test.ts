@@ -33,7 +33,7 @@ describe("tradableAt (approximation, documented)", () => {
 });
 
 describe("eventTimeAt (the §3.3 pipeline under the audit's recommended fields)", () => {
-  const rec = (slot: 1 | 2, field: string): SlotVerdict => ({ venue: "v", stratum: "sports:basketball", slot, field, verdict: "RECOMMEND", usableShare: 1, presentShare: 1, placeholderShare: 0, failed: [], evidence: {}, needsHumanReview: false });
+  const rec = (slot: 1 | 2, field: string): SlotVerdict => ({ venue: "v", stratum: "sports:basketball", slot, field, verdict: "RECOMMEND", usableShare: 1, presentShare: 1, placeholderShare: 0, failed: [], evidence: {}, needsHumanReview: false, events: 100, markets: 100, etPlaceholderShare: 0, decidedBy: "allPassed", failedRules: [] });
   const raw = { slug: "nba-a-b", question: "A vs B", eventStartTime: "2026-10-02T14:00:00+00:00", closeTime: "2026-10-02T17:00:00+00:00" }; const t0 = Date.parse("2026-10-02T10:00:00Z");
   it("uses the recommended start, and the close only when the start is absent", () => {
     expect(eventTimeAt(raw, t0, [rec(1, "eventStartTime"), rec(2, "closeTime")])).toMatchObject({ ms: Date.parse("2026-10-02T14:00:00Z"), why: "slot 1 eventStartTime" });

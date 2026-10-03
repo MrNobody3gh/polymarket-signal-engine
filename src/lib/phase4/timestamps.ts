@@ -125,9 +125,37 @@ export function roleAllowedForSlot(role: FieldRole, slot: 1 | 2): boolean {
 
 // ───────────────────────────────────────────── placeholder detection ────────────────────────────────────────
 
-export type PlaceholderKind = "DATE_ONLY" | "MIDNIGHT_UTC" | "NOON_UTC" | "END_OF_DAY_UTC" | "LOCAL_MIDNIGHT" | "LOCAL_END_OF_DAY";
+export type PlaceholderKind = "DATE_ONLY" | "MIDNIGHT_UTC" | "NOON_UTC" | "END_OF_DAY_UTC" | "LOCAL_MIDNIGHT" | "LOCAL_END_OF_DAY" | "ET_MIDNIGHT" | "ET_END_OF_DAY";
 
 const utcClock = (ms: number) => new Date(ms).toISOString().slice(11, 19);
+
+// ───────────────────────────────────────────── US Eastern time (date-only values in disguise) ─────────────────
+
+const ET = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+/** The wall-clock date and time of an instant in America/New_York, daylight saving included (EDT = UTC−4, EST = UTC−5). */
+export function easternParts(ms: number): { date: string; time: string; offsetMinutes: number } {
+  const p: Record<string, string> = {}; for (const x of ET.formatToParts(new Date(ms))) p[x.type] = x.value;
+  const date = `${p.year}-${p.month}-${p.day}`; const time = `${p.hour}:${p.minute}:${p.second}`;
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second); // the wall clock read as if it were UTC
+  return { date, time, offsetMinutes: Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60_000) };
+}
+/**
+ * A datetime whose Eastern wall clock is exactly 00:00:00 (ET_MIDNIGHT: 04:00Z in summer, 05:00Z in winter) or 23:59:00 / 23:59:59
+ * (ET_END_OF_DAY: 03:59Z / 04:59Z of the next UTC day): the signature of a DATE written as a time in Eastern. `date` is the
+ * calendar date it implies: the Eastern date of the instant (for the end-of-day form the date that is ending). null otherwise.
+ */
+export function easternPlaceholder(raw: unknown): { kind: "ET_MIDNIGHT" | "ET_END_OF_DAY"; date: string } | null {
+  const p = parseTimestamp(raw); if (p.kind !== "datetime") return null;
+  const e = easternParts(p.ms);
+  if (e.time === "00:00:00") return { kind: "ET_MIDNIGHT", date: e.date };
+  if (e.time === "23:59:00" || e.time === "23:59:59") return { kind: "ET_END_OF_DAY", date: e.date };
+  return null;
+}
+/** The Eastern calendar date a value stands for when it is a date-only value or an Eastern placeholder; null for a genuine time of day. Never a time. */
+export function impliedEasternDate(raw: unknown): string | null {
+  const p = parseTimestamp(raw); if (p.kind === "date_only") return p.date;
+  return easternPlaceholder(raw)?.date ?? null;
+}
 
 /**
  * Whether a single value has the shape of a placeholder: no time of day at all, or exactly 00:00:00 / 12:00:00 /
@@ -144,6 +172,7 @@ export function placeholderKind(raw: unknown): PlaceholderKind | null {
     if (c === "23:59:59") return "END_OF_DAY_UTC";
     if (p.offsetMinutes !== 0 && p.wallTime === "00:00:00") return "LOCAL_MIDNIGHT";
     if (p.offsetMinutes !== 0 && p.wallTime === "23:59:59") return "LOCAL_END_OF_DAY";
+    const et = easternPlaceholder(raw); if (et) return et.kind;
   }
   return null;
 }

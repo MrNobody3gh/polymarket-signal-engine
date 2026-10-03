@@ -6,7 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { EXIT, runCoverageCli, runTimestampAuditCli } from "../src/lib/phase4/cli";
+import { EXIT, printFiles, runCoverageCli, runTimestampAuditCli } from "../src/lib/phase4/cli";
 import { readOnly } from "../src/lib/phase4/readonly-db";
 import { coverageSummaryLines } from "../src/lib/phase4/probe";
 import { s1aSummaryLines, type S1aResult } from "../src/lib/phase4/s1a";
@@ -47,7 +47,7 @@ describe("S1a script (timestamp audit)", () => {
     // the 60 basketball events exist on both venues with start times that differ by [0,0,5,-5,10,-10,20,-30,0,15] minutes
     expect(summary.venueAgreement).toMatchObject({ available: true, matched: 60 }); const b = summary.venueAgreement.summary.find((s: any) => s.stratum === "sports:basketball");
     expect(b).toMatchObject({ n: 60, within15MinShare: 0.8, within60MinShare: 1, absP50Min: 7.5, maxAbsMin: 30 });
-    expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toContain("## Venue agreement (D51 input)");
+    expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toContain("## Venue agreement by recommended fields (D51 input)");
   });
   it("only public GETs: every request is a GET to a venue host, with the research User-Agent and no credentials, at most 2 per second", async () => {
     const r = await run(venueHandler); expect(r.f.calls.length).toBeGreaterThan(5);
@@ -101,9 +101,9 @@ describe("S1a script (timestamp audit)", () => {
     const intl = JSON.parse(w.out["docs/phase4/data/s1a_polymarket_intl.json"]); expect(intl.counts.ours).toBe(12); expect(intl.evidence["sports:basketball"].some((e: any) => e.vsReference["ours:token_resolutions.resolved_ts"])).toBe(true);
   });
   it("the printed summary is capped at 60 lines whatever the number of strata, and long lines are truncated", () => {
-    const rec = (i: number, slot: 1 | 2): SlotVerdict => ({ venue: "v", stratum: `stratum-${i}`, slot, field: "f".repeat(300), verdict: "RECOMMEND", usableShare: 1, presentShare: 1, placeholderShare: 0, failed: [], evidence: {}, needsHumanReview: false });
-    const v = (name: string) => ({ venue: name, reachable: true, fetch: { open: null, resolved: null }, counts: { open: 1, resolved: 1, ours: 0 }, strata: {}, inventory: [], evidence: {}, recommendations: Array.from({ length: 80 }, (_, i) => rec(i, (i % 2 ? 2 : 1) as 1 | 2)) });
-    const res: S1aResult = { startedAt: "a", finishedAt: "b", venues: [v("one"), v("two")] as never, venueAgreement: { available: false, reason: "x".repeat(900), matched: 0, byConfidence: {}, summary: [] }, http: { requests: 1, ok: 1, byKind: {}, firstErrors: Array.from({ length: 5 }, () => "e".repeat(500)) }, endpoints: [], docs: [], rules: {}, notEstablished: Array.from({ length: 9 }, () => "n".repeat(900)) };
+    const rec = (i: number, slot: 1 | 2): SlotVerdict => ({ venue: "v", stratum: `stratum-${i}`, slot, field: "f".repeat(300), verdict: "RECOMMEND", usableShare: 1, presentShare: 1, placeholderShare: 0, failed: [], evidence: {}, needsHumanReview: false, events: 100, markets: 100, etPlaceholderShare: 0, decidedBy: "allPassed", failedRules: [] });
+    const v = (name: string) => ({ venue: name, reachable: true, fetch: { open: null, resolved: null }, counts: { open: 1, resolved: 1, ours: 0 }, strata: {}, dateLevel: [], gameStart: { field: null, eventStartField: null, marketTypeField: null, presence: [], reach: [], vsEventStart: null, vsCreation: {}, resolutionMinusStart: [], clockPerEvent: [], clockPerEventEastern: [], venue: name }, targeted: [], inventory: [], evidence: {}, recommendations: Array.from({ length: 80 }, (_, i) => rec(i, (i % 2 ? 2 : 1) as 1 | 2)) });
+    const res: S1aResult = { startedAt: "a", finishedAt: "b", eventAgreement: null, venues: [v("one"), v("two")] as never, venueAgreement: { available: false, reason: "x".repeat(900), matched: 0, byConfidence: {}, summary: [] }, http: { requests: 1, ok: 1, byKind: {}, firstErrors: Array.from({ length: 5 }, () => "e".repeat(500)) }, endpoints: [], docs: [], rules: {}, notEstablished: Array.from({ length: 9 }, () => "n".repeat(900)) };
     const lines = s1aSummaryLines(res, "out"); expect(lines.length).toBeLessThanOrEqual(60); expect(Math.max(...lines.map((l) => l.length))).toBeLessThanOrEqual(220);
   });
 });
@@ -125,12 +125,12 @@ const SIGNALS = [
   sig("old", { created_at: z("2026-09-27T04:28:37Z"), evaluated_at: z("2026-09-27T04:30:00Z") }),                  // one second before the clean regime
 ];
 const US_MARKETS = [
-  { id: "u1", slug: "nba-lal-bos", question: "Lakers vs Celtics", outcomes: '["Lakers","Celtics"]', conditionId: "0xc1", clobTokenIds: ["tok1", "tok2"], status: "open", eventStartTime: "2026-10-02T14:00:00+00:00", closeTime: "2026-10-02T17:00:00+00:00" },
+  { id: "u1", slug: "nba-lal-bos", question: "Lakers vs Celtics", outcomes: '["Lakers","Celtics"]', conditionId: "0xc1", clobTokenIds: ["tok1", "tok2"], status: "open", eventStartTime: "2026-10-02T14:00:00+00:00", closeTime: "2026-10-02T17:00:00+00:00", endDate: "2026-10-03T03:59:00+00:00" },
   { id: "u2", slug: "nba-gsw-nyk", question: "Warriors vs Knicks", outcomes: '["Warriors","Knicks"]', clobTokenIds: ["tok3", "tok4"], status: "open", eventStartTime: "2026-10-04T20:00:00+00:00" },
   { id: "u3", slug: "nba-chi-mia", question: "Bulls vs Heat", outcomes: '["Bulls","Heat"]', clobTokenIds: ["tok5", "tok6"], status: "open" },
   { id: "u4", slug: "nba-bkn-phx", question: "Nets vs Suns", outcomes: '["Nets","Suns"]', clobTokenIds: ["tok7", "tok8"], status: "settled", eventStartTime: "2026-10-02T12:00:00+00:00", settledAt: "2026-10-02T15:00:00+00:00" },
 ];
-const REC = (field: string, slot: 1 | 2): SlotVerdict => ({ venue: "polymarket_us", stratum: "sports:basketball", slot, field, verdict: "RECOMMEND", usableShare: 1, presentShare: 1, placeholderShare: 0, failed: [], evidence: {}, needsHumanReview: false });
+const REC = (field: string, slot: 1 | 2): SlotVerdict => ({ venue: "polymarket_us", stratum: "sports:basketball", slot, field, verdict: "RECOMMEND", usableShare: 1, presentShare: 1, placeholderShare: 0, failed: [], evidence: {}, needsHumanReview: false, events: 100, markets: 100, etPlaceholderShare: 0, decidedBy: "allPassed", failedRules: [] });
 const RECS = { venues: [{ venue: "polymarket_us", recommendations: [REC("eventStartTime", 1), REC("closeTime", 2)] }] };
 const PAPER = [
   ...[ [10, 5, 1], [-100, 5, 3], [30, 5, 2], [-60, 5, 1], [90, 5, 4], [-100, 5, 2] ].map(([ret, usd, days], i) => ({ signal_id: `s${i + 1}`, mode: "REALISTIC", coverage_state: "SIMULATED", state: "RESOLVED", source_trade_ts: z("2026-09-30T10:00:00Z"), fill_ts: z("2026-09-30T10:05:00Z"), closed_at: new Date(Date.parse("2026-09-30T10:05:00Z") + (days as number) * 86_400_000).toISOString(), net_pnl: (ret as number) * (usd as number) / 100, filled_usd: usd })),
@@ -143,7 +143,7 @@ const usHandler = (u: URL): Response => { if (u.host !== "gateway.polymarket.us"
 describe("S1b script (coverage probe)", () => {
   const run = async (o: { handler?: Parameters<typeof fakeFetch>[0]; argv?: string[]; env?: Record<string, string | undefined>; recs?: unknown | null; db?: ReturnType<typeof worldDb> | null } = {}) => {
     const c = virtualClock(NOW); const f = fakeFetch(o.handler ?? usHandler, c.now); const w = files(); const lines: string[] = []; const d = o.db === undefined ? worldDb() : o.db;
-    const code = await runCoverageCli(o.argv ?? [], o.env ?? ENV, { fetch: f.fetch, now: c.now, sleep: c.sleep, writeFile: w.writeFile, mkdir: w.mkdir, readFile: (p) => (o.recs === null ? null : p.endsWith("s1a_summary.json") ? JSON.stringify(o.recs ?? RECS) : null), log: (l) => lines.push(l), db: d ? () => readOnly(d.db as never) : undefined });
+    const code = await runCoverageCli(o.argv ?? [], o.env ?? ENV, { fetch: f.fetch, now: c.now, sleep: c.sleep, writeFile: w.writeFile, mkdir: w.mkdir, readFile: (p) => (w.out[p] !== undefined ? w.out[p] : o.recs === null ? null : p.endsWith("s1a_summary.json") ? JSON.stringify(o.recs ?? RECS) : null), log: (l) => lines.push(l), db: d ? () => readOnly(d.db as never) : undefined });
     return { code, f, files: w.out, lines, d, c };
   };
 
@@ -207,7 +207,97 @@ describe("S1b script (coverage probe)", () => {
   it("summary stays within 60 lines even with many kinds and categories, and the funnel files are valid JSON", async () => {
     const many = Array.from({ length: 70 }, (_, i) => sig(`m${i}`, { kind: "NEW_POSITION", wallet: `0xw${i}`, condition_id: `0xcc${i}`, token_id: `tt${i}`, slug: `nba-x-${i}`, title: `Team ${i} vs Other ${i}` }));
     const d = memDb({ signals: [...SIGNALS, ...many], markets: [], paper_executions: PAPER }); const r = await run({ db: d }); expect(r.lines.length).toBeLessThanOrEqual(60); for (const p of ["s1b_funnel.json", "s1b_feasibility.json"]) expect(() => JSON.parse(r.files[`docs/phase4/data/${p}`])).not.toThrow();
-    const res = JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]); void res; const lines = coverageSummaryLines(({ startedAt: "", window: { startIso: "a", endIso: "b" }, counts: { signals: 1, withScore: 1, conditions: 1 }, venue: { configured: true, notes: { open: null, closed: null }, candidates: 0, measured: { mapping: false, tradable: false, timestamp: false }, reasons: Array.from({ length: 80 }, () => "r".repeat(400)) }, funnel: JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]).funnel, mappingBuckets: { EXACT: 0, PROBABLE: 0, NONE: 0 }, feasibility: JSON.parse(r.files["docs/phase4/data/s1b_feasibility.json"]).feasibility, feasibilityMode: "REALISTIC", settled: { n: 0, fillShare: null }, approximations: [] } as never), "out"); expect(lines.length).toBeLessThanOrEqual(60); expect(Math.max(...lines.map((l) => l.length))).toBeLessThanOrEqual(220);
+    const res = JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]); void res; const lines = coverageSummaryLines(({ startedAt: "", window: { startIso: "a", endIso: "b" }, counts: { signals: 1, withScore: 1, conditions: 1 }, venue: { configured: true, notes: { open: null, closed: null }, candidates: 0, measured: { mapping: false, tradable: false, timestamp: false }, reasons: Array.from({ length: 80 }, () => "r".repeat(400)) }, funnel: JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]).funnel, mappingBuckets: { EXACT: 0, PROBABLE: 0, NONE: 0 }, dateBasis: {}, diagnostic: null, feasibility: JSON.parse(r.files["docs/phase4/data/s1b_feasibility.json"]).feasibility, feasibilityMode: "REALISTIC", settled: { n: 0, fillShare: null }, approximations: [] } as never), "out"); expect(lines.length).toBeLessThanOrEqual(60); expect(Math.max(...lines.map((l) => l.length))).toBeLessThanOrEqual(220);
   });
   it("the committed documentation lists the clean-regime start the probe uses", () => { expect(readFileSync("src/lib/phase4/probe.ts", "utf8")).toContain('REGIME_START_ISO = "2026-09-27T04:28:38Z"'); });
+});
+
+describe("4.0b: diagnostic mode, the date-level row, targeted US queries and --print-files", () => {
+  const run0 = async (o: { handler?: Parameters<typeof fakeFetch>[0]; argv?: string[]; db?: ReturnType<typeof worldDb> } = {}) => {
+    const c = virtualClock(NOW); const f = fakeFetch(o.handler ?? usHandler, c.now); const w = files(); const lines: string[] = []; const d = o.db ?? worldDb();
+    const code = await runCoverageCli(o.argv ?? [], ENV, { fetch: f.fetch, now: c.now, sleep: c.sleep, writeFile: w.writeFile, mkdir: w.mkdir, readFile: (p) => (w.out[p] !== undefined ? w.out[p] : p.endsWith("s1a_summary.json") ? JSON.stringify(RECS) : null), log: (l) => lines.push(l), db: () => readOnly(d.db as never) });
+    return { code, f, files: w.out, lines, d, c };
+  };
+  it("--diagnose pages the whole listing (no cap), runs the timestamp-free matcher over the score ≥ 68 pairs and writes the diagnostic files", async () => {
+    const r = await run0({ argv: ["--diagnose"] }); expect(r.code).toBe(0); expect(r.lines.length).toBeLessThanOrEqual(60);
+    expect(Object.keys(r.files).sort()).toEqual(["docs/phase4/data/s1b_diagnostic.json", "docs/phase4/data/s1b_feasibility.json", "docs/phase4/data/s1b_funnel.json", "docs/phase4/data/s1b_mapping_diagnostic.csv", "docs/phase4/data/s1b_mapping_review.csv"]);
+    const j = JSON.parse(r.files["docs/phase4/data/s1b_diagnostic.json"]); expect(j.listing.open.markets).toBe(3); expect(j.listing.closed.markets).toBe(1); expect(j.listing.archived).not.toBeNull();
+    // 5 pairs (market + outcome) behind score >= 68 signals: Lakers (s1-s3), Warriors, Unknown game, Bulls, Nets. Four share a token id with the venue: PROBABLE by identifier; the unknown game is NONE.
+    expect(j.diagnostic).toMatchObject({ pairs: 5, probable: 4, none: 1, identifierMatches: 4 }); expect(j.sampled).toBe(5); expect(j.diagnostic.definition).toMatch(/NO DATE CHECKED/); expect(r.files["docs/phase4/data/s1b_mapping_diagnostic.csv"]).toContain("Unknown game xyz");
+    expect(j.categoryMix.find((m: { stratum: string }) => m.stratum === "sports:basketball")).toMatchObject({ oursScore68Signals: 6, venueMarkets: 7 }); expect(r.lines.join("\n")).toMatch(/diagnostic \(5 pairs/);
+    expect(JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]).funnel.variants.EXACT.counts).toEqual([8, 7, 6, 5, 4, 3, 2, 1]); // the V1 funnel is unchanged by diagnostic mode
+  });
+  it("without --diagnose none of the diagnostic files exist, and the listing keeps its cap", async () => { const r = await run0(); expect(Object.keys(r.files).some((p) => p.includes("diagnostic"))).toBe(false); });
+  it("a zero listing in diagnostic mode is reported, no CSV is invented, and the run finishes", async () => {
+    const r = await run0({ argv: ["--diagnose"], handler: () => json({ markets: [] }) }); expect(r.code).toBe(0); const j = JSON.parse(r.files["docs/phase4/data/s1b_diagnostic.json"]); expect(j.diagnostic).toBeNull(); expect(j.notes[0]).toMatch(/not available/); expect(r.files["docs/phase4/data/s1b_mapping_diagnostic.csv"]).toBeUndefined();
+    expect(JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]).funnel.variants.EXACT.counts).toEqual([8, 7, null, null, null, null, null, null]);
+  });
+  it("diagnostic mode pages a listing beyond the default 3,000-per-list cap; the normal run stops at it and says so", async () => {
+    const big = Array.from({ length: 7000 }, (_, i) => ({ id: `b${i}`, slug: `s${i}`, question: `Market number ${i}`, outcomes: '["Yes","No"]', status: "open" }));
+    const h = (u: URL): Response => { if (u.host !== "gateway.polymarket.us") return new Response("no", { status: 404 }); const closed = u.searchParams.get("closed") === "true" || u.searchParams.get("archived") === "true"; const off = Number(u.searchParams.get("offset") ?? 0); return json({ markets: closed ? [] : big.slice(off, off + 100) }); };
+    const d = await run0({ argv: ["--diagnose"], handler: h }); expect(JSON.parse(d.files["docs/phase4/data/s1b_diagnostic.json"]).listing.open.markets).toBe(7000); expect(d.lines.join("\n")).not.toMatch(/cut off/);
+    const n = await run0({ handler: h }); expect(n.lines.join("\n")).toMatch(/open listing was cut off at 3000 markets/);
+  });
+  it("a partial listing (explicit --us-max in diagnostic mode) is reported as a lower bound", async () => { const r = await run0({ argv: ["--diagnose", "--us-max", "2"] }); expect(r.lines.join("\n")).toMatch(/cut off at .* LOWER BOUND/); });
+  it("the date-level funnel row is in the funnel file, labelled, computed from the implied Eastern date, and is NOT the basis of the feasibility table", async () => {
+    const r = await run0(); const f = JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]).funnel; const dl = f.dateLevel;
+    expect(dl.label).toBe("NOT THE V1 POLICY"); expect(dl.inPlayCheck).toBe("cannot be evaluated at date level"); expect(dl.variants.EXACT.counts).toEqual([8, 7, 6, 5, 3, 3]); // u1's end date is 23:59 Eastern on 2 Oct: s1, s2, s3 (even s3, already started: date level cannot tell)
+    const fe = JSON.parse(r.files["docs/phase4/data/s1b_feasibility.json"]).feasibility; expect(fe.eligiblePerDay.basis).toMatch(/^venue funnel/); expect(fe.eligiblePerDay.value).toBeCloseTo(f.variants.EXACT.perDay.minLead.completeDays.mean, 12); expect(fe.eligiblePerDay.value).not.toBeCloseTo(dl.variants.EXACT.perDay.completeDays.mean, 6);
+    expect(JSON.stringify(fe)).not.toMatch(/date-level row|dateLevel/); expect(r.lines.join("\n")).toMatch(/date-level row \(NOT THE V1 POLICY; in-play and lead cannot be evaluated at date level\)/);
+  });
+  it("the strict mapping rule is unchanged: with dates taken from a close-like field the PROBABLE definition still needs a date within one day on both sides", async () => {
+    const titleOnly = [{ id: "t1", slug: "x", question: "Lakers vs Celtics", outcomes: '["Lakers","Celtics"]', status: "open", endDate: "2026-10-09T03:59:00+00:00" }]; // same title, a week away from the signal's stored end date (2 Oct)
+    const r = await run0({ handler: (u) => (u.host === "gateway.polymarket.us" ? json({ markets: u.searchParams.get("closed") === "true" ? [] : titleOnly }) : new Response("no", { status: 404 })) });
+    expect(JSON.parse(r.files["docs/phase4/data/s1b_funnel.json"]).mappingBuckets).toMatchObject({ EXACT: 0, PROBABLE: 0 });
+  });
+  it("--print-files prints the named files after the summary, between markers, and does not change the summary", async () => {
+    const r = await run0({ argv: ["--print-files", "s1b_funnel.json,missing.json"] }); const i = r.lines.indexOf("=====FILE s1b_funnel.json"); expect(i).toBeGreaterThan(0); expect(r.lines.slice(0, i).length).toBeLessThanOrEqual(60);
+    const j = r.lines.indexOf("=====END s1b_funnel.json"); expect(JSON.parse(r.lines.slice(i + 1, j).join("\n")).counts.signals).toBe(8); expect(r.lines).toContain("=====FILE missing.json"); expect(r.lines[r.lines.indexOf("=====FILE missing.json") + 1]).toBe("(file not found)"); expect(r.lines[r.lines.length - 1]).toBe("=====END missing.json");
+    const plain = await run0(); expect(plain.lines.some((l) => l.startsWith("====="))).toBe(false); // default off
+  });
+});
+
+describe("printFiles pacing and splitting", () => {
+  const long = "x".repeat(7000); const text = [...Array.from({ length: 450 }, (_, i) => `line ${i}`), long].join("\n") + "\n";
+  it("prints at most 200 lines between pauses of one second, splits lines longer than 3,000 characters, and marks every file", async () => {
+    const out: string[] = []; const sleeps: number[] = []; const stamps: number[] = [];
+    await printFiles(["a.txt"], { outDir: "o", readFile: (p) => (p === "o/a.txt" ? text : null), log: (l) => { out.push(l); stamps.push(sleeps.length); }, sleep: async (ms) => { sleeps.push(ms); } });
+    expect(out[0]).toBe("=====FILE a.txt"); expect(out[out.length - 1]).toBe("=====END a.txt"); expect(out.length).toBe(1 + 450 + 3 + 1); expect(Math.max(...out.map((l) => l.length))).toBeLessThanOrEqual(3000);
+    expect(out.slice(451, 454).join("")).toBe(long); expect(out.slice(451, 454).map((l) => l.length)).toEqual([3000, 3000, 1000]);
+    expect(sleeps).toEqual([1000, 1000]); for (let k = 0; k <= 2; k++) expect(stamps.filter((s) => s === k).length).toBeLessThanOrEqual(200); // never more than 200 lines without a pause
+  });
+  it("falls back to the file name as a path, and says when a file is missing", async () => { const out: string[] = []; await printFiles(["p/x.json", "nope"], { outDir: "o", readFile: (p) => (p === "p/x.json" ? "{}\n" : null), log: (l) => out.push(l), sleep: async () => {} }); expect(out).toEqual(["=====FILE p/x.json", "{}", "=====END p/x.json", "=====FILE nope", "(file not found)", "=====END nope"]); });
+});
+
+describe("4.0b: S1a targeted US queries, event counts and --print-files", () => {
+  const run1 = async (handler: Parameters<typeof fakeFetch>[0], argv: string[]) => {
+    const c = virtualClock(); const f = fakeFetch(handler, c.now); const w = files(); const lines: string[] = [];
+    const code = await runTimestampAuditCli(argv, {}, { fetch: f.fetch, now: c.now, sleep: c.sleep, writeFile: w.writeFile, mkdir: w.mkdir, readFile: (p) => w.out[p] ?? null, log: (l) => lines.push(l) }); return { code, f, files: w.out, lines };
+  };
+  // a US listing for a targeted query: 150 tennis markets over 40 events, 20 per page
+  const tennis = Array.from({ length: 150 }, (_, i) => ({ id: `t${i}`, slug: `atp-p${i % 40}-${i}`, question: `Player ${i % 40}a vs Player ${i % 40}b${i >= 40 ? `: market ${i}` : ""}`, outcomes: '["A","B"]', status: "open", event: { id: `tev${i % 40}` }, gameStartTime: new Date(Date.UTC(2026, 9, 5, 10, 0, 0) + (i % 40) * 3_600_000 + 15 * 60_000).toISOString().replace("Z", "+00:00") }));
+  const handler = (u: URL): Response => {
+    if (u.host === "gateway.polymarket.us" && u.searchParams.get("categories") === "tennis") { const off = Number(u.searchParams.get("offset") ?? 0); return json({ markets: tennis.slice(off, off + 20) }); }
+    if (u.host === "gateway.polymarket.us" && u.searchParams.get("categories") === "basketball") { const off = Number(u.searchParams.get("offset") ?? 0); return json({ markets: (world.us as any[]).slice(off, off + 20) }); }
+    if (u.host === "gateway.polymarket.us" && u.searchParams.get("categories") === "golf") return json({ markets: [] });
+    return venueHandler(u);
+  };
+  it("targeted per-sport queries are paged until ≥ 100 markets from ≥ 30 events, and a sport that cannot reach it is reported as such", async () => {
+    const r = await run1(handler, ["--no-fixtures", "--us-targeted", "tennis=categories=tennis&active=true|basketball=categories=basketball&active=true|golf=categories=golf&active=true"]);
+    expect(r.code).toBe(0); const us = JSON.parse(r.files["docs/phase4/data/s1a_polymarket_us.json"]); const by = Object.fromEntries(us.targeted.map((t: { sport: string }) => [t.sport, t]));
+    expect(by.tennis).toMatchObject({ reachedQuota: true, stoppedBecause: "quota reached" }); expect(by.tennis.markets).toBeGreaterThanOrEqual(100); expect(by.tennis.markets).toBeLessThan(150); expect(by.tennis.events).toBeGreaterThanOrEqual(30);
+    expect(by.basketball).toMatchObject({ reachedQuota: false, markets: 60 }); expect(by.golf.reachedQuota).toBe(false); expect(by.golf.markets).toBe(0);
+    expect(us.strata["sports:tennis"].markets).toBeGreaterThanOrEqual(100); expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toMatch(/NOT reached/); expect(r.lines.join("\n")).toMatch(/targeted US queries: tennis \d+\/\d+ basketball 60\/60! golf 0\/0!/); expect(r.lines.length).toBeLessThanOrEqual(60);
+  });
+  it("without --us-targeted nothing is added and no targeted query is sent", async () => { const r = await run1(handler, ["--no-fixtures"]); expect(r.f.calls.some((c) => c.url.includes("categories="))).toBe(false); expect(JSON.parse(r.files["docs/phase4/data/s1a_polymarket_us.json"]).targeted).toEqual([]); });
+  it("every row of the verdict file carries its evidence counts and the rule that decided it; strata list markets and distinct events", async () => {
+    const r = await run1(venueHandler, ["--no-fixtures"]); const intl = JSON.parse(r.files["docs/phase4/data/s1a_polymarket_intl.json"]);
+    for (const v of intl.recommendations) { expect(v.events).toBeGreaterThan(0); expect(v.markets).toBeGreaterThanOrEqual(v.events); expect(typeof v.decidedBy).toBe("string"); expect(Array.isArray(v.failedRules)).toBe(true); }
+    expect(intl.strata["sports:basketball"]).toMatchObject({ markets: 62, events: 62 }); expect(intl.recommendations.find((x: { stratum: string; slot: number }) => x.stratum === "sports:basketball" && x.slot === 1)).toMatchObject({ decidedBy: "allPassed" });
+    expect(r.lines.join("\n")).toMatch(/distinct events: /); expect(r.lines.join("\n")).toMatch(/by allPassed|by usableShare|by placeholderShare|by eventTypeGap/); expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toContain("### Date-level alternative (SHOWN, NOT RECOMMENDED");
+  });
+  it("the same event on both venues, by participant names and Eastern date, is in the results (US synthetic events carry eventStartTime)", async () => {
+    const r = await run1(venueHandler, ["--no-fixtures"]); const s = JSON.parse(r.files["docs/phase4/data/s1a_summary.json"]); expect(s.eventAgreement === undefined || s.eventAgreement === null || typeof s.eventAgreement.matched === "number").toBe(true); expect(r.files["docs/phase4/data/S1a_RESULTS.md"]).toContain("## The same event on both venues");
+  });
+  it("--print-files prints the named S1a files after the summary", async () => { const r = await run1(venueHandler, ["--no-fixtures", "--no-us", "--print-files", "s1a_summary.json"]); const i = r.lines.indexOf("=====FILE s1a_summary.json"); expect(i).toBeGreaterThan(0); expect(i).toBeLessThanOrEqual(61); expect(JSON.parse(r.lines.slice(i + 1, r.lines.indexOf("=====END s1a_summary.json")).join("\n")).venues).toBeDefined(); });
 });

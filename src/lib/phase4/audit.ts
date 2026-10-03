@@ -10,7 +10,7 @@
  * (and ours), and apply the explicit, exported RECOMMEND_RULES to propose a field per slot or "unreliable: reject".
  */
 import { categorize, stratum } from "./categorize";
-import { classifyFieldName, parseTimestamp, placeholderKind, repeatedInstants, timeOfDayProfile, type FieldRole, type PlaceholderKind, type RepeatedInstant } from "./timestamps";
+import { classifyFieldName, easternParts, easternPlaceholder, impliedEasternDate, parseTimestamp, placeholderKind, repeatedInstants, timeOfDayProfile, type FieldRole, type PlaceholderKind, type RepeatedInstant } from "./timestamps";
 import { quantile } from "./stats";
 
 export type RawMarket = Record<string, unknown>;
@@ -147,7 +147,7 @@ export function candidateEvidence(ms: AuditMarket[], inv: FieldInventory[]): Can
  * (enough data, a rule failed) or "insufficient data" (fewer than `minPresent` markets carry it).
  */
 export const RECOMMEND_RULES = {
-  minPresent: 30,
+  minPresent: 30,               // DISTINCT EVENTS (not markets) carrying the field, and distinct resolved events for the ordering evidence (step 4.0b)
   minUsableShare: 0.9,          // share of the stratum's markets with a datetime (time of day and zone) that is not a placeholder shape
   maxPlaceholderShare: 0.1,     // share of present values that are date-only / 00:00:00 / 12:00:00 / 23:59:59 UTC
   maxTopClockShare: 0.5,        // no single UTC time of day may hold more than this share of the values (a hidden placeholder)
@@ -162,51 +162,117 @@ export const RECOMMEND_RULES = {
 const EVENT_TYPE = (st: string) => st.startsWith("sports") || st === "esports" || st === "crypto_short_term";
 
 export type Verdict = "RECOMMEND" | "UNRELIABLE_REJECT" | "INSUFFICIENT_DATA";
-export interface SlotVerdict { slot: 1 | 2; stratum: string; venue: string; field: string | null; verdict: Verdict; usableShare: number | null; presentShare: number | null; placeholderShare: number | null; failed: string[]; evidence: Record<string, number | string | null>; needsHumanReview: boolean }
+/** The rule that decided a verdict (the first that failed, in this order), or `allPassed`. */
+export type RuleKey = "noField" | "minEvents" | "usableShare" | "placeholderShare" | "topClock" | "orderedShare" | "creationCoincidence" | "eventTypeGap" | "startBeforeClose" | "evidenceGap" | "allPassed";
+export interface SlotVerdict {
+  slot: 1 | 2; stratum: string; venue: string; field: string | null; verdict: Verdict;
+  /** Shares are over DISTINCT EVENTS of the stratum (one representative market per event). */
+  usableShare: number | null; presentShare: number | null; placeholderShare: number | null;
+  failed: string[]; evidence: Record<string, number | string | null>; needsHumanReview: boolean;
+  /** Evidence counts on every row: distinct events and markets in the stratum. */
+  events: number; markets: number;
+  /** Share of present event values that are an Eastern-time date placeholder (00:00 / 23:59 America/New_York). */
+  etPlaceholderShare: number | null;
+  /** Which rule decided the verdict, and every rule that failed. */
+  decidedBy: RuleKey; failedRules: RuleKey[];
+}
 
 const earliestRefMs = (m: AuditMarket, refs: ResolutionReference[]): number | null => { const v = refs.map((r) => r.get(m)).filter((x): x is number => x !== null); return v.length ? Math.min(...v) : null; };
 
-/** The best candidate per slot per stratum, with every rule's outcome. */
+/**
+ * One representative market per distinct event (the first in input order). Markets of one event (moneyline, spread, totals,
+ * props) share their event's times, so counting them as separate observations would let a few events pass for many and make
+ * a genuine kick-off time look like a placeholder. Every reliability rule below is evaluated on these representatives.
+ */
+export function collapseToEvents(ms: AuditMarket[]): AuditMarket[] {
+  const seen = new Map<string, AuditMarket>(); for (const m of ms) if (!seen.has(m.group)) seen.set(m.group, m);
+  return [...seen.values()];
+}
+
+/** The best candidate per slot per stratum, with every rule's outcome, evaluated per distinct event. */
 export function recommendSlots(venue: string, ms: AuditMarket[], inv: FieldInventory[], rules: Partial<Record<keyof typeof RECOMMEND_RULES, number>> = {}): SlotVerdict[] {
   const R = { ...RECOMMEND_RULES, ...rules } as Record<keyof typeof RECOMMEND_RULES, number>; const refs = resolutionReferences(inv); const out: SlotVerdict[] = [];
   for (const st of [...new Set(ms.map((m) => m.stratum))].sort()) {
-    const sm = ms.filter((m) => m.stratum === st);
+    const allMarkets = ms.filter((m) => m.stratum === st); const sm = collapseToEvents(allMarkets); const counts = { events: sm.length, markets: allMarkets.length };
     for (const slot of [1, 2] as const) {
       const role: FieldRole = slot === 1 ? "START_LIKE" : "CLOSE_LIKE";
       const cands = inv.filter((f) => f.role === role);
-      if (!cands.length) { out.push({ venue, stratum: st, slot, field: null, verdict: "UNRELIABLE_REJECT", usableShare: null, presentShare: null, placeholderShare: null, failed: [`no ${role} field exists on the venue's objects`], evidence: {}, needsHumanReview: false }); continue; }
+      if (!cands.length) { out.push({ venue, stratum: st, slot, field: null, verdict: "UNRELIABLE_REJECT", usableShare: null, presentShare: null, placeholderShare: null, failed: [`no ${role} field exists on the venue's objects`], evidence: {}, needsHumanReview: false, ...counts, etPlaceholderShare: null, decidedBy: "noField", failedRules: ["noField"] }); continue; }
       const scored = cands.map((f) => {
         const vals = sm.map((m) => m.flat[f.path]).filter((v) => v !== undefined && v !== null && v !== "");
         const usable = vals.filter((v) => { const p = parseTimestamp(v); return (p.kind === "datetime") && !placeholderKind(v); }).length;
         const phs = vals.filter((v) => placeholderKind(v) !== null).length; const prof = timeOfDayProfile(vals);
+        const et = vals.filter((v) => easternPlaceholder(v) !== null).length;
         const topClock = prof.byClock[0]?.share ?? 0;
-        const failed: string[] = []; let gap: string | null = null; const evidence: SlotVerdict["evidence"] = { present: vals.length, stratumMarkets: sm.length, topClock: prof.byClock[0]?.clock ?? null, topClockShare: Math.round(topClock * 1000) / 1000, lenientFormatShare: Math.round(share(vals.filter((v) => formatOf(v) === "datetime_lenient").length, vals.length) * 1000) / 1000 };
-        if (vals.length < R.minPresent) return { f, failed: [`present on ${vals.length} < ${R.minPresent} markets`], insufficient: true, usable, vals, phs, evidence };
-        if (share(usable, sm.length) < R.minUsableShare) failed.push(`usable share ${(share(usable, sm.length) * 100).toFixed(1)} % < ${R.minUsableShare * 100} %`);
-        if (share(phs, vals.length) > R.maxPlaceholderShare) failed.push(`placeholder share ${(share(phs, vals.length) * 100).toFixed(1)} % > ${R.maxPlaceholderShare * 100} %`);
-        if (topClock > R.maxTopClockShare && vals.length >= R.minPresent) failed.push(`one time of day (${prof.byClock[0]?.clock}) holds ${(topClock * 100).toFixed(0)} % of values > ${R.maxTopClockShare * 100} %`);
+        const failed: string[] = []; const failedRules: RuleKey[] = []; let gap: string | null = null;
+        const fail = (key: RuleKey, msg: string) => { failed.push(msg); failedRules.push(key); };
+        const evidence: SlotVerdict["evidence"] = { presentEvents: vals.length, stratumEvents: sm.length, stratumMarkets: allMarkets.length, topClock: prof.byClock[0]?.clock ?? null, topClockShare: Math.round(topClock * 1000) / 1000, lenientFormatShare: Math.round(share(vals.filter((v) => formatOf(v) === "datetime_lenient").length, vals.length) * 1000) / 1000, etPlaceholderEvents: et, etPlaceholderShare: Math.round(share(et, vals.length) * 1000) / 1000 };
+        const base = { f, usable, vals, phs, evidence, et };
+        if (vals.length < R.minPresent) return { ...base, failed: [`present on ${vals.length} < ${R.minPresent} distinct events`], failedRules: ["minEvents"] as RuleKey[], insufficient: true };
+        if (share(usable, sm.length) < R.minUsableShare) fail("usableShare", `usable share ${(share(usable, sm.length) * 100).toFixed(1)} % < ${R.minUsableShare * 100} % of events`);
+        if (share(phs, vals.length) > R.maxPlaceholderShare) fail("placeholderShare", `placeholder share ${(share(phs, vals.length) * 100).toFixed(1)} % > ${R.maxPlaceholderShare * 100} % of events`);
+        if (topClock > R.maxTopClockShare && vals.length >= R.minPresent) fail("topClock", `one time of day (${prof.byClock[0]?.clock}) holds ${(topClock * 100).toFixed(0)} % of events > ${R.maxTopClockShare * 100} %`);
         if (slot === 1) {
           const resolved = sm.filter((m) => m.resolved);
           const ord = resolved.flatMap((m) => { const a = instantOf(m.flat[f.path]), r = earliestRefMs(m, refs); return a !== null && r !== null ? [{ a, r }] : []; });
-          if (ord.length >= R.minOrderedSamples) { const okShare = share(ord.filter((x) => x.a <= x.r).length, ord.length); evidence.startNotAfterResolutionShare = Math.round(okShare * 1000) / 1000; evidence.orderedSamples = ord.length; if (okShare < R.minOrderedShare) failed.push(`start ≤ resolution in ${(okShare * 100).toFixed(1)} % < ${R.minOrderedShare * 100} % of ${ord.length} resolved markets`); if (EVENT_TYPE(st)) { const gaps = ord.map((x) => (x.r - x.a) / 3_600_000); const med = quantile(gaps, 0.5)!; evidence.medianStartToResolutionHours = Math.round(med * 10) / 10; if (med > R.eventTypeMaxMedianGapHours) failed.push(`median start→resolution ${med.toFixed(1)} h > ${R.eventTypeMaxMedianGapHours} h: looks like a listing time, not an event start`); } }
-          else { evidence.orderedSamples = ord.length; gap = `only ${ord.length} resolved markets with a reference time (< ${R.minOrderedSamples}): meaning not established`; }
+          if (ord.length >= R.minOrderedSamples) { const okShare = share(ord.filter((x) => x.a <= x.r).length, ord.length); evidence.startNotAfterResolutionShare = Math.round(okShare * 1000) / 1000; evidence.orderedEvents = ord.length; if (okShare < R.minOrderedShare) fail("orderedShare", `start ≤ resolution in ${(okShare * 100).toFixed(1)} % < ${R.minOrderedShare * 100} % of ${ord.length} resolved events`); if (EVENT_TYPE(st)) { const gaps = ord.map((x) => (x.r - x.a) / 3_600_000); const med = quantile(gaps, 0.5)!; evidence.medianStartToResolutionHours = Math.round(med * 10) / 10; if (med > R.eventTypeMaxMedianGapHours) fail("eventTypeGap", `median start→resolution ${med.toFixed(1)} h > ${R.eventTypeMaxMedianGapHours} h: looks like a listing time, not an event start`); } }
+          else { evidence.orderedEvents = ord.length; gap = `only ${ord.length} resolved events with a reference time (< ${R.minOrderedSamples}): meaning not established`; }
           // a start-like field that coincides with a creation-like field is a listing time
           let coincide = 0; for (const cf of inv.filter((x) => x.role === "CREATION_LIKE")) { const prs = pairsOf(sm, f.path, cf.path); if (prs.length >= R.minPresent) coincide = Math.max(coincide, share(prs.filter((x) => Math.abs(x.b - x.a) <= R.creationCoincidenceMin * 60_000).length, prs.length)); }
           evidence.coincidesWithCreationShare = Math.round(coincide * 1000) / 1000;
-          if (coincide > R.maxCreationCoincidenceShare) failed.push(`${(coincide * 100).toFixed(0)} % of values are within ${R.creationCoincidenceMin} min of a creation-like field: a listing time, not an event start`);
+          if (coincide > R.maxCreationCoincidenceShare) fail("creationCoincidence", `${(coincide * 100).toFixed(0)} % of events have a value within ${R.creationCoincidenceMin} min of a creation-like field: a listing time, not an event start`);
           // compare with close-like fields only where THAT field carries a real time of day: a placeholder close (midnight of the event date) would precede almost every kick-off
-          for (const c2 of inv.filter((x) => x.role === "CLOSE_LIKE")) { const prs = sm.flatMap((m) => { const a = instantOf(m.flat[f.path]), b = instantOf(m.flat[c2.path]); return a !== null && b !== null && !placeholderKind(m.flat[c2.path]) ? [{ a, b }] : []; }); if (prs.length >= R.minPresent) { const okc = share(prs.filter((x) => x.a <= x.b + R.startToleranceVsCloseMin * 60_000).length, prs.length); evidence[`startNotAfter(${c2.path})`] = Math.round(okc * 1000) / 1000; if (okc < R.minStartBeforeCloseShare) failed.push(`start ≤ ${c2.path} (+${R.startToleranceVsCloseMin} min) in ${(okc * 100).toFixed(1)} % < ${R.minStartBeforeCloseShare * 100} %`); } }
+          for (const c2 of inv.filter((x) => x.role === "CLOSE_LIKE")) { const prs = sm.flatMap((m) => { const a = instantOf(m.flat[f.path]), b = instantOf(m.flat[c2.path]); return a !== null && b !== null && !placeholderKind(m.flat[c2.path]) ? [{ a, b }] : []; }); if (prs.length >= R.minPresent) { const okc = share(prs.filter((x) => x.a <= x.b + R.startToleranceVsCloseMin * 60_000).length, prs.length); evidence[`startNotAfter(${c2.path})`] = Math.round(okc * 1000) / 1000; if (okc < R.minStartBeforeCloseShare) fail("startBeforeClose", `start ≤ ${c2.path} (+${R.startToleranceVsCloseMin} min) in ${(okc * 100).toFixed(1)} % < ${R.minStartBeforeCloseShare * 100} % of events`); } }
         }
-        if (!failed.length && gap) return { f, failed: [gap], insufficient: true, usable, vals, phs, evidence };
-        return { f, failed, insufficient: false, usable, vals, phs, evidence };
+        if (!failed.length && gap) return { ...base, failed: [gap], failedRules: ["evidenceGap"] as RuleKey[], insufficient: true };
+        return { ...base, failed, failedRules, insufficient: false };
       });
       const ok = scored.filter((s) => !s.insufficient && !s.failed.length).sort((a, b) => b.usable - a.usable || (a.f.path < b.f.path ? -1 : 1));
       const pick = ok[0] ?? [...scored].sort((a, b) => Number(a.insufficient) - Number(b.insufficient) || a.failed.length - b.failed.length || b.usable - a.usable || (a.f.path < b.f.path ? -1 : 1))[0];
       const verdict: Verdict = ok[0] ? "RECOMMEND" : pick.insufficient ? "INSUFFICIENT_DATA" : "UNRELIABLE_REJECT";
       out.push({ venue, stratum: st, slot, field: pick.f.path, verdict, usableShare: Math.round(share(pick.usable, sm.length) * 1000) / 1000, presentShare: Math.round(share(pick.vals.length, sm.length) * 1000) / 1000, placeholderShare: pick.vals.length ? Math.round(share(pick.phs, pick.vals.length) * 1000) / 1000 : null, failed: pick.failed, evidence: pick.evidence,
         // slot 2 has no ordering rule that can be asserted without evidence of what the venue's deadline means: a human reads the relations
-        needsHumanReview: slot === 2 && verdict === "RECOMMEND" });
+        needsHumanReview: slot === 2 && verdict === "RECOMMEND", ...counts, etPlaceholderShare: pick.vals.length ? Math.round(share(pick.et, pick.vals.length) * 1000) / 1000 : null,
+        decidedBy: pick.failedRules[0] ?? "allPassed", failedRules: pick.failedRules });
     }
+  }
+  return out;
+}
+
+// ───────────────────────────────────────────── the date-level alternative (shown, never recommended) ──────
+
+export interface DateLevelRow {
+  venue: string; stratum: string; field: string; events: number;
+  /** Events whose value is a date-only value or an Eastern 00:00 / 23:59 placeholder: the event's Eastern calendar date is known, its time is not. */
+  withImpliedDate: number; impliedShare: number; etMidnight: number; etEndOfDay: number; dateOnly: number;
+  /** Resolved events with a reference time: how often the implied date is not after the resolution's Eastern date, and the median gap in days. */
+  orderedChecked: number; impliedDateNotAfterResolutionShare: number | null; medianDaysBeforeResolution: number | null;
+  label: "ALTERNATIVE_DATE_LEVEL";
+  /** A date cannot say whether an event has started, nor how long before it an order would fill. */
+  inPlayCheck: "cannot be evaluated at date level";
+  recommended: false;
+}
+/**
+ * "What would a date-level rule pass": for each stratum, the close-like (and start-like) field whose values most often imply an
+ * Eastern calendar date, and how many distinct events that covers. A SHOWN ALTERNATIVE, not a recommendation: `recommended` is the literal
+ * false and the verdict rules above are untouched.
+ */
+export function dateLevelRows(venue: string, ms: AuditMarket[], inv: FieldInventory[], minEvents = RECOMMEND_RULES.minPresent): DateLevelRow[] {
+  const refs = resolutionReferences(inv); const out: DateLevelRow[] = [];
+  for (const st of [...new Set(ms.map((m) => m.stratum))].sort()) {
+    const sm = collapseToEvents(ms.filter((m) => m.stratum === st)); let best: DateLevelRow | null = null;
+    for (const f of inv.filter((x) => x.role === "CLOSE_LIKE" || x.role === "START_LIKE")) {
+      let implied = 0, etM = 0, etE = 0, dOnly = 0; const gaps: number[] = []; let checked = 0, ok = 0;
+      for (const m of sm) {
+        const v = m.flat[f.path]; if (v === undefined || v === null || v === "") continue; const d = impliedEasternDate(v); if (!d) continue;
+        implied++; const e = easternPlaceholder(v); if (e?.kind === "ET_MIDNIGHT") etM++; else if (e?.kind === "ET_END_OF_DAY") etE++; else dOnly++;
+        if (m.resolved) { const r = earliestRefMs(m, refs); if (r !== null) { checked++; const rd = easternParts(r).date; if (d <= rd) ok++; gaps.push((Date.parse(rd + "T00:00:00Z") - Date.parse(d + "T00:00:00Z")) / 86_400_000); } }
+      }
+      if (implied < minEvents) continue;
+      const row: DateLevelRow = { venue, stratum: st, field: f.path, events: sm.length, withImpliedDate: implied, impliedShare: Math.round(share(implied, sm.length) * 1000) / 1000, etMidnight: etM, etEndOfDay: etE, dateOnly: dOnly, orderedChecked: checked, impliedDateNotAfterResolutionShare: checked ? Math.round(share(ok, checked) * 1000) / 1000 : null, medianDaysBeforeResolution: gaps.length ? quantile(gaps, 0.5) : null, label: "ALTERNATIVE_DATE_LEVEL", inPlayCheck: "cannot be evaluated at date level", recommended: false };
+      if (!best || row.withImpliedDate > best.withImpliedDate || (row.withImpliedDate === best.withImpliedDate && row.field < best.field)) best = row;
+    }
+    if (best) out.push(best);
   }
   return out;
 }
@@ -235,9 +301,12 @@ export function toAuditMarkets(venue: string, raws: RawMarket[], o: { idOf: (m: 
  * Round-robin over the strata (in order of first appearance, items in input order): one market from each stratum in turn, at
  * most `perStratum` per stratum, until `total` markets are chosen; then, if the per-stratum cap kept it below `total`, fill
  * from what is left in input order. Never returns more than `total`; deterministic.
+ * When items carry a `group` (their event), each stratum offers the FIRST market of every distinct event before any second market
+ * of an event, so a quota is spent on as many different events as the listing contains (event-level rules need distinct events).
  */
-export function stratifiedSample<T extends { stratum: string }>(items: T[], perStratum: number, total: number): T[] {
+export function stratifiedSample<T extends { stratum: string; group?: string }>(items: T[], perStratum: number, total: number): T[] {
   const groups = new Map<string, T[]>(); for (const it of items) { const g = groups.get(it.stratum); if (g) g.push(it); else groups.set(it.stratum, [it]); }
+  for (const [k, g] of groups) { if (g.every((x) => x.group === undefined)) continue; const seen = new Set<string>(); const firsts: T[] = [], rest: T[] = []; for (const x of g) { if (!seen.has(x.group ?? "")) { seen.add(x.group ?? ""); firsts.push(x); } else rest.push(x); } groups.set(k, [...firsts, ...rest]); }
   const out: T[] = []; const used = new Set<T>();
   for (let round = 0; round < perStratum && out.length < total; round++) for (const g of groups.values()) { if (out.length >= total) break; if (round < g.length) { out.push(g[round]); used.add(g[round]); } }
   for (const it of items) { if (out.length >= total) break; if (!used.has(it)) { used.add(it); out.push(it); } }

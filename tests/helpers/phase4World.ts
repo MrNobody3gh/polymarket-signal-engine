@@ -34,7 +34,7 @@ export function buildWorld(seed = 4): World {
     const dayOffset = 1 + Math.floor(r() * 20); const startOfEvent = resolved ? BASE - dayOffset * 86_400_000 : BASE + dayOffset * 86_400_000;
     // kick-off at a varied time of day (never a placeholder), a multiple of 15 min
     let kick = startOfEvent + (Math.floor(r() * 96) * 15 * 60_000);
-    { const tod = (kick - Date.UTC(new Date(kick).getUTCFullYear(), new Date(kick).getUTCMonth(), new Date(kick).getUTCDate())) / 3_600_000; if (tod === 0 || tod === 12) kick += 15 * 60_000; } // never a placeholder shape by accident
+    { const tod = (kick - Date.UTC(new Date(kick).getUTCFullYear(), new Date(kick).getUTCMonth(), new Date(kick).getUTCDate())) / 3_600_000; if (tod === 0 || tod === 12 || tod === 4 || tod === 5) kick += 15 * 60_000; } // never a placeholder shape by accident (UTC midnight/noon, Eastern midnight 04:00Z/05:00Z)
     const conditionId = "0x" + hex(r, 64); const tokens = [String(1000000 + n * 2), String(1000001 + n * 2)];
     const created = kick - (3 + Math.floor(r() * 10)) * 86_400_000 + Math.floor(r() * 86_400_000); // listing time: days before the event, with milliseconds
     const dur = kind === "sports" ? (2 + r()) * 3_600_000 : kind === "esports" ? (1 + r() * 2) * 3_600_000 : 5 * 60_000;

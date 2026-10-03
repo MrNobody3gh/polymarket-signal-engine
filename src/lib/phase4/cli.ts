@@ -15,7 +15,7 @@ import { runS1a, s1aSummaryLines } from "./s1a";
 import { coverageSummaryLines, runCoverage } from "./probe";
 import { GAMMA_API } from "../polymarket/client";
 import { db as supabaseDb } from "../db";
-import { US_DEFAULTS, US_EXCHANGE, gammaIdOf, type UsConfig } from "./venues";
+import { US_DEFAULTS, US_EXCHANGE, defaultTargetedQueries, gammaIdOf, parseTargeted, type UsConfig } from "./venues";
 import type { RawMarket, SlotVerdict } from "./audit";
 import { parseTimestamp } from "./timestamps";
 
@@ -28,17 +28,37 @@ export interface CliDeps {
 }
 export const EXIT = { OK: 0, FAILED: 1, CONFIG: 2 } as const;
 
+export const PRINT_PACE_LINES = 200;
+export const PRINT_MAX_LINE = 3000;
+/**
+ * `--print-files a,b,c`: print the named result files after a run, so a log-only host (Railway) can return them without a shell loop.
+ * Each file sits between `=====FILE name` and `=====END name`; at most 200 lines are printed per second (a one-second pause after every
+ * 200); a line longer than 3,000 characters is split into 3,000-character pieces. A name is looked up in the output directory, then as a path.
+ */
+export async function printFiles(names: string[], o: { outDir: string; readFile?: (p: string) => string | null; log: (l: string) => void; sleep?: (ms: number) => Promise<void> }): Promise<void> {
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))); let printed = 0;
+  const emit = async (l: string) => { o.log(l); if (++printed % PRINT_PACE_LINES === 0) await sleep(1000); };
+  for (const name of names) {
+    await emit(`=====FILE ${name}`);
+    const text = o.readFile ? (o.readFile(`${o.outDir}/${name}`) ?? o.readFile(name)) : null;
+    if (text === null) await emit("(file not found)");
+    else for (const line of text.replace(/\n$/, "").split("\n")) { if (line.length <= PRINT_MAX_LINE) await emit(line); else for (let i = 0; i < line.length; i += PRINT_MAX_LINE) await emit(line.slice(i, i + PRINT_MAX_LINE)); }
+    await emit(`=====END ${name}`);
+  }
+}
+const printList = (opts: Record<string, string>) => (opts["print-files"] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+
 function parseArgs(argv: string[]): { flags: Set<string>; opts: Record<string, string> } {
   const flags = new Set<string>(); const opts: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (!a.startsWith("--")) continue; const k = a.slice(2); const nxt = argv[i + 1]; if (nxt !== undefined && !nxt.startsWith("--")) { opts[k] = nxt; i++; } else flags.add(k); }
   return { flags, opts };
 }
 const num = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : d; };
-const usConfig = (opts: Record<string, string>, flags: Set<string>): UsConfig | null => flags.has("no-us") ? null : { ...US_DEFAULTS, base: opts["us-base"] ?? US_DEFAULTS.base, marketsPath: opts["us-markets-path"] ?? US_DEFAULTS.marketsPath, openQuery: opts["us-open-query"] ?? US_DEFAULTS.openQuery, closedQuery: opts["us-closed-query"] ?? US_DEFAULTS.closedQuery, pageSize: num(opts["us-page-size"], US_DEFAULTS.pageSize) };
+const usConfig = (opts: Record<string, string>, flags: Set<string>): UsConfig | null => flags.has("no-us") ? null : { ...US_DEFAULTS, base: opts["us-base"] ?? US_DEFAULTS.base, marketsPath: opts["us-markets-path"] ?? US_DEFAULTS.marketsPath, openQuery: opts["us-open-query"] ?? US_DEFAULTS.openQuery, closedQuery: opts["us-closed-query"] ?? US_DEFAULTS.closedQuery, archivedQuery: opts["us-archived-query"] === "none" ? null : opts["us-archived-query"] ?? US_DEFAULTS.archivedQuery, pageSize: num(opts["us-page-size"], US_DEFAULTS.pageSize) };
 const dbEnvOk = (env: Record<string, string | undefined>) => !!env.NEXT_PUBLIC_SUPABASE_URL && !!env.SUPABASE_SERVICE_ROLE_KEY;
 
-export const TS_AUDIT_USAGE = "usage: npm run phase4:ts-audit -- [--out-dir docs/phase4/data] [--fixtures-dir tests/fixtures/phase4 | --no-fixtures] [--sample-open 300] [--sample-resolved 300] [--fetch-factor 3] [--no-us] [--us-base URL] [--us-markets-path /v1/markets] [--us-open-query 'a=b'] [--us-closed-query 'a=b'] [--with-db]";
-export const COVERAGE_USAGE = "usage: npm run phase4:coverage -- [--out-dir docs/phase4/data] [--recommendations docs/phase4/data/s1a_summary.json] [--no-venue] [--mode REALISTIC|IDEAL|CONSERVATIVE] [--us-base URL] [--us-markets-path /v1/markets] [--us-open-query 'a=b'] [--us-closed-query 'a=b'] [--us-max 6000] [--start 2026-09-27T04:28:38Z]";
+export const TS_AUDIT_USAGE = "usage: npm run phase4:ts-audit -- [--out-dir docs/phase4/data] [--fixtures-dir tests/fixtures/phase4 | --no-fixtures] [--sample-open 300] [--sample-resolved 300] [--fetch-factor 3] [--us-targeted default|\"sport=query|sport=query\"] [--print-files a,b] [--no-us] [--us-base URL] [--us-markets-path /v1/markets] [--us-open-query 'a=b'] [--us-closed-query 'a=b'] [--with-db]";
+export const COVERAGE_USAGE = "usage: npm run phase4:coverage -- [--out-dir docs/phase4/data] [--recommendations docs/phase4/data/s1a_summary.json] [--no-venue] [--mode REALISTIC|IDEAL|CONSERVATIVE] [--us-base URL] [--us-markets-path /v1/markets] [--us-open-query 'a=b'] [--us-closed-query 'a=b'] [--us-max 6000] [--start 2026-09-27T04:28:38Z] [--diagnose] [--diagnostic-sample 100] [--us-archived-query 'a=b'|none] [--print-files a,b]";
 
 /** Our own resolved markets (read-only): the most recent resolutions in `token_resolutions`, their markets fetched from Gamma, so field times can be compared with OUR observed on-chain resolution times. */
 export async function loadOurs(rdb: ReadOnlyDb, http: PoliteHttp, max: number): Promise<{ raw: RawMarket; resolvedMs: number }[]> {
@@ -70,8 +90,9 @@ export async function runTimestampAuditCli(argv: string[], env: Record<string, s
       try { ours = await loadOurs(d.db ? d.db() : readOnly(supabaseDb()), http, 150); } catch (e) { log(`database comparison skipped: ${(e as Error).message}`); }
     }
     mkdir(outDir); if (fixtureDir) mkdir(fixtureDir);
-    const res = await runS1a({ http, us: usConfig(opts, flags), sampleOpen: num(opts["sample-open"], 300), sampleResolved: num(opts["sample-resolved"], 300), fetchFactor: num(opts["fetch-factor"], 3), ours, now: d.now, fixtureDir, write: (rel, content) => write(rel.startsWith(fixtureDir ?? "\u0000") ? rel : `${outDir}/${rel}`, content) });
+    const res = await runS1a({ http, us: usConfig(opts, flags), sampleOpen: num(opts["sample-open"], 300), sampleResolved: num(opts["sample-resolved"], 300), fetchFactor: num(opts["fetch-factor"], 3), usTargeted: opts["us-targeted"] === undefined ? undefined : opts["us-targeted"] === "default" ? defaultTargetedQueries() : parseTargeted(opts["us-targeted"]), ours, now: d.now, fixtureDir, write: (rel, content) => write(rel.startsWith(fixtureDir ?? "\u0000") ? rel : `${outDir}/${rel}`, content) });
     for (const l of s1aSummaryLines(res, outDir)) log(l);
+    await printFiles(printList(opts), { outDir, readFile: d.readFile, log, sleep: d.sleep });
     return EXIT.OK;
   } catch (e) { log(`timestamp audit failed: ${(e as Error).message}`); return EXIT.FAILED; }
 }
@@ -90,8 +111,9 @@ export async function runCoverageCli(argv: string[], env: Record<string, string 
     if (txt) { try { const j = JSON.parse(txt) as { venues?: { venue: string; recommendations?: SlotVerdict[] }[] }; recs = j.venues?.find((v) => v.venue === US_EXCHANGE)?.recommendations ?? null; if (recs && !recs.length) recs = null; } catch { log(`could not read ${recPath}: recommendations ignored`); } }
     const useVenue = !flags.has("no-venue"); const http = useVenue ? new PoliteHttp({ fetch: d.fetch, sleep: d.sleep, now: d.now }) : null;
     mkdir(outDir);
-    const res = await runCoverage({ db: d.db ? d.db() : readOnly(supabaseDb()), http, us: useVenue ? usConfig(opts, flags) : null, recommendations: recs, now: d.now, mode, startIso, maxUsMarkets: num(opts["us-max"], 6000), write: (rel, c) => write(`${outDir}/${rel}`, c) });
+    const res = await runCoverage({ db: d.db ? d.db() : readOnly(supabaseDb()), http, us: useVenue ? usConfig(opts, flags) : null, recommendations: recs, now: d.now, mode, startIso, maxUsMarkets: opts["us-max"] === undefined ? undefined : num(opts["us-max"], 6000), diagnose: flags.has("diagnose"), diagnosticSample: num(opts["diagnostic-sample"], 100), write: (rel, c) => write(`${outDir}/${rel}`, c) });
     for (const l of coverageSummaryLines(res, outDir)) log(l);
+    await printFiles(printList(opts), { outDir, readFile: d.readFile, log, sleep: d.sleep });
     return EXIT.OK;
   } catch (e) { log(`coverage probe failed: ${(e as Error).message}`); return EXIT.FAILED; }
 }

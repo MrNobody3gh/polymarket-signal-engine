@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 interface Edit { file: string; find: string; replace: string }
 interface Mutation { id: string; what: string; edits: Edit[]; tests: string[] }
 const L = "src/lib/phase4/";
-const T = { ts: "tests/phase4-timestamps.test.ts", ph: "tests/phase4-placeholders.test.ts", map: "tests/phase4-mapping.test.ts", fun: "tests/phase4-funnel.test.ts", st: "tests/phase4-stats.test.ts", sc: "tests/phase4-scripts.test.ts", http: "tests/phase4-http.test.ts", cat: "tests/phase4-categorize.test.ts" };
+const T = { ev: "tests/phase4-events.test.ts", dg: "tests/phase4-diagnose.test.ts", ts: "tests/phase4-timestamps.test.ts", ph: "tests/phase4-placeholders.test.ts", map: "tests/phase4-mapping.test.ts", fun: "tests/phase4-funnel.test.ts", st: "tests/phase4-stats.test.ts", sc: "tests/phase4-scripts.test.ts", http: "tests/phase4-http.test.ts", cat: "tests/phase4-categorize.test.ts" };
 const m = (id: string, what: string, file: string, find: string, replace: string, tests: string[]): Mutation => ({ id, what, edits: [{ file: L + file, find, replace }], tests });
 
 export const MUTATIONS: Mutation[] = [
@@ -79,6 +79,36 @@ export const MUTATIONS: Mutation[] = [
   m("F12", "the minimum copy score is 67", "funnel.ts", "export const SCORE_MIN = 68;", "export const SCORE_MIN = 67;", [T.fun, T.sc]),
   m("F13", "a detection lag of exactly MAX_SIGNAL_AGE counts as stale", "funnel.ts", "r.evalMs - r.createdAtMs <= maxAge", "r.evalMs - r.createdAtMs < maxAge", [T.fun]),
   m("F14", "an unobserved lag counts as fresh", "funnel.ts", "r.lagObserved === true", "r.lagObserved !== false", [T.fun]),
+  // ── 4.0b: event-level S1a, Eastern placeholders, diagnostic, date-level row, --print-files
+  m("E1", "markets of one event are counted as separate events", "audit.ts", "if (!seen.has(m.group)) seen.set(m.group, m);", "seen.set(m.id + m.group, m);", [T.ev]),
+  m("E2", "the verdict does not name the rule that decided it", "audit.ts", 'decidedBy: pick.failedRules[0] ?? "allPassed"', 'decidedBy: "allPassed"', [T.ev]),
+  m("E3", "Eastern midnight is not recognised", "timestamps.ts", 'if (e.time === "00:00:00") return { kind: "ET_MIDNIGHT", date: e.date };', "", [T.ev]),
+  m("E4", "Eastern end of day is only recognised at 23:59:00", "timestamps.ts", 'e.time === "23:59:00" || e.time === "23:59:59"', 'e.time === "23:59:00"', [T.ev]),
+  m("E5", "Eastern time ignores daylight saving (always UTC−4)", "timestamps.ts", 'timeZone: "America/New_York"', 'timeZone: "Etc/GMT+4"', [T.ev]),
+  m("E6", "the implied date of an Eastern end-of-day value is the UTC date", "timestamps.ts", 'return { kind: "ET_END_OF_DAY", date: e.date };', 'return { kind: "ET_END_OF_DAY", date: new Date(p.ms).toISOString().slice(0, 10) };', [T.ev]),
+  m("E7", "the date-level alternative is marked recommended", "audit.ts", 'inPlayCheck: "cannot be evaluated at date level", recommended: false };', 'inPlayCheck: "cannot be evaluated at date level", recommended: true as never };', [T.ev]),
+  m("E8", "a stratum quota is spent on many markets of the same event", "audit.ts", "if (!seen.has(x.group ?? \"\")) {", "if (true) {", [T.ev]),
+  m("E9", "a sport reaches the quota with markets OR events", "events.ts", "sm.length >= 100 && evs >= 30", "sm.length >= 100 || evs >= 30", [T.ev]),
+  m("E10", "a qualifier after a colon is read as part of a participant", "mapping.ts", "title.split(/[:(\\[|–—]/)[0]", "title.split(/[(\\[|–—]/)[0]", [T.ev]),
+  m("E11", "the crossed (home/away swapped) pairing is ignored", "mapping.ts", "return Math.max(Math.min(j(pa[0], pb[0]), j(pa[1], pb[1])), Math.min(j(pa[0], pb[1]), j(pa[1], pb[0])));", "return Math.min(j(pa[0], pb[0]), j(pa[1], pb[1]));", [T.ev]),
+  m("E12", "a tie between two events is broken arbitrarily", "events.ts", "ambiguous++; continue;", "ambiguous++;", [T.ev]),
+  m("E13", "the same event is matched across any date", "events.ts", "dayDiff(ea.etDate, c.eb.etDate) <= maxDays", "true", [T.ev]),
+  m("D1", "the diagnostic labels an identifier match EXACT", "mapping.ts", 'confidence: probable ? "PROBABLE" : "NONE", verified: false, dateChecked: false', 'confidence: probable ? (winners[0].identifierMatch ? ("EXACT" as never) : "PROBABLE") : "NONE", verified: false, dateChecked: false', [T.dg]),
+  m("D2", "the diagnostic reports a match as verified", "mapping.ts", "verified: false, dateChecked: false, identifierMatch:", "verified: true as never, dateChecked: false, identifierMatch:", [T.dg]),
+  m("D3", "the diagnostic ignores numbers", "mapping.ts", "c.titleSimilarity >= PROBABLE_MIN_SIMILARITY && c.numbersAgree && c.negationsAgree", "c.titleSimilarity >= PROBABLE_MIN_SIMILARITY && c.negationsAgree", [T.dg]),
+  m("D4", "the diagnostic ignores negations", "mapping.ts", "c.titleSimilarity >= PROBABLE_MIN_SIMILARITY && c.numbersAgree && c.negationsAgree", "c.titleSimilarity >= PROBABLE_MIN_SIMILARITY && c.numbersAgree", [T.dg]),
+  m("D5", "a similarity of exactly 0.9 falls in the lower band", "mapping.ts", "SIMILARITY_BANDS.find((b) => score >= b.min)!.name", "SIMILARITY_BANDS.find((b) => score > b.min)!.name", [T.dg]),
+  m("D6", "the sample ignores its seed", "diagnose.ts", "const rng = seededRng(seed);", 'const rng = seededRng("fixed");', [T.dg]),
+  m("D7", "the diagnostic is no longer deterministic about ties", "mapping.ts", "(a.c.marketId < b.c.marketId ? -1 : 1)).slice(0, limit)", "0).slice(0, limit)", [T.dg]),
+  m("D8", "the date-level row counts the UTC date, not the Eastern date", "funnel.ts", "const today = easternParts(r.evalMs).date;", "const today = new Date(r.evalMs).toISOString().slice(0, 10);", [T.fun]),
+  m("D9", "the date-level row accepts only today, not tomorrow", "funnel.ts", "r.impliedDateEt === today || r.impliedDateEt === nextDay(today)", "r.impliedDateEt === today", [T.fun]),
+  m("D10", "the feasibility table takes its flow from the date-level row", "probe.ts", "const fin = funnel.variants.EXACT.perDay.minLead;", "const fin = funnel.dateLevel.variants.EXACT.perDay;", [T.sc]),
+  m("D11", "diagnostic mode keeps the 6,000-market cap", "probe.ts", "o.maxUsMarkets ?? (o.diagnose ? Infinity : 6000)", "o.maxUsMarkets ?? 6000", [T.sc]),
+  m("D12", "a targeted fetch stops at 100 markets OR 30 events", "venues.ts", "ms.length >= minM && new Set(ms.map(usGroupOf)).size >= minE", "ms.length >= minM || new Set(ms.map(usGroupOf)).size >= minE", [T.sc]),
+  m("D13", "the PROBABLE rule no longer needs a date on both sides", "mapping.ts", 'if (d1 === null || d2 === null) return { cand, level: "NONE"', 'if (false) return { cand, level: "NONE"', [T.map, T.sc]),
+  m("D14", "--print-files prints by default", "cli.ts", '(opts["print-files"] ?? "")', '(opts["print-files"] ?? "s1b_funnel.json")', [T.sc]),
+  m("D15", "--print-files pauses every 400 lines instead of 200", "cli.ts", "export const PRINT_PACE_LINES = 200;", "export const PRINT_PACE_LINES = 400;", [T.sc]),
+  m("D16", "--print-files does not split long lines", "cli.ts", "export const PRINT_MAX_LINE = 3000;", "export const PRINT_MAX_LINE = 30000;", [T.sc]),
   // ── sample-size maths (test 5)
   m("S1", "the sample size is rounded down", "stats.ts", "return Math.ceil((2 * z * z", "return Math.floor((2 * z * z", [T.st]),
   m("S2", "power uses the wrong quantile", "stats.ts", "normInv(1 - alpha / 2) + normInv(power)", "normInv(1 - alpha / 2) + normInv(1 - power)", [T.st]),
@@ -94,7 +124,7 @@ export const MUTATIONS: Mutation[] = [
   m("R2", "every select also performs a write", "readonly-db.ts", 'select: (table, columns = "*", options) => db.from(table).select(columns, options) };', 'select: (table, columns = "*", options) => { (db as any).from(table).upsert({ x: 1 }); return db.from(table).select(columns, options); } };', [T.sc]),
   m("R3", "the wrapper exposes rpc", "readonly-db.ts", 'return { select: (table, columns = "*", options) => db.from(table).select(columns, options) };', 'return { select: (table, columns = "*", options) => db.from(table).select(columns, options), rpc: (n: string) => (db as any).rpc(n) } as never;', [T.sc]),
   // ── scripts: output, files, windows (test 7)
-  m("C1", "the S1a summary is not capped at 60 lines", "s1a.ts", "return L.map((l) => (l.length > 220 ? l.slice(0, 217) + \"...\" : l)).slice(0, 60);\n}", 'return L.map((l) => (l.length > 220 ? l.slice(0, 217) + "..." : l));\n}', [T.sc]),
+  { id: "C1", what: "the S1a summary is not capped at 60 lines (both the row limit and the final cap removed: either alone is covered by the other)", edits: [{ file: L + "s1a.ts", find: "const show = rows.slice(0, 10);", replace: "const show = rows.slice(0, 500);" }, { file: L + "s1a.ts", find: ".map((l) => (l.length > 220 ? l.slice(0, 217) + \"...\" : l)).slice(0, 60);\n}", replace: ".map((l) => (l.length > 220 ? l.slice(0, 217) + \"...\" : l));\n}" }], tests: [T.sc] },
   m("C2", "long lines are not truncated", "s1a.ts", "l.length > 220 ? l.slice(0, 217) + \"...\" : l)).slice(0, 60);", "l)).slice(0, 60);", [T.sc]),
   m("C3", "the probe's lower window bound is dropped", "probe.ts", '.gte("created_at", startIso)', '.gte("created_at", "2000-01-01T00:00:00Z")', [T.sc]),
   m("C4", "EXIT signals are counted as entries", "probe.ts", '.in("kind", ENTRY_KINDS)', '.in("kind", [...ENTRY_KINDS, "EXIT"])', [T.sc]),
