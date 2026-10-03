@@ -19,7 +19,7 @@ import { categoryMix, diagnosticCsv, runDiagnostic, scoreBand, stratifiedRandom,
 import { selectAll, selectIn, type ReadOnlyDb } from "./readonly-db";
 import { toCsv } from "./stats";
 import { classifyFieldName, DAY_MS, easternParts, impliedEasternDate, resolveEventTime } from "./timestamps";
-import { fetchUs, listingTotals, US_EXCHANGE, usIdOf, usIsResolved, usOutcomes, usTitleOf, tagsOf, type FetchNotes, type ListingTotals, type UsConfig } from "./venues";
+import { fetchUs, usFetchPlan, listingTotals, US_EXCHANGE, usIdOf, usIsResolved, usOutcomes, usTitleOf, tagsOf, type FetchNotes, type ListingTotals, type UsConfig } from "./venues";
 import { ENTRY_KINDS } from "../paper/ledger";
 import { flatten, instantOf, type RawMarket } from "./audit";
 
@@ -131,9 +131,9 @@ export async function runCoverage(o: CoverageOptions): Promise<CoverageResult> {
   let venueLists: { open: RawMarket[]; closed: RawMarket[]; archived: RawMarket[] | null } | null = null; let venueRefs: VenueMarketRef[] = []; const dateBasis: Record<string, number> = {};
   if (!o.us || !o.http) reasons.push("execution venue not configured: stages after the copy-score stage are not measured");
   else {
-    log("venue crawl"); const cap = o.maxUsMarkets ?? (o.diagnose ? Infinity : 6000); const half = cap === Infinity ? Infinity : Math.ceil(cap / 2);
-    const open = await fetchUs(o.http, o.us, { closed: false, max: half }); const closed = await fetchUs(o.http, o.us, { closed: true, max: half }); notes = { open: open.notes, closed: closed.notes };
-    const archived = o.diagnose && o.us.archivedQuery ? await fetchUs(o.http, o.us, { closed: true, max: half, query: o.us.archivedQuery }) : null;
+    log("venue crawl"); const plan = usFetchPlan(o); const cap = plan.cap; const half = plan.half;
+    const open = await fetchUs(o.http, o.us, { closed: false, max: half, slim: plan.slim }); const closed = await fetchUs(o.http, o.us, { closed: true, max: half, slim: plan.slim }); notes = { open: open.notes, closed: closed.notes };
+    const archived = o.diagnose && o.us.archivedQuery ? await fetchUs(o.http, o.us, { closed: true, max: plan.archivedMax, slim: plan.slim, query: o.us.archivedQuery }) : null;
     if (archived?.notes.errors.length) reasons.push(`archived listing: ${archived.notes.errors[0]}`);
     venueLists = { open: open.markets, closed: closed.markets, archived: archived?.markets ?? null };
     const { refs, raw } = toVenueRefs([...open.markets, ...closed.markets, ...(archived?.markets ?? [])]); candidates = refs.length; venueRefs = refs;

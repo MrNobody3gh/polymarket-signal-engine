@@ -30,6 +30,24 @@ export interface UsConfig {
   archivedQuery: string | null;
   limitParam: string; pageParam: string | null; pageSize: number;
 }
+/** Memory bound for the diagnostic (found on the first production run: the uncapped full US listing exhausted a ~500 MB heap after about 12 minutes of paging). */
+export const NORMAL_CAP = 6000;
+export const DIAGNOSE_DEFAULT_CAP = 40_000;
+export const ARCHIVED_CAP = 5_000;
+export function usFetchPlan(o: { diagnose?: boolean; maxUsMarkets?: number }): { cap: number; half: number; archivedMax: number; slim: boolean } {
+  const cap = o.maxUsMarkets ?? (o.diagnose ? DIAGNOSE_DEFAULT_CAP : NORMAL_CAP); const half = Math.ceil(cap / 2);
+  return { cap, half, archivedMax: Math.min(half, ARCHIVED_CAP), slim: !!o.diagnose };
+}
+/** Keeps what the audits and the matcher read (short strings, numbers, booleans, nested objects and arrays) and drops what dominates memory: free text beyond 200 characters, arrays beyond 30 items, nested `markets` lists, depth beyond 6. */
+export function slimRaw(v: unknown, depth = 0): unknown {
+  if (typeof v === "string") return v.length > 200 ? v.slice(0, 200) : v;
+  if (v === null || typeof v !== "object") return v;
+  if (depth >= 6) return null;
+  if (Array.isArray(v)) return v.slice(0, 30).map((x) => slimRaw(x, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) { if (depth > 0 && k === "markets") continue; out[k] = slimRaw(x, depth + 1); }
+  return out;
+}
 export const US_DEFAULTS: UsConfig = { base: "https://gateway.polymarket.us", marketsPath: "/v1/markets", openQuery: "active=true&closed=false", closedQuery: "closed=true", archivedQuery: "archived=true", limitParam: "limit", pageParam: "offset", pageSize: 100 };
 /** Where the owner should confirm every US default. */
 export const US_DOCS = ["https://docs.polymarket.us"];
@@ -78,17 +96,18 @@ export async function fetchGamma(http: PoliteHttp, o: { closed: boolean; max: nu
 }
 
 /** Page the US venue's markets listing with the configured (unverified) parameters. */
-export async function fetchUs(http: PoliteHttp, cfg: UsConfig, o: { closed: boolean; max: number; maxPages?: number; /** a query string that replaces the configured open/closed one (targeted fetches); `closed` is then only used to judge whether the venue honoured a filter */ query?: string; /** stop as soon as this returns true for the markets fetched so far (a per-sport quota) */ enough?: (markets: RawMarket[]) => boolean }): Promise<Fetched> {
+export async function fetchUs(http: PoliteHttp, cfg: UsConfig, o: { closed: boolean; max: number; maxPages?: number; /** slim each market on arrival (diagnostic mode: bounds memory) */ slim?: boolean; /** a query string that replaces the configured open/closed one (targeted fetches); `closed` is then only used to judge whether the venue honoured a filter */ query?: string; /** stop as soon as this returns true for the markets fetched so far (a per-sport quota) */ enough?: (markets: RawMarket[]) => boolean }): Promise<Fetched> {
   const endpoint = `${cfg.base}${cfg.marketsPath}`; const notes: FetchNotes = { endpoint, pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "", errors: [] };
   const out: RawMarket[] = []; const seen = new Set<string>(); let offset = 0; let cursor: string | null = null;
-  const maxPages = o.maxPages ?? (o.max === Infinity ? 5000 : 40);
+  // a finite cap pages as far as it needs (never fewer than the old 40); only an explicit maxPages or an infinite cap differ
+  const maxPages = o.maxPages ?? (o.max === Infinity ? 5000 : Math.max(40, Math.ceil(o.max / cfg.pageSize) + 2));
   for (let page = 0; page < maxPages && out.length < o.max; page++) {
     let url = `${endpoint}?${o.query ?? (o.closed ? cfg.closedQuery : cfg.openQuery)}&${cfg.limitParam}=${cfg.pageSize}`;
     if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`; else if (cfg.pageParam && page > 0) url += `&${cfg.pageParam}=${offset}`;
     const r = await http.getJson(url); notes.pages++;
     if (!r.ok) { notes.errors.push(`${r.kind}${r.status ? ` ${r.status}` : ""}: ${r.message}`); notes.stoppedBecause = `error (${r.kind})`; break; }
     const { records } = extractRecords(r.json); const c = cursorOf(r.json); if (c) notes.cursorKey = c.key;
-    let fresh = 0; for (const m of records) { const id = usIdOf(m); if (id && seen.has(id)) continue; if (id) seen.add(id); out.push(m); fresh++; if (out.length >= o.max) break; }
+    let fresh = 0; for (const m of records) { const id = usIdOf(m); if (id && seen.has(id)) continue; if (id) seen.add(id); out.push(o.slim ? (slimRaw(m) as RawMarket) : m); fresh++; if (out.length >= o.max) break; }
     if (page === 0 && records.length && o.query === undefined) notes.filterHonoured = records.every((m) => usIsResolved(m) === o.closed);
     if (o.enough?.(out)) { notes.stoppedBecause = "quota reached"; break; }
     if (!records.length) { notes.stoppedBecause = "empty page"; break; }

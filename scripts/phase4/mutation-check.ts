@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 interface Edit { file: string; find: string; replace: string }
 interface Mutation { id: string; what: string; edits: Edit[]; tests: string[] }
 const L = "src/lib/phase4/";
-const T = { ev: "tests/phase4-events.test.ts", dg: "tests/phase4-diagnose.test.ts", ts: "tests/phase4-timestamps.test.ts", ph: "tests/phase4-placeholders.test.ts", map: "tests/phase4-mapping.test.ts", fun: "tests/phase4-funnel.test.ts", st: "tests/phase4-stats.test.ts", sc: "tests/phase4-scripts.test.ts", http: "tests/phase4-http.test.ts", cat: "tests/phase4-categorize.test.ts" };
+const T = { ev: "tests/phase4-events.test.ts", dg: "tests/phase4-diagnose.test.ts", ts: "tests/phase4-timestamps.test.ts", ph: "tests/phase4-placeholders.test.ts", map: "tests/phase4-mapping.test.ts", fun: "tests/phase4-funnel.test.ts", st: "tests/phase4-stats.test.ts", sc: "tests/phase4-scripts.test.ts", http: "tests/phase4-http.test.ts", cat: "tests/phase4-categorize.test.ts", mem: "tests/phase4-memory.test.ts" };
 const m = (id: string, what: string, file: string, find: string, replace: string, tests: string[]): Mutation => ({ id, what, edits: [{ file: L + file, find, replace }], tests });
 
 export const MUTATIONS: Mutation[] = [
@@ -103,7 +103,10 @@ export const MUTATIONS: Mutation[] = [
   m("D8", "the date-level row counts the UTC date, not the Eastern date", "funnel.ts", "const today = easternParts(r.evalMs).date;", "const today = new Date(r.evalMs).toISOString().slice(0, 10);", [T.fun]),
   m("D9", "the date-level row accepts only today, not tomorrow", "funnel.ts", "r.impliedDateEt === today || r.impliedDateEt === nextDay(today)", "r.impliedDateEt === today", [T.fun]),
   m("D10", "the feasibility table takes its flow from the date-level row", "probe.ts", "const fin = funnel.variants.EXACT.perDay.minLead;", "const fin = funnel.dateLevel.variants.EXACT.perDay;", [T.sc]),
-  m("D11", "diagnostic mode keeps the 6,000-market cap", "probe.ts", "o.maxUsMarkets ?? (o.diagnose ? Infinity : 6000)", "o.maxUsMarkets ?? 6000", [T.sc]),
+  m("D11", "diagnostic mode keeps the 6,000-market cap", "venues.ts", "o.maxUsMarkets ?? (o.diagnose ? DIAGNOSE_DEFAULT_CAP : NORMAL_CAP)", "o.maxUsMarkets ?? NORMAL_CAP", [T.sc]),
+  m("D17", "diagnostic mode retains the raw, un-slimmed market objects (the out-of-memory defect)", "venues.ts", "slim: !!o.diagnose }", "slim: false }", [T.mem]),
+  m("D19", "a finite cap stops at 40 pages again (4,000 markets), however large the cap", "venues.ts", "Math.max(40, Math.ceil(o.max / cfg.pageSize) + 2)", "40", [T.sc]),
+  m("D18", "slimming keeps long free text and nested market lists", "venues.ts", 'if (typeof v === "string") return v.length > 200 ? v.slice(0, 200) : v;', "if (typeof v === \"string\") return v;", [T.mem]),
   m("D12", "a targeted fetch stops at 100 markets OR 30 events", "venues.ts", "ms.length >= minM && new Set(ms.map(usGroupOf)).size >= minE", "ms.length >= minM || new Set(ms.map(usGroupOf)).size >= minE", [T.sc]),
   m("D13", "the PROBABLE rule no longer needs a date on both sides", "mapping.ts", 'if (d1 === null || d2 === null) return { cand, level: "NONE"', 'if (false) return { cand, level: "NONE"', [T.map, T.sc]),
   m("D14", "--print-files prints by default", "cli.ts", '(opts["print-files"] ?? "")', '(opts["print-files"] ?? "s1b_funnel.json")', [T.sc]),
