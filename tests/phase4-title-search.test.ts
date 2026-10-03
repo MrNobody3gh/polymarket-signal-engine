@@ -78,6 +78,12 @@ describe("the request budget, a refusal and the summary", () => {
   it("score ≥ 68 pairs are searched first, so a budget never spends itself on the rest while a high-score pair waits", async () => {
     const mixed = [...ten].reverse(); const r = await runTitleSearch(mixed, fixed([]), { maxRequests: 6 }); expect(r.rows).toHaveLength(6); expect(r.rows.every((x) => (x.pair.score ?? 0) >= 68)).toBe(true); expect(r.summary.score68.pairs).toBe(6);
   });
+  // Review addition (mutation Q6 survived): the test above passes by luck, because reversing the list also puts the high-score pairs first by name.
+  it("priority is by score, not by name: when the low-score pairs sort first alphabetically the high-score pairs are still searched first", async () => {
+    const opposed = Array.from({ length: 10 }, (_, i) => pair(`Team A${i} vs Team B${i}`, `Team A${i}`, { score: i >= 6 ? 80 : 50 }));
+    const r = await runTitleSearch(opposed, fixed([]), { maxRequests: 4 });
+    expect(r.rows).toHaveLength(4); expect(r.rows.every((x) => (x.pair.score ?? 0) >= 68)).toBe(true); expect(r.summary.score68.pairs).toBe(4);
+  });
   it("within the budget everything is searched and no stop message is set; the default budget is 2,000", async () => { const r = await runTitleSearch(ten, fixed([]), { maxRequests: 10 }); expect(r.summary.stoppedBecause).toBeNull(); expect(r.summary.searched).toBe(10); expect((await import("../src/lib/phase4/title-search")).DEFAULT_SEARCH_BUDGET).toBe(2000); });
   it("a refusal ends the run at once, names the venue and the pair count, and attempts no workaround", async () => {
     let n = 0; const p: SearchProvider = { venue: "polymarket_us", mode: "endpoint", describe: "x", requests: () => n, async search() { n++; return n === 2 ? { candidates: [], error: "BLOCKED 403", blocked: true } : { candidates: [], error: null, blocked: false }; } };

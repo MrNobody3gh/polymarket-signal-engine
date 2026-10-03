@@ -71,6 +71,16 @@ describe("the sports API: sports, leagues, events by sport slug and by league sl
     const b = setup(usServer({ sports: [{ slug: "x" }, { slug: "x" }, { id: "y" }, { name: "no slug" }] }).handler); expect((await discoverUsSports(b.http, US_DEFAULTS)).sports.map((x) => x.slug)).toEqual(["x", "y"]);
     const c = setup(usServer({}).handler); const none = await discoverUsSports(c.http, US_DEFAULTS); expect(none.sports).toEqual([]); expect(none.errors).toEqual(["sports: NOT_FOUND 404", "leagues: NOT_FOUND 404"]);
   });
+  // Review addition (mutation U6 survived): the quota is markets AND events (D76); many markets from few events is the clustering problem the quota exists to expose.
+  it("many markets from few events does NOT reach the quota, nor do many events with too few markets", async () => {
+    const fewEvents = Array.from({ length: 4 }, (_, i) => usEvent(`mm${i}`, i, { ended: false, markets: 40 }));          // 160 markets, 4 events
+    const fewMarkets = Array.from({ length: 30 }, (_, i) => usEvent(`ff${i}`, i, { ended: false, markets: 3 }));          // 90 markets, 30 events
+    const both = Array.from({ length: 35 }, (_, i) => usEvent(`bb${i}`, i, { ended: false, markets: 3 }));                // 105 markets, 35 events
+    const run = async (sport: string, open: unknown[]) => { const srv = usServer({ sports: { sports: [{ slug: sport, name: sport }] }, leagues: { leagues: [] }, sportEvents: { [sport]: { open, ended: [] } } } as never); const { http } = setup(srv.handler); const r = await fetchUsSportsTargeted(http, US_DEFAULTS); return r.results.find((x) => x.sport === sport)!; };
+    const a = await run("nba", fewEvents); expect(a.markets.length).toBe(160); expect(a.events).toBe(4); expect(a.reachedQuota).toBe(false);
+    const b = await run("nfl", fewMarkets); expect(b.markets.length).toBe(90); expect(b.events).toBe(30); expect(b.reachedQuota).toBe(false);
+    const c = await run("mlb", both); expect(c.markets.length).toBe(105); expect(c.events).toBe(35); expect(c.reachedQuota).toBe(true);
+  });
   it("per sport it fetches the OPEN and the ENDED events by sport slug until ≥ 100 markets from ≥ 30 events, labels them, and a sport that cannot reach the quota says so", async () => {
     const srv = usServer({ sports: SPORTS, leagues: LEAGUES, sportEvents: { nba: { open: events("no", 50, false), ended: events("ne", 50, true) }, nfl: { open: events("fo", 5, false), ended: [] }, mlb: { open: [], ended: [] } } }); const { http } = setup(srv.handler);
     const r = await fetchUsSportsTargeted(http, US_DEFAULTS); const by = Object.fromEntries(r.results.map((x) => [x.sport, x]));
@@ -157,6 +167,25 @@ describe("gameStartTime on single-game markets versus FUTURES markets (Part D2)"
     const sg = sp.find((f) => f.class === "single_game")!, fu = sp.find((f) => f.class === "futures")!; expect(sg.events).toBe(40); expect(fu.events).toBe(40); expect(sg.resolutionMinusStartHours!.p50!).toBeGreaterThan(2); expect(sg.resolutionMinusStartHours!.p50!).toBeLessThan(3.5); expect(sg.resolutionMinusStartHours!.within24hShare).toBe(1);
     expect(fu.withinHourOfCreationShare).toBe(1); expect(fu.startMinusCreationHours!.p50).toBeCloseTo(0.08, 1); expect(fu.resolutionMinusStartHours!.p50!).toBeGreaterThan(24 * 100); expect(sg.withinHourOfCreationShare).toBe(0);
     expect(futuresVerdicts(d.futures)).toEqual([expect.objectContaining({ sport: "sports:basketball", verdict: "SINGLE_GAME_ONLY" })]);
+  });
+  // Review addition (found by the mutation checker: G6 survived). The verdict is a statement about the SINGLE-GAME class: it must not be given when the single-game
+  // times themselves do not look like a start, even if the futures class looks like a listing time.
+  const frow = (cls: "single_game" | "futures", o: { p50Gap: number | null; withinHour?: number | null; withField?: number }) => ({
+    sport: "sports:basketball", class: cls, events: 40, withField: o.withField ?? 40, distinctClocks: 12, topClock: "01:00:00", topClockShare: 0.2,
+    startMinusCreationHours: { p10: 20, p50: 100, p90: 150 }, withinHourOfCreationShare: o.withinHour ?? 0,
+    resolutionMinusStartHours: o.p50Gap === null ? null : { n: 30, p10: 1, p50: o.p50Gap, p90: o.p50Gap * 2, within24hShare: o.p50Gap <= 24 ? 1 : 0 },
+  }) as never;
+  it("SINGLE_GAME_ONLY is never given when the single-game times do not look like a start (the futures class alone looking like a listing time is not enough)", () => {
+    const bad = futuresVerdicts([frow("single_game", { p50Gap: 100 }), frow("futures", { p50Gap: 5000, withinHour: 1 })]);   // game gap far above 24 h; futures clearly a listing time
+    expect(bad[0].verdict).toBe("NO_DIFFERENCE_OBSERVED");
+    const noRes = futuresVerdicts([frow("single_game", { p50Gap: null }), frow("futures", { p50Gap: 5000, withinHour: 1 })]);    // no resolution evidence for the single-game class
+    expect(noRes[0].verdict).toBe("NO_DIFFERENCE_OBSERVED");
+    const nonPositive = futuresVerdicts([frow("single_game", { p50Gap: -2 }), frow("futures", { p50Gap: 5000, withinHour: 1 })]); // resolved before the claimed start
+    expect(nonPositive[0].verdict).toBe("NO_DIFFERENCE_OBSERVED");
+    const good = futuresVerdicts([frow("single_game", { p50Gap: 3 }), frow("futures", { p50Gap: 5000, withinHour: 1 })]);
+    expect(good[0].verdict).toBe("SINGLE_GAME_ONLY");
+    const futuresFine = futuresVerdicts([frow("single_game", { p50Gap: 3 }), frow("futures", { p50Gap: 5, withinHour: 0.1 })]);  // single game fine, futures fine too
+    expect(futuresFine[0].verdict).toBe("NO_DIFFERENCE_OBSERVED");
   });
   it("INSUFFICIENT_DATA below 30 events in a class, and NO_DIFFERENCE_OBSERVED when futures behave like games", () => {
     const few = toMarkets([...marketsOfEvents(varied("g", 40, { markets: 1, resolved: (i) => i % 2 === 1 })), ...marketsOfEvents(varied("f", 10, { markets: 1, resolved: (i) => i % 2 === 1 })).map((m) => ({ ...m, sportsMarketType: "futures" }))]); const v1 = futuresVerdicts(gameStartDeepDive("v", few, buildInventory(few)).futures); expect(v1[0].verdict).toBe("INSUFFICIENT_DATA"); expect(v1[0].rule).toContain("futures 10");
