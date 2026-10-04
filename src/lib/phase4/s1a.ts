@@ -126,9 +126,9 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
   const only = opt.only ?? null; const want = (v: VenueId) => !only || only === v; const stage = (v: VenueId, name: string) => { opt.scope?.enter(v, name); opt.guard?.setStage(name, v); log(`${v}: ${name}`); };
   // 1 — international venue
   if (want(INTERNATIONAL)) {
-    stage(INTERNATIONAL, "markets"); log("intl: open markets"); const o = await fetchGamma(opt.http, { closed: false, max: so * ff });
-    log("intl: resolved markets"); let r = await fetchGamma(opt.http, { closed: true, max: sr * ff, order: { order: "closedTime", ascending: false } });
-    if (!r.markets.length || r.notes.filterHonoured === false) { const r2 = await fetchGamma(opt.http, { closed: true, max: sr * ff }); r2.notes.errors.unshift(`ordered query: ${r.notes.errors[0] ?? (r.notes.filterHonoured === false ? "closed filter not honoured" : "no records")}`); if (r2.markets.length) r = r2; }
+    stage(INTERNATIONAL, "markets"); log("intl: open markets"); const o = await fetchGamma(opt.http, { closed: false, max: so * ff, slim: true });
+    log("intl: resolved markets"); let r = await fetchGamma(opt.http, { closed: true, max: sr * ff, order: { order: "closedTime", ascending: false }, slim: true });
+    if (!r.markets.length || r.notes.filterHonoured === false) { const r2 = await fetchGamma(opt.http, { closed: true, max: sr * ff, slim: true }); r2.notes.errors.unshift(`ordered query: ${r.notes.errors[0] ?? (r.notes.filterHonoured === false ? "closed filter not honoured" : "no records")}`); if (r2.markets.length) r = r2; }
     const resolvedOnly = r.markets.filter((m) => gammaIsResolved(m));
     const { audit, markets } = auditVenue(INTERNATIONAL, o.markets.filter((m) => !gammaIsResolved(m)), resolvedOnly, { open: o.notes, resolved: r.notes }, { idOf: gammaIdOf, isResolved: gammaIsResolved, titleOf: gammaTitleOf, groupOf: gammaGroupOf }, opt.ours, { sampleOpen: so, sampleResolved: sr });
     venues.push(audit); mkts[INTERNATIONAL] = markets; raws[INTERNATIONAL] = { open: o.markets, resolved: resolvedOnly };
@@ -136,8 +136,8 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
   // 2 — US venue
   let sportsApi: S1aResult["sportsApi"] = null; let inPlay: InPlayReport | null = null; const schedule: NonNullable<S1aResult["schedule"]> = { us: [], kalshi: [], notes: [] };
   if (opt.us && want(US_EXCHANGE)) {
-    stage(US_EXCHANGE, "listing"); log("us: open markets"); const o = await fetchUs(opt.http, opt.us, { closed: false, max: so * ff });
-    log("us: resolved markets"); const r = await fetchUs(opt.http, opt.us, { closed: true, max: sr * ff });
+    stage(US_EXCHANGE, "listing"); log("us: open markets"); const o = await fetchUs(opt.http, opt.us, { closed: false, max: so * ff, slim: true });
+    log("us: resolved markets"); const r = await fetchUs(opt.http, opt.us, { closed: true, max: sr * ff, slim: true });
     const targeted: TargetedResult[] = [];
     if (opt.usSports) {
       log("us: sports API"); const sp = await fetchUsSportsTargeted(opt.http, opt.us, { maxRequests: opt.usSportsMaxRequests ?? 400 }); targeted.push(...sp.results);

@@ -80,7 +80,7 @@ const cursorOf = (json: unknown): { key: string; value: string } | null => {
 };
 
 /** Page the international Gamma `/markets/keyset` for open or closed markets. Stops at `max` markets, `maxPages` pages, a missing cursor, or an error. */
-export async function fetchGamma(http: PoliteHttp, o: { closed: boolean; max: number; maxPages?: number; pageSize?: number; order?: { order: string; ascending: boolean } | null }): Promise<Fetched> {
+export async function fetchGamma(http: PoliteHttp, o: { closed: boolean; max: number; maxPages?: number; pageSize?: number; order?: { order: string; ascending: boolean } | null; /** slim each market on arrival (bounds memory) */ slim?: boolean }): Promise<Fetched> {
   const notes: FetchNotes = { endpoint: `${GAMMA_API}/markets/keyset`, pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "", errors: [] };
   const out: RawMarket[] = []; const seen = new Set<string>(); let cursor: string | null = null; const size = o.pageSize ?? 100;
   for (let page = 0; page < (o.maxPages ?? 40) && out.length < o.max; page++) {
@@ -88,7 +88,7 @@ export async function fetchGamma(http: PoliteHttp, o: { closed: boolean; max: nu
     const r = await http.getJson(`${GAMMA_API}/markets/keyset?${qs}`); notes.pages++;
     if (!r.ok) { notes.errors.push(`${r.kind}${r.status ? ` ${r.status}` : ""}: ${r.message}`); notes.stoppedBecause = `error (${r.kind})`; break; }
     const { records } = extractRecords(r.json); const c = cursorOf(r.json); if (c) notes.cursorKey = c.key;
-    let fresh = 0; for (const m of records) { const id = String(m.conditionId ?? m.id ?? ""); if (id && seen.has(id)) continue; if (id) seen.add(id); out.push(m); fresh++; if (out.length >= o.max) break; }
+    let fresh = 0; for (const m of records) { const id = String(m.conditionId ?? m.id ?? ""); if (id && seen.has(id)) continue; if (id) seen.add(id); out.push(o.slim ? (slimRaw(m) as RawMarket) : m); fresh++; if (out.length >= o.max) break; }
     if (page === 0 && records.length) notes.filterHonoured = records.every((m) => m.closed === o.closed);
     if (!records.length) { notes.stoppedBecause = "empty page"; break; }
     if (!c) { notes.stoppedBecause = "no cursor in the response"; break; }
@@ -217,6 +217,6 @@ export interface TargetedResult { sport: string; query: string; markets: RawMark
 /** Page one targeted query until ≥ minMarkets markets from ≥ minEvents distinct events, or the listing ends. */
 export async function fetchUsTargeted(http: PoliteHttp, cfg: UsConfig, q: TargetedQuery, o: { minMarkets?: number; minEvents?: number; maxPages?: number } = {}): Promise<TargetedResult> {
   const minM = o.minMarkets ?? 100, minE = o.minEvents ?? 30; const enough = (ms: RawMarket[]) => ms.length >= minM && new Set(ms.map(usGroupOf)).size >= minE;
-  const r = await fetchUs(http, cfg, { closed: false, max: Infinity, maxPages: o.maxPages ?? 40, query: q.query, enough });
+  const r = await fetchUs(http, cfg, { closed: false, max: Infinity, maxPages: o.maxPages ?? 40, query: q.query, enough, slim: true });
   return { sport: q.sport, query: q.query, markets: r.markets, notes: r.notes, reachedQuota: enough(r.markets), events: new Set(r.markets.map(usGroupOf)).size };
 }

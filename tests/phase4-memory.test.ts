@@ -83,3 +83,33 @@ describe("the audit itself flattens only what it samples", () => {
     expect(r.markets.length).toBe(120); expect(enumerated).toBeLessThanOrEqual(120);
   });
 });
+
+// Found on the first one-venue-per-process production run (4.0d): the US audit died out of memory at ~465 MB after fetching only ~5,000 markets, because the audit's
+// own fetches kept each market whole (nested event copies and long rule text); only the coverage diagnostic slimmed on arrival. Every audit fetch now slims.
+import { runTimestampAuditCli, EXIT } from "@/lib/phase4/cli";
+import { fakeFetch, json, virtualClock } from "./helpers/phase4Db";
+
+describe("every audit fetch slims on arrival (US and international)", () => {
+  const NOW = Date.parse("2026-10-03T00:00:00Z"); const BIG = "x".repeat(60_000);
+  const mkt = (i: number, extra: Record<string, unknown>) => ({ id: "m" + i, conditionId: "0xc" + i, slug: "nba-game-" + i, question: "Lakers vs Celtics " + i, outcomes: '["Lakers","Celtics"]', closed: false, status: "open", endDate: "2026-10-05T04:00:00Z", gameStartTime: "2026-10-05T20:00:00Z", description: BIG, rules: BIG,
+    events: [{ id: "e" + i, title: "Lakers vs Celtics", startTime: "2026-10-05T20:00:00Z", description: BIG, markets: [{ id: "n" + i, endDate: "2026-10-05T04:00:00Z", closeTime: "2026-10-05T05:00:00Z" }] }], ...extra });
+  const handler = (u: URL): Response => {
+    const closed = u.searchParams.get("closed") === "true"; const off = Number(u.searchParams.get("offset") ?? u.searchParams.get("after_cursor") ?? 0);
+    const all = closed ? [] : Array.from({ length: 150 }, (_, i) => mkt(i, {}));
+    if (u.host === "gamma-api.polymarket.com") return json({ markets: all.slice(off, off + 100), next_cursor: off + 100 < all.length ? String(off + 100) : null });
+    if (u.pathname === "/v1/markets") return json({ markets: all.slice(off, off + 100) });
+    return new Response("no", { status: 404 });
+  };
+  const run = async (venue: string) => {
+    const c = virtualClock(NOW); const f = fakeFetch(handler, c.now); const out: Record<string, string> = {}; const lines: string[] = [];
+    const code = await runTimestampAuditCli(["--venue", venue, "--no-fixtures", "--sample-open", "60", "--sample-resolved", "30"], {}, { fetch: f.fetch, now: c.now, sleep: c.sleep, writeFile: (p: string, t: string) => { out[p] = t; }, mkdir: () => {}, readFile: (p: string) => out[p] ?? null, log: (l: string) => lines.push(l) } as never);
+    return { code, text: out[`docs/phase4/data/v_${venue}_audit.json`] ?? "" };
+  };
+  for (const venue of ["polymarket_us", "polymarket_intl"]) {
+    it(`${venue}: nested market lists and long free text never reach the audit, while the event times still do`, async () => {
+      const r = await run(venue); expect(r.code).toBe(EXIT.OK); expect(r.text.length).toBeGreaterThan(0);
+      expect(r.text).not.toContain("events[].markets[]");        // the nested copy of the event's markets is dropped on arrival
+      expect(r.text).toContain("events[].startTime");            // the event's own time field is still audited
+    });
+  }
+});
