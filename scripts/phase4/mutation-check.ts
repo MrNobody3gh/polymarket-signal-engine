@@ -105,6 +105,8 @@ export const MUTATIONS: Mutation[] = [
   m("D10", "the feasibility table takes its flow from the date-level row", "probe.ts", "const fin = funnel.variants.EXACT.perDay.minLead;", "const fin = funnel.dateLevel.variants.EXACT.perDay;", [T.sc]),
   m("D11", "diagnostic mode keeps the 6,000-market cap", "venues.ts", "o.maxUsMarkets ?? (o.diagnose ? DIAGNOSE_DEFAULT_CAP : NORMAL_CAP)", "o.maxUsMarkets ?? NORMAL_CAP", [T.sc]),
   m("D17", "diagnostic mode retains the raw, un-slimmed market objects (the out-of-memory defect)", "venues.ts", "slim: !!o.diagnose }", "slim: false }", [T.mem]),
+  m("D20", "the audit flattens every listing market before sampling (the Kalshi out-of-memory defect)", "s1a.ts", "mk(sampleRaws(open, light, per(o.sampleOpen), o.sampleOpen), false)", "mk(open, false)", [T.mem]),
+  m("D21", "sampleRaws flattens what it does not pick", "audit.ts", "return stratifiedSample(light, perStratum, total).map((x) => raws[x.i]);", "toAuditMarkets(\"v\", raws, { idOf: o.idOf, isResolved: () => false, titleOf: o.titleOf, slugOf: o.slugOf }); return stratifiedSample(light, perStratum, total).map((x) => raws[x.i]);", [T.mem]),
   m("D19", "a finite cap stops at 40 pages again (4,000 markets), however large the cap", "venues.ts", "Math.max(40, Math.ceil(o.max / cfg.pageSize) + 2)", "40", [T.sc]),
   m("D18", "slimming keeps long free text and nested market lists", "venues.ts", 'if (typeof v === "string") return v.length > 200 ? v.slice(0, 200) : v;', "if (typeof v === \"string\") return v;", [T.mem]),
   m("D12", "a targeted fetch stops at 100 markets OR 30 events", "venues.ts", "ms.length >= minM && new Set(ms.map(usGroupOf)).size >= minE", "ms.length >= minM || new Set(ms.map(usGroupOf)).size >= minE", [T.sc]),

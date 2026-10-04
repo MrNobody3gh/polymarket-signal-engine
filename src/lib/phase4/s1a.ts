@@ -4,7 +4,7 @@
  * world is injected (http, clock, file writer, our resolution times), so tests drive it with fixtures and a fake fetch.
  * A venue that cannot be reached is reported with the exact failure and the audit continues with the other.
  */
-import { buildInventory, candidateEvidence, compareVenues, instantOf, recommendSlots, stratifiedSample, toAuditMarkets, type AuditMarket, type CandidateEvidence, type FieldInventory, type RawMarket, type SlotVerdict, type VenueDiffSummary } from "./audit";
+import { buildInventory, candidateEvidence, compareVenues, instantOf, recommendSlots, sampleRaws, stratifiedSample, toAuditMarkets, type AuditMarket, type CandidateEvidence, type FieldInventory, type RawMarket, type SlotVerdict, type VenueDiffSummary } from "./audit";
 import type { PoliteHttp } from "./http";
 import { matchSignalToVenue, type VenueMarketRef } from "./mapping";
 import { KALSHI, KALSHI_DEFAULT_CAP, KALSHI_DOCS, fetchKalshiListing, fetchKalshiMilestones, kalshiAll, kalshiCounts, kalshiGroupOf, kalshiIdOf, kalshiIsResolved, kalshiScheduleRows, kalshiSlug, kalshiTags, kalshiTitleOf, type KalshiConfig, type KalshiCounts, type KalshiListing } from "./venue-kalshi";
@@ -75,11 +75,13 @@ import { futuresVerdicts, gameStartDeepDive, matchEventsAcrossVenues, type Event
 const iso = (ms: number) => new Date(ms).toISOString();
 const SIZE_CAP = 380_000; // bytes per fixture file
 
-function auditVenue(venue: string, open: RawMarket[], resolved: RawMarket[], notes: VenueAudit["fetch"], acc: { idOf: (m: RawMarket) => string; isResolved: (m: RawMarket) => boolean; titleOf: (m: RawMarket) => string | null; groupOf: (m: RawMarket) => string; slugOf?: (m: RawMarket) => string | null; tagsOf?: (m: RawMarket) => string[] }, ours: S1aOptions["ours"], o: { sampleOpen: number; sampleResolved: number; extraOpen?: RawMarket[]; extraResolved?: RawMarket[]; targeted?: VenueAudit["targeted"]; listing?: KalshiCounts | null }): { audit: VenueAudit; markets: AuditMarket[] } {
+export function auditVenue(venue: string, open: RawMarket[], resolved: RawMarket[], notes: VenueAudit["fetch"], acc: { idOf: (m: RawMarket) => string; isResolved: (m: RawMarket) => boolean; titleOf: (m: RawMarket) => string | null; groupOf: (m: RawMarket) => string; slugOf?: (m: RawMarket) => string | null; tagsOf?: (m: RawMarket) => string[] }, ours: S1aOptions["ours"], o: { sampleOpen: number; sampleResolved: number; extraOpen?: RawMarket[]; extraResolved?: RawMarket[]; targeted?: VenueAudit["targeted"]; listing?: KalshiCounts | null }): { audit: VenueAudit; markets: AuditMarket[] } {
   const mk = (raws: RawMarket[], forceResolved: boolean | null, ourMs?: (m: RawMarket) => number | null) => toAuditMarkets(venue, raws, { idOf: acc.idOf, isResolved: (m) => (forceResolved === null ? acc.isResolved(m) : forceResolved), titleOf: acc.titleOf, slugOf: acc.slugOf ?? ((m) => (typeof m.slug === "string" ? m.slug : null)), tagsOf: acc.tagsOf ?? tagsOf, groupOf: acc.groupOf, ourResolutionMs: ourMs });
   const per = (n: number) => Math.ceil(n / 6);
-  const openM = stratifiedSample(mk(open, false), per(o.sampleOpen), o.sampleOpen);
-  const resM = stratifiedSample(mk(resolved, true), per(o.sampleResolved), o.sampleResolved);
+  // pick on cheap fields first, flatten only what is picked (a 40,000-market listing was flattened whole before sampling and exhausted the heap)
+  const light = { idOf: acc.idOf, titleOf: acc.titleOf, slugOf: acc.slugOf ?? ((m: RawMarket) => (typeof m.slug === "string" ? m.slug : null)), tagsOf: acc.tagsOf ?? tagsOf, groupOf: acc.groupOf };
+  const openM = stratifiedSample(mk(sampleRaws(open, light, per(o.sampleOpen), o.sampleOpen), false), per(o.sampleOpen), o.sampleOpen);
+  const resM = stratifiedSample(mk(sampleRaws(resolved, light, per(o.sampleResolved), o.sampleResolved), true), per(o.sampleResolved), o.sampleResolved);
   const oursMap = new Map((ours ?? []).map((x) => [gammaIdOf(x.raw), x.resolvedMs]));
   const oursM = venue === INTERNATIONAL && ours?.length ? mk(ours.map((x) => x.raw), true, (m) => oursMap.get(gammaIdOf(m)) ?? null) : [];
   // targeted per-sport markets are added whole (they exist to reach the per-sport quota); markets already sampled are not repeated

@@ -319,6 +319,15 @@ export function toAuditMarkets(venue: string, raws: RawMarket[], o: { idOf: (m: 
  * When items carry a `group` (their event), each stratum offers the FIRST market of every distinct event before any second market
  * of an event, so a quota is spent on as many different events as the listing contains (event-level rules need distinct events).
  */
+/**
+ * The raws a stratified sample would choose, picked WITHOUT flattening any of them: only the stratum and the event group are computed for each raw, then the
+ * same `stratifiedSample` runs on those light records. (Found on the first Kalshi production run: flattening all 40,000 listing markets before sampling
+ * 1,200 exhausted a ~500 MB heap. Selection is identical to `stratifiedSample(toAuditMarkets(raws))`.)
+ */
+export function sampleRaws(raws: RawMarket[], o: { idOf: (m: RawMarket) => string; titleOf: (m: RawMarket) => string | null; slugOf: (m: RawMarket) => string | null; tagsOf?: (m: RawMarket) => string[]; groupOf?: (m: RawMarket) => string }, perStratum: number, total: number): RawMarket[] {
+  const light = raws.map((raw, i) => { const title = o.titleOf(raw), slug = o.slugOf(raw); return { i, stratum: stratum(categorize({ title, slug, tags: o.tagsOf?.(raw) })), group: o.groupOf?.(raw) ?? (slug ?? title ?? o.idOf(raw)) }; });
+  return stratifiedSample(light, perStratum, total).map((x) => raws[x.i]);
+}
 export function stratifiedSample<T extends { stratum: string; group?: string }>(items: T[], perStratum: number, total: number): T[] {
   const groups = new Map<string, T[]>(); for (const it of items) { const g = groups.get(it.stratum); if (g) g.push(it); else groups.set(it.stratum, [it]); }
   for (const [k, g] of groups) { if (g.every((x) => x.group === undefined)) continue; const seen = new Set<string>(); const firsts: T[] = [], rest: T[] = []; for (const x of g) { if (!seen.has(x.group ?? "")) { seen.add(x.group ?? ""); firsts.push(x); } else rest.push(x); } groups.set(k, [...firsts, ...rest]); }

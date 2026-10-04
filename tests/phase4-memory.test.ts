@@ -50,3 +50,36 @@ describe("slimRaw", () => {
     expect(() => slimRaw(deep)).not.toThrow();
   });
 });
+
+// Found on the first Kalshi production run (4.0c): the audit flattened all 40,000 listing markets and only then sampled 1,200, exhausting a ~500 MB heap.
+import { sampleRaws, stratifiedSample, toAuditMarkets, type RawMarket } from "@/lib/phase4/audit";
+import { auditVenue } from "@/lib/phase4/s1a";
+
+describe("sampling before flattening (the Kalshi out-of-memory defect)", () => {
+  const acc = { idOf: (m: RawMarket) => String(m.id), titleOf: (m: RawMarket) => (typeof m.title === "string" ? m.title : null), slugOf: (m: RawMarket) => (typeof m.slug === "string" ? m.slug : null), tagsOf: () => [] as string[], groupOf: (m: RawMarket) => String(m.event) };
+  const world = (n: number) => Array.from({ length: n }, (_, i) => ({ id: "m" + i, event: "e" + (i % 400), title: ["Lakers vs Celtics", "Will the senate pass the bill", "Bitcoin above 100k", "Team Liquid vs NaVi CS2"][i % 4] + " " + i, slug: ["nba-", "politics-", "crypto-", "cs2-"][i % 4] + i, endDate: "2026-10-05T04:00:00Z" })) as RawMarket[];
+  it("chooses exactly the markets that sampling the fully flattened listing would choose", () => {
+    const raws = world(1000); const o = { ...acc, isResolved: () => false };
+    const heavy = stratifiedSample(toAuditMarkets("v", raws, o), 20, 60).map((m) => m.id);
+    const light = sampleRaws(raws, acc, 20, 60).map((r) => String(r.id));
+    expect(light).toEqual(heavy); expect(light.length).toBe(60);
+  });
+  it("never enumerates the fields of a market it does not pick (flattening is what exhausted the heap)", () => {
+    let enumerated = 0;
+    const raws = world(1000).map((r) => new Proxy(r, { ownKeys(t) { enumerated++; return Reflect.ownKeys(t); } })) as RawMarket[];
+    const picked = sampleRaws(raws, acc, 20, 60);
+    expect(picked.length).toBe(60); expect(enumerated).toBe(0);
+    toAuditMarkets("v", picked, { ...acc, isResolved: () => false }); expect(enumerated).toBe(60);
+  });
+});
+
+describe("the audit itself flattens only what it samples", () => {
+  const acc = { idOf: (m: RawMarket) => String(m.id), titleOf: (m: RawMarket) => (typeof m.title === "string" ? m.title : null), groupOf: (m: RawMarket) => String(m.event), isResolved: (m: RawMarket) => m.closed === true };
+  it("a 4,000-market listing audited with a 60 + 60 sample enumerates the fields of at most 120 markets, not 4,000", () => {
+    let enumerated = 0;
+    const mk = (i: number, closed: boolean) => new Proxy({ id: (closed ? "r" : "o") + i, event: "e" + (i % 300), closed, title: ["Lakers vs Celtics", "Will the senate pass the bill", "Bitcoin above 100k", "Team Liquid vs NaVi CS2"][i % 4] + " " + i, slug: ["nba-", "politics-", "crypto-", "cs2-"][i % 4] + i, endDate: "2026-10-05T04:00:00Z" } as RawMarket, { ownKeys(t) { enumerated++; return Reflect.ownKeys(t); } });
+    const open = Array.from({ length: 2000 }, (_, i) => mk(i, false)), resolved = Array.from({ length: 2000 }, (_, i) => mk(i, true));
+    const r = auditVenue("test", open, resolved, { open: null, resolved: null } as never, acc, undefined, { sampleOpen: 60, sampleResolved: 60 });
+    expect(r.markets.length).toBe(120); expect(enumerated).toBeLessThanOrEqual(120);
+  });
+});
