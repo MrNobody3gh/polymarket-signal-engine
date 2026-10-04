@@ -7,7 +7,7 @@
 import { buildInventory, candidateEvidence, compareVenues, instantOf, recommendSlots, sampleRaws, stratifiedSample, toAuditMarkets, type AuditMarket, type CandidateEvidence, type FieldInventory, type RawMarket, type SlotVerdict, type VenueDiffSummary } from "./audit";
 import type { PoliteHttp } from "./http";
 import { matchSignalToVenue, type VenueMarketRef } from "./mapping";
-import { KALSHI, KALSHI_DEFAULT_CAP, KALSHI_DOCS, fetchKalshiListing, fetchKalshiMilestones, kalshiAll, kalshiCounts, kalshiGroupOf, kalshiIdOf, kalshiIsResolved, kalshiScheduleRows, kalshiSlug, kalshiTags, kalshiTitleOf, type KalshiConfig, type KalshiCounts, type KalshiListing } from "./venue-kalshi";
+import { KALSHI, KALSHI_DEFAULT_CAP, KALSHI_DOCS, fetchKalshiListing, fetchKalshiMilestones, resolveKalshiBase, kalshiAll, kalshiCounts, kalshiGroupOf, kalshiIdOf, kalshiIsResolved, kalshiScheduleRows, kalshiSlug, kalshiTags, kalshiTitleOf, type KalshiConfig, type KalshiCounts, type KalshiListing } from "./venue-kalshi";
 import { eventFlagRows, fetchUsFlagged, fetchUsSportsTargeted, inPlayReliability, scheduleCompare, usScheduleRows, type InPlayReport, type ScheduleSummary } from "./us-sports";
 import { leaf as fieldLabel, writeCompact } from "./compact";
 import { categorize, stratum } from "./categorize";
@@ -34,6 +34,22 @@ export interface S1aOptions {
   usSports?: boolean; usSportsMaxRequests?: number;
   /** Reads a result file of the output directory (relative name) for S1_COMPACT.md; omitted = the compact file is written without the funnel table. */
   readFile?: (relPath: string) => string | null;
+  /**
+   * 4.0d: audit ONLY this venue. The other venues' stages are never entered, the cross-venue comparisons are skipped (they need two listings in memory), and the
+   * result is the compact evidence file `v_<venue>_audit.json` (the combined `s1a_summary.json`, `S1a_RESULTS.md` and `S1_COMPACT.md` are left to `phase4:merge`).
+   */
+  only?: VenueId | null;
+  /** Names the stage the process is in for the heap guard; the guard itself is attached to the PoliteHttp client. */
+  guard?: Guard | null; scope?: VenueScope | null; heap?: () => HeapInfo | null;
+  /** 4.0d, Kalshi only: the category inventory (series / events / category endpoints; no market is loaded) and whether to skip the listing sample (`--kalshi-inventory-only`). */
+  kalshiInventory?: ((base: string) => Promise<KalshiInventory>) | null; kalshiInventoryOnly?: boolean;
+}
+
+/** The compact per-venue evidence file of a `--venue` audit run (`v_<venue>_audit.json`). `audit` is null for a run that stopped before the audit (see `stopped`). */
+export interface VenueAuditFile {
+  schema: number; kind: "audit"; venue: VenueId; startedAt: string; finishedAt: string; heap: HeapInfo | null; stopped: StopInfo | null;
+  audit: VenueAudit | null; sportsApi: S1aResult["sportsApi"]; inPlay: InPlayReport | null; schedule: { us: ScheduleSummary[]; kalshi: ScheduleSummary[]; notes: string[] } | null; kalshiInventory: KalshiInventory | null;
+  http: S1aResult["http"]; endpoints: string[]; docs: string[]; rules: Record<string, number>; notEstablished: string[];
 }
 
 export interface VenueAudit {
@@ -65,9 +81,13 @@ export interface S1aResult {
   sportsApi?: { sports: number; leagues: number; requests: number; stoppedBecause: string | null; errors: string[] } | null;
   inPlay?: InPlayReport | null;
   schedule?: { us: ScheduleSummary[]; kalshi: ScheduleSummary[]; notes: string[] };
+  /** 4.0d: the Kalshi category inventory of a `--kalshi-inventory` run (no market was loaded for it). */
+  kalshiInventory?: KalshiInventory | null;
 }
 
 import { RECOMMEND_RULES } from "./audit";
+import { EVIDENCE_SCHEMA, VENUE_IDS, evidenceFile, type Guard, type HeapInfo, type StopInfo, type VenueId, type VenueScope } from "./venue-run";
+import type { KalshiInventory } from "./kalshi-inventory";
 import { INTL_DOCS, US_DOCS } from "./venues";
 import { dateLevelRows, collapseToEvents, type DateLevelRow } from "./audit";
 import { futuresVerdicts, gameStartDeepDive, matchEventsAcrossVenues, type EventAgreement, type FuturesVerdict, type GameStartDive } from "./events";
@@ -103,9 +123,10 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
   const now = opt.now ?? (() => Date.now()); const log = opt.log ?? (() => {}); const startedAt = iso(now());
   const so = opt.sampleOpen ?? 300, sr = opt.sampleResolved ?? 300; const ff = Math.max(1, opt.fetchFactor ?? 3); const venues: VenueAudit[] = []; const mkts: Record<string, AuditMarket[]> = {}; const raws: Record<string, { open: RawMarket[]; resolved: RawMarket[] }> = {};
 
+  const only = opt.only ?? null; const want = (v: VenueId) => !only || only === v; const stage = (v: VenueId, name: string) => { opt.scope?.enter(v, name); opt.guard?.setStage(name, v); log(`${v}: ${name}`); };
   // 1 — international venue
-  {
-    log("intl: open markets"); const o = await fetchGamma(opt.http, { closed: false, max: so * ff });
+  if (want(INTERNATIONAL)) {
+    stage(INTERNATIONAL, "markets"); log("intl: open markets"); const o = await fetchGamma(opt.http, { closed: false, max: so * ff });
     log("intl: resolved markets"); let r = await fetchGamma(opt.http, { closed: true, max: sr * ff, order: { order: "closedTime", ascending: false } });
     if (!r.markets.length || r.notes.filterHonoured === false) { const r2 = await fetchGamma(opt.http, { closed: true, max: sr * ff }); r2.notes.errors.unshift(`ordered query: ${r.notes.errors[0] ?? (r.notes.filterHonoured === false ? "closed filter not honoured" : "no records")}`); if (r2.markets.length) r = r2; }
     const resolvedOnly = r.markets.filter((m) => gammaIsResolved(m));
@@ -114,8 +135,8 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
   }
   // 2 — US venue
   let sportsApi: S1aResult["sportsApi"] = null; let inPlay: InPlayReport | null = null; const schedule: NonNullable<S1aResult["schedule"]> = { us: [], kalshi: [], notes: [] };
-  if (opt.us) {
-    log("us: open markets"); const o = await fetchUs(opt.http, opt.us, { closed: false, max: so * ff });
+  if (opt.us && want(US_EXCHANGE)) {
+    stage(US_EXCHANGE, "listing"); log("us: open markets"); const o = await fetchUs(opt.http, opt.us, { closed: false, max: so * ff });
     log("us: resolved markets"); const r = await fetchUs(opt.http, opt.us, { closed: true, max: sr * ff });
     const targeted: TargetedResult[] = [];
     if (opt.usSports) {
@@ -137,22 +158,29 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
     }
   }
   // 2b — Kalshi (third venue)
-  let kalshiListing: KalshiListing | null = null;
-  if (opt.kalshi) {
-    log("kalshi: listing"); kalshiListing = await fetchKalshiListing(opt.http, opt.kalshi, opt.kalshiMax ?? KALSHI_DEFAULT_CAP);
-    const L = kalshiListing; const all = kalshiAll(L); const openM = [...(L.open?.markets ?? [])].filter((m) => !kalshiIsResolved(m)); const resM = all.filter(kalshiIsResolved);
-    const { audit, markets } = auditVenue(KALSHI, openM, resM, { open: L.open?.notes ?? null, resolved: L.settled?.notes ?? L.closed?.notes ?? null }, { idOf: kalshiIdOf, isResolved: kalshiIsResolved, titleOf: kalshiTitleOf, groupOf: kalshiGroupOf, slugOf: kalshiSlug, tagsOf: kalshiTags }, undefined, { sampleOpen: so, sampleResolved: sr, listing: all.length ? kalshiCounts(all) : null });
-    if (!L.base) audit.fetch.open = { endpoint: opt.kalshi.bases.join(" | "), pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "no base URL answered", errors: L.tried.map((t) => `${t.base}: ${t.outcome}`) };
-    // only the first `maxFixtureMarkets` raws of each side are ever read again (fixtures); keeping all 40,000 listing markets alive exhausted the heap on the 4.0c production run
-    const fx = Math.max(40, opt.maxFixtureMarkets ?? 40); venues.push(audit); mkts[KALSHI] = markets; raws[KALSHI] = { open: openM.slice(0, fx), resolved: resM.slice(0, fx) };
-    if (L.base) { log("kalshi: milestones"); const ms = await fetchKalshiMilestones(opt.http, L.base, {}); if (ms.notes.errors.length) schedule.notes.push(`kalshi milestones: ${ms.notes.errors[0]}`); schedule.kalshi = scheduleCompare(kalshiScheduleRows(all, ms.milestones)); if (!ms.milestones.length && !ms.notes.errors.length) schedule.notes.push("kalshi milestones: none returned"); }
-    kalshiListing = null; // release the bounded listing (the outer variable kept it alive to the end of the audit)
+  let kalshiInv: KalshiInventory | null = null; let kalshiAudited = false;
+  if (opt.kalshi && want(KALSHI)) {
+    stage(KALSHI, "listing"); log("kalshi: listing");
+    // the category inventory streams events and counts them, so it runs BEFORE the listing is fetched: the 40,000-market listing is never alive while it runs
+    if (opt.kalshiInventory) { const res = await resolveKalshiBase(opt.http, opt.kalshi); if (res.base) { stage(KALSHI, "category inventory"); kalshiInv = await opt.kalshiInventory(res.base); } }
+    if (!opt.kalshiInventoryOnly) {
+      stage(KALSHI, "listing"); let L: KalshiListing | null = await fetchKalshiListing(opt.http, opt.kalshi, opt.kalshiMax ?? KALSHI_DEFAULT_CAP); kalshiAudited = true;
+      opt.guard?.setStage("audit of the listing", KALSHI);
+      const all = kalshiAll(L); const openM = [...(L.open?.markets ?? [])].filter((m) => !kalshiIsResolved(m)); const resM = all.filter(kalshiIsResolved);
+      const { audit, markets } = auditVenue(KALSHI, openM, resM, { open: L.open?.notes ?? null, resolved: L.settled?.notes ?? L.closed?.notes ?? null }, { idOf: kalshiIdOf, isResolved: kalshiIsResolved, titleOf: kalshiTitleOf, groupOf: kalshiGroupOf, slugOf: kalshiSlug, tagsOf: kalshiTags }, undefined, { sampleOpen: so, sampleResolved: sr, listing: all.length ? kalshiCounts(all) : null });
+      if (!L.base) audit.fetch.open = { endpoint: opt.kalshi.bases.join(" | "), pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "no base URL answered", errors: L.tried.map((t) => `${t.base}: ${t.outcome}`) };
+      // only the first `maxFixtureMarkets` raws of each side are ever read again (fixtures); keeping all 40,000 listing markets alive exhausted the heap on the 4.0c production run
+      const fx = Math.max(40, opt.maxFixtureMarkets ?? 40); venues.push(audit); mkts[KALSHI] = markets; raws[KALSHI] = { open: openM.slice(0, fx), resolved: resM.slice(0, fx) };
+      if (L.base) { stage(KALSHI, "milestones"); log("kalshi: milestones"); const ms = await fetchKalshiMilestones(opt.http, L.base, {}); if (ms.notes.errors.length) schedule.notes.push(`kalshi milestones: ${ms.notes.errors[0]}`); schedule.kalshi = scheduleCompare(kalshiScheduleRows(all, ms.milestones)); if (!ms.milestones.length && !ms.notes.errors.length) schedule.notes.push("kalshi milestones: none returned"); }
+      L = null; // release the bounded listing
+    }
   }
 
   // 3 — venue agreement on matched events
   const agreement: S1aResult["venueAgreement"] = { available: false, reason: null, matched: 0, byConfidence: {}, summary: [] };
   const a = venues.find((v) => v.venue === INTERNATIONAL), b = venues.find((v) => v.venue === US_EXCHANGE);
-  if (!a?.reachable || !b?.reachable) agreement.reason = !b ? "the US venue was not audited (not configured or not reachable)" : "a venue returned no markets";
+  if (only) agreement.reason = `single-venue run (--venue ${only}): the cross-venue comparison needs two listings in one process and is not made`;
+  else if (!a?.reachable || !b?.reachable) agreement.reason = !b ? "the US venue was not audited (not configured or not reachable)" : "a venue returned no markets";
   else {
     const cands: (VenueMarketRef & { ms: number | null; field: string | null })[] = mkts[US_EXCHANGE].map((m) => {
       const f = bestField(b.recommendations, m.stratum); const ms = f ? instantOf(m.flat[f]) : null; const rawM = [...raws[US_EXCHANGE].open, ...raws[US_EXCHANGE].resolved].find((x) => usIdOf(x) === m.id);
@@ -173,7 +201,7 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
 
   // 3b — the same event on both venues by participant names and Eastern date (start-time spread: D51 input)
   let eventAgreement: S1aResult["eventAgreement"] = null;
-  if (a?.reachable && b?.reachable) {
+  if (!only && a?.reachable && b?.reachable) {
     const titleOf = (m: AuditMarket) => { const v = m.flat.question ?? m.flat.title ?? m.flat.name; return typeof v === "string" ? v : null; };
     const ea = matchEventsAcrossVenues({ ms: mkts[INTERNATIONAL], inv: a.inventory, titleOf }, { ms: mkts[US_EXCHANGE], inv: b.inventory, titleOf });
     eventAgreement = { ...ea, reason: ea.matched === 0 ? "no event matched by participant names and date" : ea.withBothStarts === 0 ? "events matched, but no matched pair has a start time on both venues (gameStartTime or event startTime)" : null };
@@ -181,22 +209,35 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
 
   // 4 — files: JSON per venue, fixtures, results page
   const finishedAt = iso(now()); const sum = opt.http.summary();
-  const result: S1aResult = { startedAt, finishedAt, venues, eventAgreement, venueAgreement: agreement, http: sum, endpoints: venues.flatMap((v) => [v.fetch.open?.endpoint, v.fetch.resolved?.endpoint]).filter((x, i, arr): x is string => !!x && arr.indexOf(x) === i), docs: [...INTL_DOCS, ...(opt.us ? US_DOCS : []), ...(opt.kalshi ? KALSHI_DOCS : [])], rules: { ...RECOMMEND_RULES }, notEstablished: [], sportsApi, inPlay, schedule };
+  const result: S1aResult = { startedAt, finishedAt, venues, eventAgreement, venueAgreement: agreement, http: sum, endpoints: venues.flatMap((v) => [v.fetch.open?.endpoint, v.fetch.resolved?.endpoint]).filter((x, i, arr): x is string => !!x && arr.indexOf(x) === i), docs: [...INTL_DOCS, ...(opt.us ? US_DOCS : []), ...(opt.kalshi ? KALSHI_DOCS : [])], rules: { ...RECOMMEND_RULES }, notEstablished: [], sportsApi, inPlay, schedule, kalshiInventory: kalshiInv };
   for (const v of venues) result.notEstablished.push(...(v.reachable ? [] : [`${v.venue}: no markets could be fetched (${[v.fetch.open?.errors[0], v.fetch.resolved?.errors[0]].filter(Boolean).join("; ") || "empty response"})`]));
+  if (only) {
+    for (const v of VENUE_IDS) if (v !== only) result.notEstablished.push(`${v}: not run in this process (single-venue run, --venue ${only})`);
+    const f: VenueAuditFile = { schema: EVIDENCE_SCHEMA, kind: "audit", venue: only, startedAt, finishedAt, heap: opt.heap?.() ?? null, stopped: null, audit: venues.find((v) => v.venue === only) ?? null, sportsApi, inPlay, schedule: only === US_EXCHANGE || only === KALSHI ? schedule : null, kalshiInventory: kalshiInv, http: sum, endpoints: result.endpoints, docs: result.docs, rules: result.rules, notEstablished: result.notEstablished.filter((x) => x.startsWith(`${only}:`) || !VENUE_IDS.some((v) => x.startsWith(`${v}:`))) };
+    if (!f.audit && !kalshiInv) f.notEstablished.push(`${only}: no markets could be fetched`);
+    opt.write(evidenceFile(only, "audit"), JSON.stringify(f));
+    if (opt.fixtureDir) writeFixtures(venues, raws, opt, opt.fixtureDir);
+    return result;
+  }
   if (!opt.us) result.notEstablished.push(`${US_EXCHANGE}: not audited in this run`);
   if (!opt.kalshi) result.notEstablished.push(`${KALSHI}: not audited in this run (--kalshi)`);
   for (const v of venues) opt.write(`s1a_${v.venue}.json`, JSON.stringify(v, null, 1));
   const summary = { ...result, venues: venues.map((v) => ({ venue: v.venue, reachable: v.reachable, counts: v.counts, fetch: v.fetch, listing: v.listing, futuresVerdicts: v.futuresVerdicts, recommendations: v.recommendations })) };
   opt.write("s1a_summary.json", JSON.stringify(summary, null, 1));
   if (inPlay) opt.write("s1a_inplay_us.json", JSON.stringify(inPlay, null, 1));
-  if (opt.fixtureDir) for (const v of venues) if (v.reachable) for (const kind of ["open", "resolved"] as const) {
-    let list = raws[v.venue][kind].slice(0, opt.maxFixtureMarkets ?? 40).map((m) => sanitizeSample(m)); let text = JSON.stringify(list, null, 1);
-    while (text.length > SIZE_CAP && list.length > 1) { list = list.slice(0, Math.floor(list.length / 2)); text = JSON.stringify(list, null, 1); }
-    opt.write(`${opt.fixtureDir}/s1a_${v.venue}_${kind}.json`, text);
-  }
+  if (opt.fixtureDir) writeFixtures(venues, raws, opt, opt.fixtureDir);
   opt.write("S1a_RESULTS.md", renderS1aMarkdown(result));
   writeCompact((rel) => opt.readFile?.(rel) ?? null, opt.write, { s1a: summary });
   return result;
+}
+
+/** Sanitised, bounded raw samples of each reachable venue, for the next run's fixtures (tests/fixtures/phase4). */
+function writeFixtures(venues: VenueAudit[], raws: Record<string, { open: RawMarket[]; resolved: RawMarket[] }>, opt: S1aOptions, dir: string): void {
+  for (const v of venues) if (v.reachable) for (const kind of ["open", "resolved"] as const) {
+    let list = raws[v.venue][kind].slice(0, opt.maxFixtureMarkets ?? 40).map((m) => sanitizeSample(m)); let text = JSON.stringify(list, null, 1);
+    while (text.length > SIZE_CAP && list.length > 1) { list = list.slice(0, Math.floor(list.length / 2)); text = JSON.stringify(list, null, 1); }
+    opt.write(`${dir}/s1a_${v.venue}_${kind}.json`, text);
+  }
 }
 
 const pct = (x: number | null | undefined) => (x === null || x === undefined ? "—" : `${(x * 100).toFixed(0)} %`);
@@ -253,7 +294,7 @@ export function renderS1aMarkdown(r: S1aResult): string {
 }
 
 /** ≤ 60 printed lines: what ran, what failed, and the verdict per stratum and slot with its evidence counts and deciding rule. Details are in the files. */
-export function s1aSummaryLines(r: S1aResult, outDir: string): string[] {
+export function s1aSummaryLines(r: S1aResult, outDir: string, only: VenueId | null = null): string[] {
   const L: string[] = [`S1a timestamp audit  ${r.startedAt} → ${r.finishedAt}`, `requests ${r.http.requests} ok ${r.http.ok} failed ${JSON.stringify(r.http.byKind)}`];
   for (const e of r.http.firstErrors.slice(0, 3)) L.push(`  ! ${e}`);
   const rank = (s: SlotVerdict) => (s.verdict === "RECOMMEND" ? 0 : s.verdict === "UNRELIABLE_REJECT" ? 1 : 2);
@@ -281,7 +322,7 @@ export function s1aSummaryLines(r: S1aResult, outDir: string): string[] {
   const ea = r.eventAgreement; L.push(ea ? `same event on both venues: matched ${ea.matched} (ambiguous ${ea.ambiguous}); start times on both ${ea.withBothStarts}${ea.overall ? `; |diff| p50 ${ea.overall.absP50Min} / p95 ${ea.overall.absP95Min} / max ${ea.overall.maxAbsMin} min; within 15 min ${pct(ea.overall.within15MinShare)}` : ""}${ea.reason ? ` (${ea.reason})` : ""}` : "same event on both venues: not available");
   L.push(r.venueAgreement.available ? `venue agreement (recommended fields): ${r.venueAgreement.matched} matched; ${r.venueAgreement.summary.map((s) => `${s.stratum} p95 ${s.absP95Min} min`).slice(0, 3).join("; ")}` : `venue agreement (recommended fields): not available (${r.venueAgreement.reason})`);
   for (const n of r.notEstablished.slice(0, 3)) L.push(`NOT ESTABLISHED: ${n}`);
-  L.push(`files in ${outDir}: s1a_*.json, S1a_RESULTS.md, S1_COMPACT.md`);
+  L.push(only ? `file in ${outDir}: ${evidenceFile(only, "audit")} (single-venue run; combine with npm run phase4:merge)` : `files in ${outDir}: s1a_*.json, S1a_RESULTS.md, S1_COMPACT.md`);
   while (L.length > 60) L.splice(L.length - 2, 1); // an over-long run drops the later detail lines, never the file list
   return L.map((l) => (l.length > 220 ? l.slice(0, 217) + "..." : l)).slice(0, 60);
 }

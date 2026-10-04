@@ -108,6 +108,20 @@ export function daysToSample(i: DaysToSampleInput): number {
   return i.settlementLagDays + i.perArm / (i.eligiblePerDay * share * Math.min(i.acceptRate, 1 - i.acceptRate));
 }
 
+export interface WilsonInterval { n: number; k: number; point: number; lo: number; hi: number }
+/**
+ * Wilson score interval for a proportion k / n (default z = 1.96, a 95 % interval). Unlike the normal approximation it stays inside [0, 1] and is
+ * sensible for k = 0, k = n and small n, which is what a 15-row review stratum is. null for n = 0 (nothing was reviewed: no interval exists).
+ * Known values: 8/10 → [0.4902, 0.9433]; 0/10 → [0, 0.2775]; 10/10 → [0.7225, 1]; 50/100 → [0.4038, 0.5962].
+ */
+export function wilson(k: number, n: number, z = 1.96): WilsonInterval | null {
+  if (!(Number.isInteger(n) && n >= 0 && Number.isInteger(k) && k >= 0 && k <= n)) throw new RangeError(`wilson: need integers 0 ≤ k ≤ n, got k=${k}, n=${n}`);
+  if (!(z > 0)) throw new RangeError("wilson: z must be > 0");
+  if (n === 0) return null;
+  const p = k / n, z2 = z * z, d = 1 + z2 / n; const c = (p + z2 / (2 * n)) / d; const h = (z / d) * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n));
+  return { n, k, point: p, lo: k === 0 ? 0 : Math.max(0, c - h), hi: k === n ? 1 : Math.min(1, c + h) }; // the closed form leaves ±1e-17 at the edges: k = 0 and k = n are exact
+}
+
 /** Cheap, dependency-free CSV writing (RFC 4180 quoting). */
 export function csvEscape(v: unknown): string {
   const s = v === null || v === undefined ? "" : String(v);
@@ -115,4 +129,16 @@ export function csvEscape(v: unknown): string {
 }
 export function toCsv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((r) => r.map(csvEscape).join(",")).join("\n") + "\n";
+}
+
+/** RFC 4180 CSV reading (the inverse of toCsv): quoted fields, doubled quotes, CRLF or LF, a leading byte-order mark ignored, a final empty line ignored. Spreadsheet programs write this form. */
+export function parseCsv(text: string): string[][] {
+  const t = text.replace(/^\uFEFF/, ""); const rows: string[][] = []; let row: string[] = []; let f = ""; let q = false; let i = 0; let any = false;
+  for (; i < t.length; i++) {
+    const c = t[i];
+    if (q) { if (c === '"') { if (t[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; continue; }
+    if (c === '"') { q = true; any = true; } else if (c === ",") { row.push(f); f = ""; any = true; } else if (c === "\n" || c === "\r") { if (c === "\r" && t[i + 1] === "\n") i++; if (any || f !== "") { row.push(f); rows.push(row); } row = []; f = ""; any = false; } else { f += c; any = true; }
+  }
+  if (any || f !== "") { row.push(f); rows.push(row); }
+  return rows;
 }

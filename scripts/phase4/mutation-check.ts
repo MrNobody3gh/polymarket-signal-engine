@@ -9,11 +9,12 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { MUTATIONS_4_0D } from "./mutations-4-0d";
 
 interface Edit { file: string; find: string; replace: string }
 interface Mutation { id: string; what: string; edits: Edit[]; tests: string[] }
 const L = "src/lib/phase4/";
-const T = { ev: "tests/phase4-events.test.ts", dg: "tests/phase4-diagnose.test.ts", ts: "tests/phase4-timestamps.test.ts", ph: "tests/phase4-placeholders.test.ts", map: "tests/phase4-mapping.test.ts", fun: "tests/phase4-funnel.test.ts", st: "tests/phase4-stats.test.ts", sc: "tests/phase4-scripts.test.ts", http: "tests/phase4-http.test.ts", cat: "tests/phase4-categorize.test.ts", mem: "tests/phase4-memory.test.ts", kal: "tests/phase4-kalshi.test.ts", vf: "tests/phase4-venue-funnel.test.ts", tsr: "tests/phase4-title-search.test.ts", us: "tests/phase4-us-sports.test.ts", cp: "tests/phase4-compact.test.ts" };
+const T = { ev: "tests/phase4-events.test.ts", dg: "tests/phase4-diagnose.test.ts", ts: "tests/phase4-timestamps.test.ts", ph: "tests/phase4-placeholders.test.ts", map: "tests/phase4-mapping.test.ts", fun: "tests/phase4-funnel.test.ts", st: "tests/phase4-stats.test.ts", sc: "tests/phase4-scripts.test.ts", http: "tests/phase4-http.test.ts", cat: "tests/phase4-categorize.test.ts", mem: "tests/phase4-memory.test.ts", kal: "tests/phase4-kalshi.test.ts", vf: "tests/phase4-venue-funnel.test.ts", tsr: "tests/phase4-title-search.test.ts", us: "tests/phase4-us-sports.test.ts", cp: "tests/phase4-compact.test.ts", vr: "tests/phase4-venue-run.test.ts", ki: "tests/phase4-kalshi-inventory.test.ts", sr: "tests/phase4-stop-rule.test.ts", rv: "tests/phase4-review.test.ts", rc: "tests/phase4-review-cli.test.ts", mm: "tests/phase4-matrix-merge.test.ts", ws: "tests/phase4-wallet-share.test.ts", wk: "tests/phase4-weak-spots.test.ts" };
 const m = (id: string, what: string, file: string, find: string, replace: string, tests: string[]): Mutation => ({ id, what, edits: [{ file: L + file, find, replace }], tests });
 
 export const MUTATIONS: Mutation[] = [
@@ -148,7 +149,7 @@ export const MUTATIONS: Mutation[] = [
   m("K21", "a Kalshi esports title filed under 'Sports' stays a sport", "categorize.ts", "if (sp && has(ESPORTS, hay)) return", "if (false) return", [T.kal]),
   m("K22", "the slug does not split the Kalshi series into sport and rest", "venue-kalshi.ts", "return p ? `${p}-${bare.slice(p.length)}`.replace(/-$/, \"\") : bare;", "return bare;", [T.kal]),
   m("G1", "slot 1 does not judge neutrally named time fields (Kalshi's strike date is never a candidate)", "audit.ts", '(slot === 1 && f.role === "OTHER_TIME")', "false", [T.cp]),
-  m("G2", "the best passing candidate is not listed first", "audit.ts", "Number(b.best) - Number(a.best) || (RANK[a.verdict] - RANK[b.verdict])", "(RANK[a.verdict] - RANK[b.verdict])", [T.us]),
+  m("G2", "the best passing candidate is not listed first", "audit.ts", "Number(b.best) - Number(a.best) || (RANK[a.verdict] - RANK[b.verdict])", "(RANK[a.verdict] - RANK[b.verdict])", [T.us, T.wk]),
   m("G3", "bestField is the older single-field pick (a rejected field answers 'which field fills the slot')", "audit.ts", "bestField: ok[0]?.f.path ?? null", "bestField: pick.f.path", [T.us]),
   m("G4", "a candidate without ordering evidence is called unreliable instead of insufficient", "audit.ts", '(passed ? "RECOMMEND" : c.insufficient ? "INSUFFICIENT_DATA" : "UNRELIABLE_REJECT") as Verdict', '(passed ? "RECOMMEND" : "UNRELIABLE_REJECT") as Verdict', [T.us]),
   m("G5", "futures markets are not recognised", "events.ts", "/FUTURE/.test(type)", "/NEVER/.test(type)", [T.us]),
@@ -162,7 +163,7 @@ export const MUTATIONS: Mutation[] = [
   m("Q6", "score ≥ 68 pairs are not searched first", "title-search.ts", "Number((b.score ?? -1) >= SCORE_MIN) - Number((a.score ?? -1) >= SCORE_MIN) ||", "", [T.tsr]),
   m("Q7", "a refusal does not stop the search", "title-search.ts", "if (out.blocked) {", "if (false) {", [T.tsr]),
   m("Q8", "near-misses include PROBABLE matches", "title-search.ts", 'r.diag!.confidence !== "PROBABLE" && r.diag!.best!.score >= 0.5).sort(cmp)', "r.diag!.best!.score >= 0.5).sort(cmp)", [T.tsr]),
-  m("Q9", "near-misses reach down to similarity 0.3", "title-search.ts", 'r.diag!.confidence !== "PROBABLE" && r.diag!.best!.score >= 0.5).sort(cmp)', 'r.diag!.confidence !== "PROBABLE" && r.diag!.best!.score >= 0.3).sort(cmp)', [T.tsr]),
+  m("Q9", "near-misses reach down to similarity 0.3", "title-search.ts", 'r.diag!.confidence !== "PROBABLE" && r.diag!.best!.score >= 0.5).sort(cmp)', 'r.diag!.confidence !== "PROBABLE" && r.diag!.best!.score >= 0.3).sort(cmp)', [T.tsr, T.wk]),
   m("Q10", "the CSV carries only the first candidate", "title-search.ts", "for (let i = 0; i < 3; i++) { const c = top[i];", "for (let i = 0; i < 1; i++) { const c = top[i];", [T.tsr]),
   m("Q11", "the listing lookup returns candidates that share only filler words", "title-search.ts", "|| [...content(c.question)].some((w) => mine.has(w)))", "|| true)", [T.tsr]),
   m("Q12", "our pairs include EXIT signals", "title-search.ts", '.in("kind", ENTRY_KINDS)', '.in("kind", [...ENTRY_KINDS, "EXIT"])', [T.tsr]),
@@ -181,20 +182,20 @@ export const MUTATIONS: Mutation[] = [
   m("U9", "live a few minutes before the start counts as early at exactly the tolerance", "us-sports.ts", "r.startMs !== null && minToStart(r) > tol)", "r.startMs !== null && minToStart(r) >= tol)", [T.us]),
   m("U10", "started exactly 5 minutes ago counts as 'started and not live'", "us-sports.ts", "age > tol && age <= win", "age >= tol && age <= win", [T.us]),
   m("U11", "started exactly 180 minutes ago no longer counts", "us-sports.ts", "age > tol && age <= win", "age > tol && age < win", [T.us]),
-  m("U12", "an `ended` event counts as agreeing with the markets when only one of them is resolved", "us-sports.ts", "allMarketsResolved: ended.filter((r) => r.allMarketsResolved === true).length", "allMarketsResolved: ended.filter((r) => r.anyMarketResolved === true).length", [T.us]),
+  m("U12", "an `ended` event counts as agreeing with the markets when only one of them is resolved", "us-sports.ts", "allMarketsResolved: ended.filter((r) => r.allMarketsResolved === true).length", "allMarketsResolved: ended.filter((r) => r.anyMarketResolved === true).length", [T.us, T.wk]),
   m("U13", "the in-play report is marked adopted", "us-sports.ts", "adopted: false, nowIso", "adopted: true as never, nowIso", [T.us]),
   m("U14", "an event exactly at a bucket's lower edge falls in the next bucket", "us-sports.ts", "return t >= b.lo && t < b.hi;", "return t > b.lo && t < b.hi;", [T.us]),
   m("U15", "a placeholder source value is not counted as one", "us-sports.ts", "sourcePlaceholders: rs.filter((r) => placeholderKind(r.source) !== null).length", "sourcePlaceholders: rs.filter((r) => placeholderKind(r.source) === null).length", [T.us]),
   m("U16", "'equal within a minute' means within 15", "us-sports.ts", "agreeWithin1Min: d.filter((x) => x <= 1).length", "agreeWithin1Min: d.filter((x) => x <= 15).length", [T.us]),
   m("U17", "the slower per-origin gap is ignored", "http.ts", "Math.max(this.gap, this.originGaps.get(origin) ?? 0)", "this.gap", [T.tsr, T.us]),
   m("U18", "a per-origin gap may undercut the 500 ms floor", "http.ts", "this.originGaps.set(k, Math.max(500, v))", "this.originGaps.set(k, v)", [T.tsr]),
-  m("U19", "the CLI does not pace the US origin more slowly", "cli.ts", "originGapMs: origin ? { [origin]: US_MIN_INTERVAL_MS } : undefined", "originGapMs: undefined", [T.us]),
-  m("U20", "--us-targeted default does not use the sports API", "cli.ts", 'usSports: opts["us-targeted"] === "default",', "usSports: false,", [T.us]),
+  m("U19", "the CLI does not pace the US origin more slowly", "cli.ts", "originGapMs: origin ? { [origin]: Math.max(US_MIN_INTERVAL_MS, o.usPaceMs ?? 0) } : undefined", "originGapMs: undefined", [T.us]),
+  m("U20", "--us-targeted default does not use the sports API", "cli.ts", 'usSports: targetedSpec === "default",', "usSports: false,", [T.us]),
   m("U21", "the US fallback queries are skipped when the sports API returns nothing", "s1a.ts", "if (!sp.results.some((x) => x.markets.length)) {", "if (false) {", [T.us]),
-  m("U22", "targeted ENDED markets never reach the resolved side of the audit", "s1a.ts", "extraResolved: tMarkets.filter((m) => usIsResolved(m)),", "extraResolved: [],", [T.us]),
+  m("U22", "targeted ENDED markets never reach the resolved side of the audit", "s1a.ts", "extraResolved: tMarkets.filter((m) => usIsResolved(m)),", "extraResolved: [],", [T.us, T.wk]),
   m("X1", "S1_COMPACT.md is not capped at 80 lines (the row budget and the final cut both removed)", "compact.ts", "const budget = COMPACT_MAX_LINES - head.length - tableHead.length - funnelLines.length - 2;", "const budget = 100000;", [T.cp]),
-  m("X2", "thin strata are shown before informative ones", "compact.ts", "rows.sort((a, b) => Number(b.informative) - Number(a.informative) ||", "rows.sort((a, b) => ", [T.cp]),
-  m("X3", "an unreachable venue is silent in the compact file", "compact.ts", "if (!v.reachable) { rows.push(", "if (!v.reachable) { continue; rows.push(", [T.cp]),
+  m("X2", "thin strata are shown before informative ones", "compact.ts", "rows.sort((a, b) => Number(b.informative) - Number(a.informative) ||", "rows.sort((a, b) => ", [T.cp, T.wk]),
+  m("X3", "an unreachable venue is silent in the compact file", "compact.ts", "if (!v.reachable) { const st =", "if (!v.reachable) { continue; const st =", [T.cp]),
   m("X4", "the funnel table shows only EXACT counts", "compact.ts", '`${fn.variants.EXACT.counts[i] ?? "n/m"} / ${fn.variants.EXACT_PLUS_PROBABLE.counts[i] ?? "n/m"}`', '`${fn.variants.EXACT.counts[i] ?? "n/m"} / ${fn.variants.EXACT.counts[i] ?? "n/m"}`', [T.cp]),
   m("X5", "an unmeasured stage is shown as 0 in the compact file", "compact.ts", '`${fn.variants.EXACT.counts[i] ?? "n/m"} / ', '`${fn.variants.EXACT.counts[i] ?? 0} / ', [T.cp]),
   m("X6", "the S1a script does not write the compact file", "s1a.ts", "writeCompact((rel) => opt.readFile?.(rel) ?? null, opt.write, { s1a: summary });", "", [T.cp, T.sc]),
@@ -228,11 +229,11 @@ function run(files: string[]): { failedTests: boolean; out: string } {
 }
 
 async function main() {
-  const only = new Set(process.argv.slice(2)); const list = MUTATIONS.filter((x) => !only.size || only.has(x.id));
+  const only = new Set(process.argv.slice(2)); const list = [...MUTATIONS, ...MUTATIONS_4_0D].filter((x) => !only.size || only.has(x.id));
   const originals = new Map<string, string>(); const touched = [...new Set(list.flatMap((x) => x.edits.map((e) => e.file)))];
   for (const f of touched) originals.set(f, readFileSync(f, "utf8"));
   const restore = () => { for (const [f, c] of originals) writeFileSync(f, c); };
-  process.on("SIGINT", () => { restore(); process.exit(130); }); process.on("exit", restore);
+  process.on("SIGINT", () => { restore(); process.exit(130); }); process.on("SIGTERM", () => { restore(); process.exit(143); }); // a killed run must never leave a mutated source file behind process.on("exit", restore);
   const dirty = spawnSync("git", ["status", "--porcelain", "--", ...touched], { encoding: "utf8" }).stdout?.trim();
   if (dirty) console.log(`note: some of the ${touched.length} source files have uncommitted changes (they are restored byte for byte afterwards)`);
   const base = run([...new Set(list.flatMap((x) => x.tests))]); if (base.out.match(/Tests\s+.*failed/)) { console.log("baseline tests fail; fix them before mutation checking"); process.exit(2); }

@@ -87,7 +87,7 @@ describe("the request budget, a refusal and the summary", () => {
   it("within the budget everything is searched and no stop message is set; the default budget is 2,000", async () => { const r = await runTitleSearch(ten, fixed([]), { maxRequests: 10 }); expect(r.summary.stoppedBecause).toBeNull(); expect(r.summary.searched).toBe(10); expect((await import("../src/lib/phase4/title-search")).DEFAULT_SEARCH_BUDGET).toBe(2000); });
   it("a refusal ends the run at once, names the venue and the pair count, and attempts no workaround", async () => {
     let n = 0; const p: SearchProvider = { venue: "polymarket_us", mode: "endpoint", describe: "x", requests: () => n, async search() { n++; return n === 2 ? { candidates: [], error: "BLOCKED 403", blocked: true } : { candidates: [], error: null, blocked: false }; } };
-    const r = await runTitleSearch(ten, p); expect(r.summary.searched).toBe(2); expect(r.summary.notSearched).toBe(8); expect(r.summary.stoppedBecause).toBe("polymarket_us refused access (BLOCKED 403) after 2 of 10 pairs; no workaround is attempted"); expect(n).toBe(2); expect(r.summary.errors).toBe(1);
+    const r = await runTitleSearch(ten, p); expect(r.summary.searched).toBe(2); expect(r.summary.notSearched).toBe(8); expect(r.summary.stoppedBecause).toBe("polymarket_us refused access (BLOCKED 403) after 1 of 10 pairs were answered; this run stops there and tries no workaround (no retry, no other header or origin, no slower pace within the same run)"); expect(r.summary.reachedPairs).toBe(1); expect(r.summary.refusal).toMatchObject({ afterPairs: 1 }); expect(n).toBe(2); expect(r.summary.errors).toBe(1);
   });
   it("an empty query is an error row, not a request; transient errors are counted by kind and the run continues", async () => {
     const c = { n: 0 }; const r = await runTitleSearch([pair("", null), pair("Lakers vs Celtics", "Lakers")], { venue: "v", mode: "endpoint", describe: "x", requests: () => c.n, async search() { c.n++; return { candidates: [], error: "SERVER_ERROR 503", blocked: false }; } });
@@ -168,6 +168,6 @@ describe("our pairs, read with select only", () => {
     const d = memDb({ signals: [sig("a", {}), sig("b", { wallet: "0xw2", payload: { copyScore: 91 }, condition_id: "0xc1" }), sig("c", { wallet: "0xw3", payload: { copyScore: 80 } }), sig("x", { kind: "EXIT", wallet: "0xwx" }), sig("old", { created_at: "2026-09-27T04:28:37Z" }), sig("n", { condition_id: "0xc2", outcome: "Yes", title: "Will it rain?", slug: "rain", payload: {} }), sig("a", {})] });
     const pairs = await loadSearchPairs(readOnly(d.db as never), "2026-09-27T04:28:38Z", "2026-10-03T00:00:00Z");
     expect(pairs).toHaveLength(2); const lal = pairs.find((p) => p.outcome === "Lakers")!; expect(lal).toMatchObject({ score: 91, wallet: "0xw2", signals: 3, title: "Lakers vs. Celtics", stratum: "sports:basketball" }); expect(pairs.find((p) => p.outcome === "Yes")).toMatchObject({ score: null, signals: 1 });
-    expect(d.touched).toEqual([]); expect([...new Set(d.reads.map((r) => r.table))]).toEqual(["signals"]);
+    expect(d.touched).toEqual([]); expect([...new Set(d.reads.map((r) => r.table))]).toEqual(["signals", "markets"]);
   });
 });

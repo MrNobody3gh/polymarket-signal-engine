@@ -34,6 +34,18 @@ export interface FeasibilityResult {
   assumptions: string[];
 }
 
+export interface RequiredPerDay { effectPts: number; acceptRate: number; perArm: number; usableDays: number; /** eligible signals per day needed to reach `perArm` settled trades in the scarcer arm inside the window; null when the settlement lag leaves no usable days */ requiredEligiblePerDay: number | null }
+/**
+ * The eligible signals per day the evidence window REQUIRES (D48, §7 S2 feasibility rule): perArm ÷ ((windowDays − settlement lag) × settledShare × min(accept, 1 − accept)),
+ * with perArm from the sample-size formula at the measured SD and design effect. One row per effect × acceptance rate; the same arithmetic as `whatChanges` below.
+ * Known answer: SD 89, effect 10, DEFF 1, no lag, 84 days, accept 50 % → 1,244 per arm ÷ (84 × 0.5) = 29.6 signals/day.
+ */
+export function requiredPerDayTable(i: { sd: number; deff: number; lagDays: number; windowDays?: number; effects?: readonly number[]; acceptRates?: readonly number[]; settledShare?: number }): RequiredPerDay[] {
+  const W = i.windowDays ?? WINDOW_DAYS, share = i.settledShare ?? 1; const usable = W - i.lagDays; const out: RequiredPerDay[] = [];
+  for (const e of i.effects ?? EFFECTS_PTS) { const perArm = sampleSizePerArm({ sd: i.sd, effect: e, deff: i.deff }); for (const a of i.acceptRates ?? ACCEPT_RATES) { const scarce = Math.min(a, 1 - a) * share; out.push({ effectPts: e, acceptRate: a, perArm, usableDays: usable, requiredEligiblePerDay: usable > 0 && scarce > 0 ? perArm / (usable * scarce) : null }); } }
+  return out;
+}
+
 export function subsetStats(name: string, t: SettledTrade[]): SubsetStats {
   const rets = t.map((x) => x.returnPts); const de = designEffect(rets, t.map((x) => x.conditionId)); const hold = t.map((x) => x.holdDays);
   return { name, n: t.length, markets: new Set(t.map((x) => x.conditionId)).size, wallets: new Set(t.map((x) => x.wallet)).size, meanPts: mean(rets), sdPts: sd(rets), icc: de.icc, deff: de.deff, deffNote: de.note, holdP50Days: quantile(hold, 0.5), holdP90Days: quantile(hold, 0.9) };
@@ -55,9 +67,10 @@ export function buildFeasibility(trades: SettledTrade[], o: { eligiblePerDay: { 
       days.push({ effectPts: row.effectPts, acceptRate: a, lag, lagDays, perArm, days: d, feasibleWithinWindow: noFlow ? false : d === null ? null : d <= W, ...(noFlow ? { noEligibleFlow: true } : {}) });
     }
     const lag90 = stats.holdP90Days ?? 0;
+    const required = requiredPerDayTable({ sd: sdv, deff: stats.deff, lagDays: lag90, windowDays: W, settledShare: share });
     for (const row of sampleSize) for (const a of ACCEPT_RATES) {
-      const usable = W - lag90; const perArm = row.perArmClustered!; const scarce = Math.min(a, 1 - a) * share;
-      const req = usable > 0 ? perArm / (usable * scarce) : null;
+      const usable = W - lag90; const scarce = Math.min(a, 1 - a) * share;
+      const req = required.find((x) => x.effectPts === row.effectPts && x.acceptRate === a)?.requiredEligiblePerDay ?? null;
       let minEff: number | null = null;
       if (o.eligiblePerDay && usable > 0) { const nAvail = o.eligiblePerDay.value * scarce * usable; if (nAvail > 0) minEff = solveMinEffect(sdv, stats.deff, nAvail); }
       whatChanges.push({ effectPts: row.effectPts, acceptRate: a, requiredEligiblePerDay: req, minDetectableEffectPts: minEff });

@@ -16,6 +16,7 @@ import { kalshiAll, kalshiBucket, kalshiCounts, kalshiSlug, kalshiTags, kalshiTi
 import type { FetchNotes } from "./venues";
 import { kalshiRefOf } from "./title-search";
 import { ENTRY_KINDS } from "../paper/ledger";
+import type { Guard } from "./venue-run";
 
 /** The clean regime of docs/PHASE4_PLAN.md §1 (the 27 Sep 2026 re-score completion): the same constant probe.ts uses. */
 export const COVERAGE_REGIME_START_ISO = "2026-09-27T04:28:38Z";
@@ -58,6 +59,8 @@ export interface KalshiCoverageOptions {
   recommendations: SlotVerdict[] | null;
   startIso?: string; /** the end of the window; pass the US run's end so both funnels use the same signals */ endIso?: string; now?: () => number; reviewTarget?: number; diagnosticPairs?: boolean;
   write: (relPath: string, content: string) => void; log?: (m: string) => void;
+  /** 4.0d: the heap guard (stage names are set here). */
+  guard?: Guard | null;
 }
 export interface KalshiCoverageResult {
   venue: "kalshi"; startedAt: string; window: { startIso: string; endIso: string };
@@ -80,7 +83,7 @@ export async function runKalshiCoverage(o: KalshiCoverageOptions): Promise<Kalsh
     "category comes from Kalshi's event category plus title/slug keywords (heuristic, unmeasured error rate)",
     "signal evaluation time = signals.evaluated_at when recorded, else created_at (source trade time)",
   ];
-  log("kalshi: signals");
+  log("kalshi: signals"); o.guard?.setStage("signals (database)", KALSHI);
   const rows = await selectAll<SignalRow>((from, to) => o.db.select("signals", SIGNAL_COLS).in("kind", ENTRY_KINDS).gte("created_at", startIso).lt("created_at", endIso).order("created_at", { ascending: true }).order("id", { ascending: true }).range(from, to));
   const seen = new Set<string>(); const sigs = rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
   const base: FunnelRow[] = sigs.map((r) => { const cs = Number((r.payload ?? {}).copyScore); const created = Date.parse(r.created_at); const ev = r.evaluated_at ? Date.parse(r.evaluated_at) : NaN;
@@ -93,7 +96,7 @@ export async function runKalshiCoverage(o: KalshiCoverageOptions): Promise<Kalsh
   const L = o.listing; const cutOff = !!L && [L.open, L.closed, L.settled].some((f) => f && f.notes.records > 0 && /sample size reached|page limit reached/.test(f.notes.stoppedBecause));
   if (!L || !L.base) reasons.push(`Kalshi unreachable or not configured${L ? ` (${L.tried.map((t) => `${t.base}: ${t.outcome}`).join("; ")})` : ""}: stages after the copy-score stage are not measured`);
   else {
-    const all = kalshiAll(L); const refs: VenueMarketRef[] = []; const raw = new Map<string, RawMarket>(); for (const m of all) { const r = kalshiRefOf(m); if (r && !raw.has(r.marketId)) { raw.set(r.marketId, m); refs.push(r); } }
+    o.guard?.setStage("matching", KALSHI); const all = kalshiAll(L); const refs: VenueMarketRef[] = []; const raw = new Map<string, RawMarket>(); for (const m of all) { const r = kalshiRefOf(m); if (r && !raw.has(r.marketId)) { raw.set(r.marketId, m); refs.push(r); } }
     candidates = refs.length; counts = kalshiCounts(all); strata = all.map(kalshiStratum);
     for (const [name, f] of [["open", L.open], ["closed", L.closed], ["settled", L.settled]] as const) if (f?.notes.errors.length) reasons.push(`${name} listing: ${f.notes.errors[0]}`);
     if (cutOff) reasons.push(`the Kalshi listing was cut off at ${L.cap} markets: mapped counts are a LOWER BOUND; raise --kalshi-max`);

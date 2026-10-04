@@ -26,6 +26,8 @@ export interface VenueMarketRef {
   eventDate?: string | null;
   /** Optional context for the timestamp-free diagnostic only (never used by `matchSignalToVenue`). */
   categories?: string[]; stratum?: string | null; eventSlug?: string | null;
+  /** 4.0d, for the owner's review sheet only: the time-like fields the venue exposes for this market (field name and raw value, no verdict) and the start of its rule text. */
+  times?: { field: string; value: string }[]; rules?: string | null;
 }
 export interface MatchResult {
   confidence: Confidence;
@@ -197,13 +199,19 @@ export const SIMILARITY_BANDS = [{ name: "≥ 0.90", min: 0.9 }, { name: "0.70�
 export const bandOf = (score: number): string => SIMILARITY_BANDS.find((b) => score >= b.min)!.name;
 
 export interface DiagSignal { conditionId?: string | null; tokenId?: string | null; title: string | null; outcome: string | null; slug?: string | null; eventSlug?: string | null; stratum?: string | null }
+/** Similarity a candidate needs to be PROPOSED to the owner for review (4.0d): with equal numbers and negations and a matching outcome label; an identifier match is always proposed. Proposed is NOT verified. */
+export const PROPOSED_MIN_SIMILARITY = 0.7;
 export interface DiagCandidate {
   marketId: string; question: string | null; slug: string | null; url: string | null; categories: string[]; stratum: string | null;
+  /** 4.0d (review sheet): the venue's outcome labels, its time-like fields (name and raw value, unjudged) and the start of its rule text. */
+  outcomes: string[]; times: { field: string; value: string }[]; rules: string | null;
   titleSimilarity: number; participantSimilarity: number; sameParticipants: boolean; numbersAgree: boolean; negationsAgree: boolean;
   outcomeMatch: boolean | null; categoryMatch: boolean | null; identifierMatch: boolean;
   /** max(title similarity, participant similarity); 1 for an identifier match. Orders candidates only. */
   score: number;
 }
+/** A candidate is PROPOSED (a candidate for the owner's eye, never verified) when it shares an identifier, or its similarity is ≥ PROPOSED_MIN_SIMILARITY with equal numbers and negations and a matching outcome label. */
+export const isProposed = (c: Pick<DiagCandidate, "identifierMatch" | "score" | "numbersAgree" | "negationsAgree" | "outcomeMatch">): boolean => c.identifierMatch || (c.score >= PROPOSED_MIN_SIMILARITY && c.numbersAgree && c.negationsAgree && c.outcomeMatch === true);
 export interface DiagResult {
   /** PROBABLE or NONE ONLY. Never EXACT, never verified. PROBABLE here means: normalised title similarity ≥ 0.85 with equal numbers and negations and a matching outcome, NO DATE CHECKED (`dateChecked` is the literal false); an identifier match is reported in `identifierMatch` and also yields PROBABLE. */
   confidence: "PROBABLE" | "NONE"; verified: false; dateChecked: false;
@@ -240,7 +248,7 @@ export function diagnoseCandidates(sig: DiagSignal, cands: VenueMarketRef[], top
     const t = titleSimilarity(sig.title, c.question); const ps = participantSimilarity(sig.title, c.question);
     const identifierMatch = (!!cid && (c.conditionIds ?? []).some((x) => x.toLowerCase() === cid)) || (!!sig.tokenId && (c.tokenIds ?? []).includes(sig.tokenId)) || (!!sig.slug && !!c.slug && c.slug.toLowerCase() === sig.slug.toLowerCase());
     const outcome = matchOutcome(sig.outcome, c);
-    return { marketId: c.marketId, question: c.question, slug: c.slug ?? null, url: c.url ?? null, categories: c.categories ?? [], stratum: c.stratum ?? null, titleSimilarity: Math.round((t.exact ? 1 : t.score) * 1000) / 1000, participantSimilarity: Math.round(ps * 1000) / 1000, sameParticipants: ps >= PROBABLE_MIN_SIMILARITY, numbersAgree: t.numbersAgree, negationsAgree: t.negationsAgree, outcomeMatch: !sig.outcome || !c.outcomes?.length ? null : outcome !== null, categoryMatch: sig.stratum && c.stratum ? sig.stratum === c.stratum : null, identifierMatch, score: identifierMatch ? 1 : Math.max(t.exact ? 1 : t.score, ps) };
+    return { marketId: c.marketId, question: c.question, slug: c.slug ?? null, url: c.url ?? null, categories: c.categories ?? [], stratum: c.stratum ?? null, outcomes: c.outcomes ?? [], times: c.times ?? [], rules: c.rules ?? null, titleSimilarity: Math.round((t.exact ? 1 : t.score) * 1000) / 1000, participantSimilarity: Math.round(ps * 1000) / 1000, sameParticipants: ps >= PROBABLE_MIN_SIMILARITY, numbersAgree: t.numbersAgree, negationsAgree: t.negationsAgree, outcomeMatch: !sig.outcome || !c.outcomes?.length ? null : outcome !== null, categoryMatch: sig.stratum && c.stratum ? sig.stratum === c.stratum : null, identifierMatch, score: identifierMatch ? 1 : Math.max(t.exact ? 1 : t.score, ps) };
   }).sort((a, b) => b.score - a.score || Number(b.identifierMatch) - Number(a.identifierMatch) || (a.marketId < b.marketId ? -1 : 1));
   const bands: Record<string, number> = Object.fromEntries(SIMILARITY_BANDS.map((b) => [b.name, 0])); for (const c of scored) bands[bandOf(c.score)]++;
   const best = scored[0] ?? null;

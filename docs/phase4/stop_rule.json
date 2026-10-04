@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "approved": false,
+  "approvedBy": null,
+  "approvedOn": null,
+  "description": "PROPOSED stop rule for the evidence-gate feasibility of an execution venue (Phase 4.0d). Not approved: the merge step prints 'UNDETERMINED: stop rule not approved' and the numbers, never a verdict. To approve: edit the numbers if you want different ones, set \"approved\" to true with your name and the date, COMMIT, and only then run `npm run phase4:review-ingest` (the review results remember this file's hash; a later edit invalidates them). Every number the verdict depends on is in this file.",
+  "windowDays": 84,
+  "effectsPts": [10, 15],
+  "acceptRates": [0.1, 0.25, 0.5],
+  "infeasible": { "effectPts": 15, "acceptRate": 0.25, "when": "upper_bound_below_required" },
+  "feasible": { "effectPts": 10, "acceptRate": 0.5, "when": "lower_bound_above_required" },
+  "wilsonZ": 1.96,
+  "settledSubset": { "minTradesForEligibleLike": 100 },
+  "minFalseNegativeRows": 15,
+  "rationale": [
+    "INFEASIBLE only on an optimistic reading: the UPPER bound of expected verified-executable eligible signals per day (precision at the top of its Wilson interval, the date-level proxy for the 24-hour and not-started rules, every thin or unknown stratum counted as passing its timestamp rules, matcher misses included) is still below what the window needs at the middle acceptance rate (25 %) and the larger effect (15 points). If even that cannot reach the sample in MAX_WINDOW, more review would not change the answer.",
+    "FEASIBLE only on a pessimistic reading: the LOWER bound (precision at the bottom of its interval, timestamps only where an audited field passes, unreviewed or unsearched pairs counted as zero) clears the requirement at the most favourable acceptance rate (50 %) for the smaller effect (10 points).",
+    "Everything between is UNDETERMINED, and so is any case in which a bound is unknown (an unreviewed band, a listing cut off without a reviewed below-0.30 stratum of at least minFalseNegativeRows rows, a stage not measured): a venue cannot be declared infeasible on missing evidence.",
+    "Strict inequalities: an upper bound exactly equal to the requirement is not infeasible; a lower bound exactly equal is not feasible.",
+    "The bounds multiply per-factor bounds (precision, window share, timestamp share); they are wider than a joint 95 % interval on purpose. 1.96 is the 95 % Wilson z.",
+    "The settled-trade SD, design effect and settlement lag come from the eligible-like subset when it has at least 100 settled trades, else from all settled trades (the choice is stated in the matrix)."
+  ]
+}

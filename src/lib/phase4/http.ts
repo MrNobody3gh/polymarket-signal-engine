@@ -9,8 +9,11 @@
  *  - NEVER retried and never worked around: 401 / 403 / 451 (reported as BLOCKED), 404, other 4xx, malformed JSON. After
  *    `blockedStop` consecutive BLOCKED answers (default 2) the client stops sending requests to that origin for the rest of
  *    the run ("stop that part, report exactly what happened, continue with the rest");
- *  - it never throws: every outcome is a value with a precise `kind`, so a script can report and carry on.
+ *  - it never throws: every outcome is a value with a precise `kind`, so a script can report and carry on. The one deliberate exception is the optional
+ *    memory `guard` (4.0d): when the process is over its heap budget the guard throws `HeapBudgetExceeded` BEFORE the request is sent, so the run stops
+ *    with a message naming the venue and the stage instead of being killed by the host.
  */
+import type { Guard } from "./venue-run";
 export const DEFAULT_USER_AGENT = "polymarket-signal-engine-research/4.0 (read-only public-data audit; contact: repository owner)";
 
 export type HttpFailureKind = "BLOCKED" | "BLOCKED_SKIPPED" | "NOT_FOUND" | "BAD_REQUEST" | "RATE_LIMITED" | "SERVER_ERROR" | "TIMEOUT" | "NETWORK" | "MALFORMED";
@@ -21,18 +24,19 @@ export type HttpResult<T = unknown> =
 export interface HttpEvent { url: string; ok: boolean; kind: string; status: number | null; attempts: number }
 export interface PoliteHttpOptions {
   fetch?: typeof fetch; sleep?: (ms: number) => Promise<void>; now?: () => number;
+  /** 4.0d: checked before every request; throws HeapBudgetExceeded when the heap in use is over budget. */ guard?: Guard;
   userAgent?: string; minIntervalMs?: number; /** a SLOWER gap for one origin (e.g. a venue whose documented limit is 60 requests/minute); never faster than the 500 ms floor */ originGapMs?: Record<string, number>; maxAttempts?: number; timeoutMs?: number; blockedStop?: number; maxRetryAfterMs?: number;
 }
 
 export class PoliteHttp {
   private f: typeof fetch; private sleep: (ms: number) => Promise<void>; private now: () => number;
   private ua: string; private gap: number; private maxAttempts: number; private timeoutMs: number; private blockedStop: number; private maxRetryAfterMs: number;
-  private originGaps = new Map<string, number>(); private lastStart = -Infinity; private blockedRun = new Map<string, number>(); private stopped = new Set<string>();
+  private guard: Guard | null; private originGaps = new Map<string, number>(); private lastStart = -Infinity; private blockedRun = new Map<string, number>(); private stopped = new Set<string>();
   /** Every request outcome, in order (urls without credentials by construction). Scripts summarise it. */
   readonly events: HttpEvent[] = []; requests = 0;
   constructor(o: PoliteHttpOptions = {}) {
     this.f = o.fetch ?? globalThis.fetch.bind(globalThis); this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))); this.now = o.now ?? (() => Date.now());
-    this.ua = o.userAgent ?? DEFAULT_USER_AGENT; for (const [k, v] of Object.entries(o.originGapMs ?? {})) this.originGaps.set(k, Math.max(500, v));
+    this.guard = o.guard ?? null; this.ua = o.userAgent ?? DEFAULT_USER_AGENT; for (const [k, v] of Object.entries(o.originGapMs ?? {})) this.originGaps.set(k, Math.max(500, v));
     // The 2 requests/second ceiling is a hard floor on the gap: a caller may be slower, never faster.
     this.gap = Math.max(500, o.minIntervalMs ?? 500); this.maxAttempts = Math.max(1, Math.min(3, o.maxAttempts ?? 3));
     this.timeoutMs = o.timeoutMs ?? 20_000; this.blockedStop = Math.max(1, o.blockedStop ?? 2); this.maxRetryAfterMs = o.maxRetryAfterMs ?? 30_000;
@@ -51,6 +55,7 @@ export class PoliteHttp {
     if (this.stopped.has(origin)) return done({ ok: false, kind: "BLOCKED_SKIPPED", status: null, message: `skipped: ${origin} refused access earlier in this run and is not asked again`, attempts: 0 }, 0);
     let last: HttpResult<T> = { ok: false, kind: "NETWORK", status: null, message: "no attempt made", attempts: 0 };
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      this.guard?.check(`request ${this.requests + 1}`);
       await this.pace(origin); this.requests++;
       const t0 = this.now(); let retryAfterMs = 0;
       try {

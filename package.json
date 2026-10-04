@@ -19,6 +19,10 @@
     "phase4:ts-audit": "tsx scripts/phase4/timestamp-audit.ts",
     "phase4:coverage": "tsx scripts/phase4/coverage-probe.ts",
     "phase4:title-search": "tsx scripts/phase4/title-search.ts",
+    "phase4:merge": "tsx scripts/phase4/merge.ts",
+    "phase4:review-sheet": "tsx scripts/phase4/review-sheet.ts",
+    "phase4:review-ingest": "tsx scripts/phase4/review-ingest.ts",
+    "phase4:wallet-share": "tsx scripts/phase4/wallet-share.ts",
     "phase4:mutations": "tsx scripts/phase4/mutation-check.ts"
   },
   "dependencies": {

@@ -21,6 +21,8 @@ import { toCsv } from "./stats";
 import { classifyFieldName, DAY_MS, easternParts, impliedEasternDate, resolveEventTime } from "./timestamps";
 import { fetchUs, usFetchPlan, listingTotals, US_EXCHANGE, usIdOf, usIsResolved, usOutcomes, usTitleOf, tagsOf, type FetchNotes, type ListingTotals, type UsConfig } from "./venues";
 import { ENTRY_KINDS } from "../paper/ledger";
+import type { Guard, HeapInfo, StopInfo, VenueId } from "./venue-run";
+import type { KalshiCoverageResult } from "./venue-funnel";
 import { flatten, instantOf, type RawMarket } from "./audit";
 
 /** The clean regime of docs/PHASE4_PLAN.md §1 (the 27 Sep 2026 re-score completion). */
@@ -36,6 +38,8 @@ export interface CoverageOptions {
   /** Diagnostic mode (4.0b): the full listing, the timestamp-free matcher, `s1b_diagnostic.json` and `s1b_mapping_diagnostic.csv`. */
   diagnose?: boolean; diagnosticSample?: number;
   write: (relPath: string, content: string) => void; log?: (m: string) => void;
+  /** 4.0d: the heap guard (stage names are set here; the guard is checked before every request by the PoliteHttp client and at every stage). */
+  guard?: Guard | null;
 }
 export interface CoverageResult {
   startedAt: string; window: { startIso: string; endIso: string };
@@ -48,6 +52,9 @@ export interface CoverageResult {
   feasibility: FeasibilityResult; feasibilityMode: string; settled: { n: number; fillShare: number | null };
   approximations: string[];
 }
+
+/** The compact per-venue evidence file of a `--venue` coverage run (`v_<venue>_coverage.json`). `result` is the US/international `CoverageResult` or Kalshi's `KalshiCoverageResult`; null for a run that stopped before it had one. */
+export interface VenueCoverageFile { schema: number; kind: "coverage"; venue: VenueId; startedAt: string; finishedAt: string; heap: HeapInfo | null; stopped: StopInfo | null; result: CoverageResult | KalshiCoverageResult | null }
 
 const iso = (ms: number) => new Date(ms).toISOString();
 const SIGNAL_COLS = "id,kind,wallet,condition_id,token_id,outcome,title,slug,price,created_at,evaluated_at,payload";
@@ -111,7 +118,7 @@ export async function runCoverage(o: CoverageOptions): Promise<CoverageResult> {
   ];
 
   // 1 — signals (select only); a fixed upper bound so rows inserted while paging cannot move the window
-  log("signals");
+  const gv = o.us ? US_EXCHANGE : "polymarket_intl"; log("signals"); o.guard?.setStage("signals (database)", gv);
   const rows = await selectAll<SignalRow>((from, to) => o.db.select("signals", SIGNAL_COLS).in("kind", ENTRY_KINDS).gte("created_at", startIso).lt("created_at", endIso).order("created_at", { ascending: true }).order("id", { ascending: true }).range(from, to));
   const seen = new Set<string>(); const sigs = rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
   const base: FunnelRow[] = sigs.map((r) => { const cs = Number((r.payload ?? {}).copyScore); const created = Date.parse(r.created_at); const ev = r.evaluated_at ? Date.parse(r.evaluated_at) : NaN;
@@ -120,7 +127,7 @@ export async function runCoverage(o: CoverageOptions): Promise<CoverageResult> {
   const conds = [...new Set(scored.map((r) => String(r.condition_id).toLowerCase()))];
 
   // 2 — stored date-level end dates (select only), for the proxy and the eligible-like subset
-  log("end dates");
+  log("end dates"); o.guard?.setStage("end dates (database)", gv);
   const ends = new Map<string, string>(); for (const m of await selectIn<{ condition_id: string; end_date: string | null }>(conds, (c) => o.db.select("markets", "condition_id,end_date").in("condition_id", c as string[]))) if (m.end_date) ends.set(String(m.condition_id).toLowerCase(), String(m.end_date).slice(0, 10));
   const proxy = (i: number): boolean | undefined => { if (base[i].copyScore === null || base[i].copyScore! < SCORE_MIN) return undefined; const e = ends.get(String(sigs[i].condition_id).toLowerCase()); if (!e) return false; const d = Date.parse(e + "T00:00:00Z") / DAY_MS, c = dayIndex(base[i].createdAtMs); return d >= c && d <= c + 1; };
   base.forEach((r, i) => { r.proxyWithin24h = proxy(i); });
@@ -131,7 +138,7 @@ export async function runCoverage(o: CoverageOptions): Promise<CoverageResult> {
   let venueLists: { open: RawMarket[]; closed: RawMarket[]; archived: RawMarket[] | null } | null = null; let venueRefs: VenueMarketRef[] = []; const dateBasis: Record<string, number> = {};
   if (!o.us || !o.http) reasons.push("execution venue not configured: stages after the copy-score stage are not measured");
   else {
-    log("venue crawl"); const plan = usFetchPlan(o); const cap = plan.cap; const half = plan.half;
+    log("venue crawl"); o.guard?.setStage("listing", US_EXCHANGE); const plan = usFetchPlan(o); const cap = plan.cap; const half = plan.half;
     const open = await fetchUs(o.http, o.us, { closed: false, max: half, slim: plan.slim }); const closed = await fetchUs(o.http, o.us, { closed: true, max: half, slim: plan.slim }); notes = { open: open.notes, closed: closed.notes };
     const archived = o.diagnose && o.us.archivedQuery ? await fetchUs(o.http, o.us, { closed: true, max: plan.archivedMax, slim: plan.slim, query: o.us.archivedQuery }) : null;
     if (archived?.notes.errors.length) reasons.push(`archived listing: ${archived.notes.errors[0]}`);
@@ -140,7 +147,7 @@ export async function runCoverage(o: CoverageOptions): Promise<CoverageResult> {
     for (const [name, n] of [["open", open.notes], ["closed", closed.notes]] as const) if (n.records > 0 && /sample size reached|page limit reached/.test(n.stoppedBecause)) reasons.push(`the venue's ${name} listing was cut off at ${n.records} markets (${n.stoppedBecause}): mapped counts are a LOWER BOUND; raise --us-max`);
     if (!refs.length) reasons.push(`execution venue returned no markets (${[...open.notes.errors, ...closed.notes.errors][0] ?? "empty"}): stages after the copy-score stage are not measured`);
     else {
-      measured.mapping = true; measured.tradable = true;
+      measured.mapping = true; measured.tradable = true; o.guard?.setStage("matching", US_EXCHANGE);
       // The venue's event date (under the S1a recommended fields) lets PROBABLE compare dates; without recommendations only identifier matches can be found.
       if (o.recommendations) measured.timestamp = true; else reasons.push("no S1a recommendations supplied (docs/phase4/data/s1a_summary.json): usable-timestamp and later stages are not measured, and PROBABLE matches (which need a venue date) cannot be found; only identifier matches");
       const dated = refs.map((c) => { const rw = raw.get(c.marketId)!; const t = o.recommendations ? eventTimeAt(rw, startMs, o.recommendations) : { ms: null as number | null }; if (t.ms !== null) return { ...c, eventDate: iso(t.ms) }; const d = candidateDateLevel(rw); return d ? { ...c, eventDate: d.date } : c; });
@@ -175,7 +182,7 @@ export async function runCoverage(o: CoverageOptions): Promise<CoverageResult> {
   // 5b — diagnostic (4.0b): why did nothing map? timestamp-free candidates, a sample for the owner's eye, the category mix
   let diagnostic: CoverageResult["diagnostic"] = null;
   if (o.diagnose) {
-    log("diagnostic");
+    log("diagnostic"); o.guard?.setStage("diagnostic", gv);
     const pairMap = new Map<string, OurMarket>();
     sigs.forEach((r, i) => { const k = `${String(r.condition_id).toLowerCase()}|${r.outcome ?? ""}`; const sc = base[i].copyScore; const cur = pairMap.get(k);
       if (cur) { cur.signals++; if (sc !== null && (cur.score === null || sc > cur.score)) cur.score = sc; } else pairMap.set(k, { conditionId: r.condition_id, tokenId: r.token_id, title: r.title, slug: r.slug, outcome: r.outcome, stratum: base[i].category, score: sc, signals: 1 }); });
@@ -193,12 +200,12 @@ export async function runCoverage(o: CoverageOptions): Promise<CoverageResult> {
       const venueStrata = [...(venueLists?.open ?? []).map((m) => ({ m, closed: false })), ...(venueLists?.closed ?? []).map((m) => ({ m, closed: true })), ...(venueLists?.archived ?? []).map((m) => ({ m, closed: true }))].map(({ m, closed }) => ({ stratum: stratum(categorize({ title: usTitleOf(m), slug: typeof m.slug === "string" ? m.slug : null, tags: tagsOf(m) })), closed }));
       mix.push(...categoryMix(ours, venueStrata));
     } else mix.push(...categoryMix(ours, []));
-    diagnostic = { listing, summary, categoryMix: mix, sampled };
+    diagnostic = { listing, summary, categoryMix: mix, sampled }; venueLists = null; venueRefs = []; // the listing has been summarised: release it before the next stage
     o.write("s1b_diagnostic.json", JSON.stringify({ window: { startIso, endIso }, listing, diagnostic: summary, categoryMix: mix, sampled, dateBasis, notes: venueRefs.length ? [] : ["the venue listing was not available: nothing to compare with"] }, null, 1));
   }
 
   // 6 — feasibility from settled paper trades (select only)
-  log("settled paper trades");
+  log("settled paper trades"); o.guard?.setStage("settled paper trades (database)", gv);
   const ex = await selectAll<{ signal_id: string; coverage_state: string | null; state: string | null; fill_ts: string | null; closed_at: string | null; net_pnl: number | null; filled_usd: number | null }>((from, to) => o.db.select("paper_executions", "signal_id,coverage_state,state,fill_ts,closed_at,net_pnl,filled_usd").eq("mode", mode).gte("source_trade_ts", startIso).lt("source_trade_ts", endIso).order("signal_id", { ascending: true }).range(from, to));
   const bySig = new Map(sigs.map((r, i) => [r.id, { r, f: base[i] }])); const trades: SettledTrade[] = []; let sim = 0, unfilled = 0;
   for (const e of ex) {
