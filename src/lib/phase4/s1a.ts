@@ -143,8 +143,10 @@ export async function runS1a(opt: S1aOptions): Promise<S1aResult> {
     const L = kalshiListing; const all = kalshiAll(L); const openM = [...(L.open?.markets ?? [])].filter((m) => !kalshiIsResolved(m)); const resM = all.filter(kalshiIsResolved);
     const { audit, markets } = auditVenue(KALSHI, openM, resM, { open: L.open?.notes ?? null, resolved: L.settled?.notes ?? L.closed?.notes ?? null }, { idOf: kalshiIdOf, isResolved: kalshiIsResolved, titleOf: kalshiTitleOf, groupOf: kalshiGroupOf, slugOf: kalshiSlug, tagsOf: kalshiTags }, undefined, { sampleOpen: so, sampleResolved: sr, listing: all.length ? kalshiCounts(all) : null });
     if (!L.base) audit.fetch.open = { endpoint: opt.kalshi.bases.join(" | "), pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "no base URL answered", errors: L.tried.map((t) => `${t.base}: ${t.outcome}`) };
-    venues.push(audit); mkts[KALSHI] = markets; raws[KALSHI] = { open: openM, resolved: resM };
+    // only the first `maxFixtureMarkets` raws of each side are ever read again (fixtures); keeping all 40,000 listing markets alive exhausted the heap on the 4.0c production run
+    const fx = Math.max(40, opt.maxFixtureMarkets ?? 40); venues.push(audit); mkts[KALSHI] = markets; raws[KALSHI] = { open: openM.slice(0, fx), resolved: resM.slice(0, fx) };
     if (L.base) { log("kalshi: milestones"); const ms = await fetchKalshiMilestones(opt.http, L.base, {}); if (ms.notes.errors.length) schedule.notes.push(`kalshi milestones: ${ms.notes.errors[0]}`); schedule.kalshi = scheduleCompare(kalshiScheduleRows(all, ms.milestones)); if (!ms.milestones.length && !ms.notes.errors.length) schedule.notes.push("kalshi milestones: none returned"); }
+    kalshiListing = null; // release the bounded listing (the outer variable kept it alive to the end of the audit)
   }
 
   // 3 — venue agreement on matched events
