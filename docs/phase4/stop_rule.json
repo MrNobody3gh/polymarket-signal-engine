@@ -1,16 +1,33 @@
 {
   "version": 1,
-  "approved": false,
-  "approvedBy": null,
-  "approvedOn": null,
+  "approved": true,
+  "approvedBy": "owner (accepted as proposed, in chat with the owner's assistant, before any review result existed)",
+  "approvedOn": "2026-10-04",
   "description": "PROPOSED stop rule for the evidence-gate feasibility of an execution venue (Phase 4.0d). Not approved: the merge step prints 'UNDETERMINED: stop rule not approved' and the numbers, never a verdict. To approve: edit the numbers if you want different ones, set \"approved\" to true with your name and the date, COMMIT, and only then run `npm run phase4:review-ingest` (the review results remember this file's hash; a later edit invalidates them). Every number the verdict depends on is in this file.",
   "windowDays": 84,
-  "effectsPts": [10, 15],
-  "acceptRates": [0.1, 0.25, 0.5],
-  "infeasible": { "effectPts": 15, "acceptRate": 0.25, "when": "upper_bound_below_required" },
-  "feasible": { "effectPts": 10, "acceptRate": 0.5, "when": "lower_bound_above_required" },
+  "effectsPts": [
+    10,
+    15
+  ],
+  "acceptRates": [
+    0.1,
+    0.25,
+    0.5
+  ],
+  "infeasible": {
+    "effectPts": 15,
+    "acceptRate": 0.25,
+    "when": "upper_bound_below_required"
+  },
+  "feasible": {
+    "effectPts": 10,
+    "acceptRate": 0.5,
+    "when": "lower_bound_above_required"
+  },
   "wilsonZ": 1.96,
-  "settledSubset": { "minTradesForEligibleLike": 100 },
+  "settledSubset": {
+    "minTradesForEligibleLike": 100
+  },
   "minFalseNegativeRows": 15,
   "rationale": [
     "INFEASIBLE only on an optimistic reading: the UPPER bound of expected verified-executable eligible signals per day (precision at the top of its Wilson interval, the date-level proxy for the 24-hour and not-started rules, every thin or unknown stratum counted as passing its timestamp rules, matcher misses included) is still below what the window needs at the middle acceptance rate (25 %) and the larger effect (15 points). If even that cannot reach the sample in MAX_WINDOW, more review would not change the answer.",
