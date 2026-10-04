@@ -7,7 +7,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { evaluateStopRule, parseStopRule, stampOf, stopRuleHash, validateStopRule, STOP_RULE_PATH, type RuleCheck, type StopRule } from "../src/lib/phase4/stop-rule";
 
-const FILE = readFileSync(STOP_RULE_PATH, "utf8"); const shipped = JSON.parse(FILE) as StopRule;
+// COMMITTED is whatever is on disk (approved by the owner on 4 Oct 2026). FILE is its UNAPPROVED variant: the tests below that check "an unapproved rule issues no verdict" must not depend on the committed approval state.
+const COMMITTED = readFileSync(STOP_RULE_PATH, "utf8"); const committed = JSON.parse(COMMITTED) as StopRule;
+const shipped = { ...committed, approved: false, approvedBy: null, approvedOn: null } as StopRule; const FILE = JSON.stringify(shipped);
 const approvedText = JSON.stringify({ ...shipped, approved: true, approvedBy: "owner", approvedOn: "2026-10-05" }); const approved = parseStopRule(approvedText);
 // a requirement table with known numbers: infeasible test (15 pts, 25 %) needs 26, feasible test (10 pts, 50 %) needs 30
 const REQ: Record<string, number> = { "15|0.25": 26, "10|0.5": 30 }; const req = (e: number, a: number) => REQ[`${e}|${a}`] ?? 99;
@@ -15,10 +17,16 @@ const none = { current: stampOf(STOP_RULE_PATH, approvedText), ingestedUnder: "n
 const ev = (b: { lower: number | null; upper: number | null }, c: RuleCheck = approved, o: Parameters<typeof evaluateStopRule>[3] = none) => evaluateStopRule(c, b, req, o);
 
 describe("the committed stop_rule.json", () => {
-  it("is valid, NOT approved, and every number the verdict depends on is in it", () => {
-    const c = validateStopRule(shipped); expect(c.errors).toEqual([]); expect(c.ok).toBe(true); expect(shipped.approved).toBe(false); expect(shipped.approvedBy).toBeNull(); expect(shipped.approvedOn).toBeNull();
+  it("is valid, internally consistent about its approval, and every number the verdict depends on is in it", () => {
+    const c = validateStopRule(committed); expect(c.errors).toEqual([]); expect(c.ok).toBe(true);
+    // approval is never half-recorded: approved means a name and a date are written down; not approved means neither is
+    if (committed.approved) { expect(typeof committed.approvedBy).toBe("string"); expect((committed.approvedBy ?? "").length).toBeGreaterThan(0); expect(committed.approvedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/); } else { expect(committed.approvedBy).toBeNull(); expect(committed.approvedOn).toBeNull(); }
     expect(shipped).toMatchObject({ windowDays: 84, effectsPts: [10, 15], acceptRates: [0.1, 0.25, 0.5], infeasible: { effectPts: 15, acceptRate: 0.25, when: "upper_bound_below_required" }, feasible: { effectPts: 10, acceptRate: 0.5, when: "lower_bound_above_required" }, wilsonZ: 1.96, minFalseNegativeRows: 15, settledSubset: { minTradesForEligibleLike: 100 } });
     expect(shipped.rationale.length).toBeGreaterThanOrEqual(4);
+  });
+  it("the owner approved exactly the proposed numbers on 4 Oct 2026, before any review result existed (a change to them is a new rule, ingested again)", () => {
+    expect(committed.approved).toBe(true); expect(committed.approvedOn).toBe("2026-10-04");
+    expect(committed).toMatchObject({ windowDays: 84, effectsPts: [10, 15], acceptRates: [0.1, 0.25, 0.5], infeasible: { effectPts: 15, acceptRate: 0.25 }, feasible: { effectPts: 10, acceptRate: 0.5 }, wilsonZ: 1.96, minFalseNegativeRows: 15 });
   });
   it("the shipped text says how to approve it", () => { expect(shipped.description).toMatch(/set "approved" to true/); expect(shipped.description).toMatch(/COMMIT/); expect(shipped.description).toMatch(/before|only then/); });
 });

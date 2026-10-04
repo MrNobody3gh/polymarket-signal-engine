@@ -13,7 +13,8 @@ import { funnelEvents, kalshiServer, nbaEvents } from "./phase4Kalshi";
 export const OUT = "docs/phase4/data"; export const RULE = "docs/phase4/stop_rule.json";
 export const ENV = { NEXT_PUBLIC_SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "service-role-secret-never-logged" };
 export const NOW = Date.parse("2026-10-03T00:00:00Z"); const z = (s: string) => new Date(Date.parse(s)).toISOString();
-export const SHIPPED_RULE = readFileSync(RULE, "utf8");
+// the UNAPPROVED variant of the committed rule (the committed file itself is approved since 4 Oct 2026): the pipeline tests that need an unapproved rule must not depend on that state
+export const SHIPPED_RULE = JSON.stringify({ ...JSON.parse(readFileSync(RULE, "utf8")), approved: false, approvedBy: null, approvedOn: null }, null, 2);
 export const APPROVED_RULE = JSON.stringify({ ...JSON.parse(SHIPPED_RULE), approved: true, approvedBy: "owner", approvedOn: "2026-10-05" }, null, 2);
 
 const world = buildWorld(4);
