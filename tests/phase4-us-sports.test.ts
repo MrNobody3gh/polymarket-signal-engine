@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { EXIT, runTimestampAuditCli } from "../src/lib/phase4/cli";
 import { PoliteHttp } from "../src/lib/phase4/http";
 import { US_DEFAULTS, US_SPORTS_MARKET_TYPES, defaultTargetedQueries, fetchUsTargeted } from "../src/lib/phase4/venues";
-import { discoverUsSports, eventFlagRows, fetchUsSportsTargeted, inPlayReliability, INPLAY_BUCKETS, scheduleCompare, usScheduleRows, type EventFlagRow } from "../src/lib/phase4/us-sports";
+import { boundSample, discoverUsSports, eventFlagRows, fetchUsSportsTargeted, inPlayReliability, INPLAY_BUCKETS, scheduleCompare, usScheduleRows, type EventFlagRow } from "../src/lib/phase4/us-sports";
 import { buildInventory, recommendSlots } from "../src/lib/phase4/audit";
 import { futuresVerdicts, gameStartDeepDive, marketClassOf } from "../src/lib/phase4/events";
 import { fakeFetch, json, virtualClock } from "./helpers/phase4Db";
@@ -71,12 +71,34 @@ describe("the sports API: sports, leagues, events by sport slug and by league sl
     const b = setup(usServer({ sports: [{ slug: "x" }, { slug: "x" }, { id: "y" }, { name: "no slug" }] }).handler); expect((await discoverUsSports(b.http, US_DEFAULTS)).sports.map((x) => x.slug)).toEqual(["x", "y"]);
     const c = setup(usServer({}).handler); const none = await discoverUsSports(c.http, US_DEFAULTS); expect(none.sports).toEqual([]); expect(none.errors).toEqual(["sports: NOT_FOUND 404", "leagues: NOT_FOUND 404"]);
   });
+  // Found on the 4.0d production run: the US audit died out of memory because the sports-API stage kept every market of every page of every sport.
+  it("keeps at most 600 markets per sport and side (default), however many pages and markets the venue has, and still reports the true quota", async () => {
+    const big = Array.from({ length: 40 }, (_, i) => usEvent(`bg${i}`, i, { ended: false, markets: 40 }));   // 1,600 markets in 40 events
+    const srv = usServer({ sports: { sports: [{ slug: "nba", name: "NBA" }] }, leagues: { leagues: [] }, sportEvents: { nba: { open: big, ended: [] } } } as never); const { http } = setup(srv.handler);
+    const r = await fetchUsSportsTargeted(http, US_DEFAULTS, { maxPages: 50 }); const nba = r.results.find((x) => x.sport === "nba")!;
+    expect(nba.markets.length).toBeLessThanOrEqual(600); expect(nba.markets.length).toBeGreaterThan(100); expect(nba.reachedQuota).toBe(true);
+    const small = await fetchUsSportsTargeted(http, US_DEFAULTS, { maxPages: 50, maxMarketsPerQuery: 120 }); expect(small.results.find((x) => x.sport === "nba")!.markets.length).toBeLessThanOrEqual(120);
+  });
+  // Found on the 4.0d production run: the US audit died out of memory because the sports-API stage kept every market of every page of every sport.
+  it("keeps at most 10 markets per event and 600 per sport and side, never starves the distinct-event count, and still reports the true quota", async () => {
+    const big = Array.from({ length: 40 }, (_, i) => usEvent(`bg${i}`, i, { ended: false, markets: 40 }));   // 1,600 markets in 40 events
+    const srv = usServer({ sports: { sports: [{ slug: "nba", name: "NBA" }] }, leagues: { leagues: [] }, sportEvents: { nba: { open: big, ended: [] } } } as never); const { http } = setup(srv.handler);
+    const r = await fetchUsSportsTargeted(http, US_DEFAULTS, { maxPages: 50 }); const nba = r.results.find((x) => x.sport === "nba")!;
+    expect(nba.markets.length).toBe(400); expect(nba.events).toBe(40); expect(nba.reachedQuota).toBe(true);          // 40 events x 10 markets: far fewer than 1,600, quota intact
+    const small = await fetchUsSportsTargeted(http, US_DEFAULTS, { maxPages: 50, maxMarketsPerQuery: 120 }); expect(small.results.find((x) => x.sport === "nba")!.markets.length).toBe(120);
+  });
+  it("boundSample: first N per event, at most `total`, order-preserving, pure", () => {
+    const mk = (g: string, i: number) => ({ id: `${g}-${i}`, event: { id: g } }) as never;
+    const input = [mk("a", 1), mk("a", 2), mk("a", 3), mk("b", 1), mk("a", 4), mk("c", 1)];
+    expect(boundSample(input, 99, 2).map((m) => (m as unknown as { id: string }).id)).toEqual(["a-1", "a-2", "b-1", "c-1"]);
+    expect(boundSample(input, 3, 2).length).toBe(3); expect(boundSample([], 5, 5)).toEqual([]);
+  });
   // Review addition (mutation U6 survived): the quota is markets AND events (D76); many markets from few events is the clustering problem the quota exists to expose.
   it("many markets from few events does NOT reach the quota, nor do many events with too few markets", async () => {
     const fewEvents = Array.from({ length: 4 }, (_, i) => usEvent(`mm${i}`, i, { ended: false, markets: 40 }));          // 160 markets, 4 events
     const fewMarkets = Array.from({ length: 30 }, (_, i) => usEvent(`ff${i}`, i, { ended: false, markets: 3 }));          // 90 markets, 30 events
     const both = Array.from({ length: 35 }, (_, i) => usEvent(`bb${i}`, i, { ended: false, markets: 3 }));                // 105 markets, 35 events
-    const run = async (sport: string, open: unknown[]) => { const srv = usServer({ sports: { sports: [{ slug: sport, name: sport }] }, leagues: { leagues: [] }, sportEvents: { [sport]: { open, ended: [] } } } as never); const { http } = setup(srv.handler); const r = await fetchUsSportsTargeted(http, US_DEFAULTS); return r.results.find((x) => x.sport === sport)!; };
+    const run = async (sport: string, open: unknown[]) => { const srv = usServer({ sports: { sports: [{ slug: sport, name: sport }] }, leagues: { leagues: [] }, sportEvents: { [sport]: { open, ended: [] } } } as never); const { http } = setup(srv.handler); const r = await fetchUsSportsTargeted(http, US_DEFAULTS, { maxMarketsPerEvent: 100 }); return r.results.find((x) => x.sport === sport)!; };   // the per-event bound is lifted here: this test is about the quota rule itself
     const a = await run("nba", fewEvents); expect(a.markets.length).toBe(160); expect(a.events).toBe(4); expect(a.reachedQuota).toBe(false);
     const b = await run("nfl", fewMarkets); expect(b.markets.length).toBe(90); expect(b.events).toBe(30); expect(b.reachedQuota).toBe(false);
     const c = await run("mlb", both); expect(c.markets.length).toBe(105); expect(c.events).toBe(35); expect(c.reachedQuota).toBe(true);

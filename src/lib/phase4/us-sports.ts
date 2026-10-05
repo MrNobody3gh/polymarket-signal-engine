@@ -33,7 +33,13 @@ export async function discoverUsSports(http: PoliteHttp, cfg: UsConfig): Promise
   return { sports: [...new Map(sports.map((x) => [x.slug, x])).values()], leagues: [...new Map(leagues.map((x) => [x.slug, x])).values()], errors, requests };
 }
 
-export interface SportsFetchOptions { maxSports?: number; minMarkets?: number; minEvents?: number; maxPages?: number; /** a request budget for the whole sports fetch; reaching it stops the fetch with a clear note */ maxRequests?: number }
+/** The first `perEvent` markets of each event, at most `total` markets: bounds what a per-sport sample retains without ever starving the distinct-event count (pure, order-preserving). */
+export function boundSample(markets: RawMarket[], total: number, perEvent: number): RawMarket[] {
+  const seen = new Map<string, number>(); const out: RawMarket[] = [];
+  for (const m of markets) { if (out.length >= total) break; const g = usGroupOf(m); const n = seen.get(g) ?? 0; if (n >= perEvent) continue; seen.set(g, n + 1); out.push(m); }
+  return out;
+}
+export interface SportsFetchOptions { /** markets kept per sport and side (default 600) and per event (default 10): the quota needs 100 markets from 30 events, so 30 events always fit; retaining every page of 12 sports x 2 sides exhausted the heap on the 4.0d production run */ maxMarketsPerQuery?: number; maxMarketsPerEvent?: number; maxSports?: number; minMarkets?: number; minEvents?: number; maxPages?: number; /** a request budget for the whole sports fetch; reaching it stops the fetch with a clear note */ maxRequests?: number }
 /**
  * Per-sport samples from the sports API: for each discovered sport, the OPEN events (`active=true`) and the ENDED events (`closed=true`), by sport slug,
  * falling back to the sport's league slugs when the sport endpoint answers with an error or nothing. Each side is paged until ≥ `minMarkets` markets from
@@ -47,7 +53,8 @@ export async function fetchUsSportsTargeted(http: PoliteHttp, cfg: UsConfig, o: 
     const left = budgetLeft(); const pages = Math.min(o.maxPages ?? 6, left);
     if (pages <= 0) { stoppedBecause = `request budget (${o.maxRequests}) reached before ${label}`; const notes: FetchNotes = { endpoint: `${cfg.base}${path}`, pages: 0, records: 0, cursorKey: null, filterHonoured: null, stoppedBecause: "request budget reached", errors: [] }; return { sport: label, query, markets: [], notes, reachedQuota: false, events: 0 }; }
     const r = await fetchUs(http, cfg, { closed: false, max: Infinity, maxPages: pages, query, path, enough, slim: true }); requests += r.notes.pages;
-    return { sport: label, query, markets: r.markets, notes: r.notes, reachedQuota: enough(r.markets), events: new Set(r.markets.map(usGroupOf)).size };
+    const kept = boundSample(r.markets, o.maxMarketsPerQuery ?? 600, o.maxMarketsPerEvent ?? 10);
+    return { sport: label, query, markets: kept, notes: r.notes, reachedQuota: enough(kept), events: new Set(kept.map(usGroupOf)).size };
   };
   for (const sp of d.sports.slice(0, o.maxSports ?? 12)) {
     for (const side of ["open", "ended"] as const) {
