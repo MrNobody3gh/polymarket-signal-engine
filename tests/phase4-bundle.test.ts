@@ -3,7 +3,7 @@
  * duplicate lines, a cut-off log, log formats (text, JSON, JSON lines, timestamps), unsafe names, size and pacing limits.
  */
 import { describe, expect, it } from "vitest";
-import { B64_LINE_CHARS, MAX_LINES_PER_SECOND, PAD_BYTES_DEFAULT, decodeBundle, emitPaced, logLines, makeBundle, runBundleCli, runBundleDecodeCli, tarPack, tarUnpack, type BundleFile } from "../src/lib/phase4/bundle";
+import { B64_LINE_CHARS, MAX_LINES_PER_SECOND, MAX_LOG_LINES_PER_CALL, PAD_BYTES_DEFAULT, decodeBundle, emitPaced, logLines, makeBundle, runBundleCli, runBundleDecodeCli, tarPack, tarUnpack, type BundleFile } from "../src/lib/phase4/bundle";
 import { EXIT } from "../src/lib/phase4/cli";
 import { virtualClock } from "./helpers/phase4Db";
 
@@ -37,6 +37,14 @@ describe("the printed bundle", () => {
     expect(b.lines.indexOf(pad[0])).toBeLessThan(b.lines.indexOf(data[0])); expect(b.lines.length).toBe(2 + pad.length + data.length); expect(b.lines[0]).toContain(`${b.bytes} LINES ${b.b64Lines}`);
   });
   it("is deterministic: the same files give the same checksum and the same lines", () => { expect(makeBundle(FILES).sha).toBe(b.sha); expect(makeBundle(FILES).lines).toEqual(b.lines); expect(makeBundle([...FILES].reverse()).sha).not.toBe(b.sha); });
+  // Found on review: 300 KB of 80-character padding lines was 3,750 lines, but the Railway log tool returns at most 500 lines per call, so a call starting at the header could never reach the data.
+  it("the whole bundle (header, padding, data, end) fits one log call of 500 lines, and the padding is still large enough to make the log window save to a file", () => {
+    const big = makeBundle([{ name: "big.bin", data: rnd(120_000) }]);                       // the default padding
+    expect(big.lines.length).toBeLessThanOrEqual(MAX_LOG_LINES_PER_CALL); expect(big.padLines).toBeLessThanOrEqual(110); expect(big.padLines).toBeGreaterThanOrEqual(95);
+    const total = big.lines.reduce((a2, l) => a2 + l.length, 0); expect(total).toBeGreaterThan(290_000);
+    expect(big.lines.filter((l) => l.startsWith("PAD ")).every((l) => l.length <= 3010 && l.length >= 2990)).toBe(true);
+    expect(makeBundle(FILES, { padBytes: 0 }).padLines).toBe(0);
+  });
   it("--pad-bytes changes only the padding", () => { const c = makeBundle(FILES, { padBytes: 1000 }); expect(c.sha).toBe(b.sha); expect(c.padLines).toBeLessThan(b.padLines); expect(c.lines.filter((l) => l.startsWith("B64 "))).toEqual(b.lines.filter((l) => l.startsWith("B64 "))); });
   it("a bundle larger than the limit is refused with the way out", () => { expect(() => makeBundle([{ name: "big.bin", data: rnd(5000) }], { maxBytes: 1000 })).toThrow(/too large for a log; list the files/); });
 });
@@ -87,7 +95,7 @@ describe("pacing", () => {
   });
   it("the bundle command paces the padding and the data alike", async () => {
     const c = virtualClock(0); const out: string[] = []; const fs = new Map<string, Uint8Array>([["docs/phase4/data/a.json", txt("{}")]]); const code = await runBundleCli([], { log: (l) => out.push(l), sleep: c.sleep, listFiles: () => ["a.json"], readBinary: (p) => fs.get(p) ?? null });
-    expect(code).toBe(EXIT.OK); expect(out.length).toBeGreaterThan(3000); expect(c.sleeps.length).toBe(Math.floor(out.length / 200)); expect(out[0]).toContain("=====BUNDLE_SHA");
+    expect(code).toBe(EXIT.OK); expect(out.length).toBeGreaterThan(100); expect(out.length).toBeLessThan(MAX_LOG_LINES_PER_CALL); expect(c.sleeps.length).toBe(Math.floor(out.length / 200)); expect(out[0]).toContain("=====BUNDLE_SHA");
   });
 });
 

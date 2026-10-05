@@ -7,6 +7,7 @@ const T = { gs: "tests/phase4-gamestart.test.ts", gr: "tests/phase4-gamestart-ru
 const m = (id: string, what: string, file: string, find: string, replace: string, tests: string[]): Mutation => ({ id, what, edits: [{ file: L + file, find, replace }], tests });
 
 export const MUTATIONS_4_0E: Mutation[] = [
+  m("eB13", "the padding is back to short lines (3,750 lines, beyond one 500-line log call)", "bundle.ts", "const padLineBytes = PAD_LINE_CHARS;", "const padLineBytes = 80;", [T.bd]),
   m("eC1", "exactly 15 minutes no longer agrees with the schedule", "gamestart.ts", "schedule = delta <= SCHEDULE_TOLERANCE_MIN ?", "schedule = delta < SCHEDULE_TOLERANCE_MIN ?", [T.gs]),
   m("eC2", "a resolution gap of exactly 1 h is not real", "gamestart.ts", "if (gapH >= RES_REAL_MIN_H && gapH <= RES_REAL_MAX_H)", "if (gapH > RES_REAL_MIN_H && gapH <= RES_REAL_MAX_H)", [T.gs]),
   m("eC3", "a resolution gap of exactly 6 h is not real", "gamestart.ts", "if (gapH >= RES_REAL_MIN_H && gapH <= RES_REAL_MAX_H)", "if (gapH >= RES_REAL_MIN_H && gapH < RES_REAL_MAX_H)", [T.gs]),

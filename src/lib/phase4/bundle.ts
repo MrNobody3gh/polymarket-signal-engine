@@ -15,7 +15,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { hash } from "node:crypto";
 import { EXIT, parseArgs, num } from "./cli";
 
-export const B64_LINE_CHARS = 3000; export const PAD_BYTES_DEFAULT = 300_000; export const MAX_LINES_PER_SECOND = 200; export const MAX_BUNDLE_BYTES = 20 * 1024 * 1024; export const MAX_UNPACKED_BYTES = 200 * 1024 * 1024;
+export const B64_LINE_CHARS = 3000; export const PAD_LINE_CHARS = 3000; export const MAX_LOG_LINES_PER_CALL = 500; export const PAD_BYTES_DEFAULT = 300_000; export const MAX_LINES_PER_SECOND = 200; export const MAX_BUNDLE_BYTES = 20 * 1024 * 1024; export const MAX_UNPACKED_BYTES = 200 * 1024 * 1024;
 export interface BundleFile { name: string; data: Uint8Array }
 
 // ───────────────────────────────────────────── tar (USTAR) ───────────────────────────────────────────────────
@@ -55,7 +55,8 @@ export interface MadeBundle { lines: string[]; sha: string; bytes: number; b64Li
 export function makeBundle(files: BundleFile[], o: { padBytes?: number; maxBytes?: number } = {}): MadeBundle {
   const gz = gzipSync(Buffer.from(tarPack(files)), { level: 9 }); const max = o.maxBytes ?? MAX_BUNDLE_BYTES; if (gz.length > max) throw new Error(`the bundle is ${gz.length} bytes (> ${max}): too large for a log; list the files you need with --files`);
   const sha = hash("sha256", gz, "hex"); const text = b64(gz); const data: string[] = []; for (let i = 0; i < text.length; i += B64_LINE_CHARS) data.push(text.slice(i, i + B64_LINE_CHARS));
-  const padLineBytes = 80; const padLines = Math.ceil((o.padBytes ?? PAD_BYTES_DEFAULT) / padLineBytes); const pad = Array.from({ length: padLines }, (_, i) => `PAD ${String(i).padStart(6, "0")} ${"=".repeat(padLineBytes - 12)}`);
+  // LONG padding lines (3,000 characters, like the data lines): the Railway log tool returns at most 500 lines per call, so 300 KB of 80-character lines (3,750 lines) would put the data beyond any call that starts at the header. About 100 padding lines.
+  const padLineBytes = PAD_LINE_CHARS; const padLines = (o.padBytes ?? PAD_BYTES_DEFAULT) <= 0 ? 0 : Math.max(1, Math.ceil((o.padBytes ?? PAD_BYTES_DEFAULT) / padLineBytes)); const pad = Array.from({ length: padLines }, (_, i) => `PAD ${String(i).padStart(6, "0")} ${"=".repeat(padLineBytes - 11)}`);
   const lines = [`=====BUNDLE_SHA ${sha} ${gz.length} LINES ${data.length}`, ...pad, ...data.map((d, i) => `B64 ${String(i).padStart(5, "0")} ${d}`), "=====BUNDLE_END"];
   return { lines, sha, bytes: gz.length, b64Lines: data.length, padLines, files: files.length };
 }
