@@ -72,7 +72,7 @@ and a corrupt tar header. Limit 20 MiB.
 One venue per process; market objects are slimmed on arrival and never retained; the collector keeps only a compact record per event, capped (`maxEvents` 12,000, `maxMarkets` 40,000, a repeated market id is counted once);
 the heap guard (350 MB of the ≈ 500 MB) stops with a partial file and exit 3. Tests prove the caps and the guard.
 
-## Decisions D99 to D104 (the owner decides; none is taken here)
+## Decisions D99 to D104 (**D100, D103 and D104 accepted as recommended by the owner on 5 Oct 2026**: keep the corroboration thresholds, keep the schedule budget of 700, keep the bundle settings and commit decoded evidence files; D99, D101 and D102 are decided from the run's output)
 
 | # | Question | Options |
 |---|---|---|
