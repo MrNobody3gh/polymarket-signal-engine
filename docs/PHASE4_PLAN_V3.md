@@ -87,6 +87,7 @@ G1 eligibility (reopened, §3) · G2 evidence (absolute and relative, pre-regist
 | D108 | Which signals are measured: all entry signals (proposed) or score ≥ N | proposed: all |
 | D109 | Custody model (wallet type, key storage) | open; after G1 |
 | D110 | Lawyer and accountant engagement in South Africa | owner action |
+| D111–D116 | Shadow-measurement decisions: fee unit and formula, storage, a refusing host, which offset judges G4, report thresholds, outage back-fill | open; listed with recommendations in `docs/phase4/SHADOW_BOOKS.md` §10 |
 | D30–D52, D54–D58 | as v2 §13 | unchanged except D51 (tolerance) and the mapper, which no longer apply |
 | D59–D104 | Phase 4.0 tooling decisions | closed for the US exchange and Kalshi; the audit tooling is reused for the international venue |
 

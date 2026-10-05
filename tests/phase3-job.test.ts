@@ -445,7 +445,7 @@ d("D15 and migrations 0001–0011 (real Postgres, own database)", () => {
   it("test 11 + 10: 0001–0011 apply from scratch; 0011 re-runs; service role may call the report functions, anon and authenticated may not", async () => {
     const c = new pg.Client({ connectionString: url }); await c.connect();
     try {
-      const files = readdirSync(MIG).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort(); expect(files.map((f) => f.slice(0, 4))).toEqual(["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011"]);
+      const files = readdirSync(MIG).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort(); expect(files.map((f) => f.slice(0, 4))).toEqual(["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012"]);
       for (const f of files) await c.query(readFileSync(path.join(MIG, f), "utf8"));
       await c.query(readFileSync(path.join(MIG, "0011_portfolio_report_access.sql"), "utf8")); await c.query(readFileSync(path.join(MIG, "0011_portfolio_report_access.sql"), "utf8"));
       // as on Supabase: the API roles can use the schema and read tables (RLS decides rows); execute is the question here

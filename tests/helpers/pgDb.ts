@@ -6,12 +6,12 @@
  */
 import type pg from "pg";
 
-export function pgDb(c: pg.Client | pg.PoolClient, opts: { maxRows?: number } = {}) {
+export function pgDb(c: pg.Client | pg.PoolClient, opts: { maxRows?: number; /** write JS arrays in insert/upsert payloads as JSON (for jsonb columns holding arrays) */ jsonArrays?: boolean } = {}) {
   const cap = opts.maxRows ?? 1000;
   const ident = (s: string) => s.split(",").map((x) => x.trim()).map((x) => (x === "*" ? x : `"${x.replace(/"/g, "")}"`)).join(",");
   function from(table: string) {
     let op: "select" | "delete" | "update" | "upsert" | "insert" = "select"; let cols = "*"; let head = false; let count = false; let payload: any; let conflict: string | null = null;
-    let lim: number | null = null; let single = false; const where: [string, string, any][] = []; const orders: string[] = [];
+    let lim: number | null = null; let off = 0; let ignoreDup = false; let single = false; const where: [string, string, any][] = []; const orders: string[] = [];
     const b: any = {
       select: (c0 = "*", x?: { count?: string; head?: boolean }) => { cols = c0; head = !!x?.head; count = !!x?.count; return b; },
       eq: (k: string, v: any) => (where.push([k, "=", v]), b), neq: (k: string, v: any) => (where.push([k, "<>", v]), b),
@@ -19,9 +19,9 @@ export function pgDb(c: pg.Client | pg.PoolClient, opts: { maxRows?: number } = 
       lt: (k: string, v: any) => (where.push([k, "<", v]), b), lte: (k: string, v: any) => (where.push([k, "<=", v]), b),
       is: (k: string, v: any) => (where.push([k, "is", v]), b), like: (k: string, v: string) => (where.push([k, "like", v]), b), in: (k: string, v: any[]) => (where.push([k, "in", v]), b),
       order: (k: string, x?: { ascending?: boolean }) => (orders.push(`"${k}" ${x?.ascending === false ? "desc" : "asc"}`), b),
-      limit: (n: number) => ((lim = n), b), maybeSingle: () => ((single = true), b),
+      limit: (n: number) => ((lim = n), b), range: (a: number, z: number) => ((off = a), (lim = z - a + 1), b), maybeSingle: () => ((single = true), b),
       delete: () => ((op = "delete"), b), update: (p: any) => ((op = "update"), (payload = p), b),
-      upsert: (p: any, x?: { onConflict?: string }) => ((op = "upsert"), (payload = p), (conflict = x?.onConflict ?? null), b), insert: (p: any) => ((op = "insert"), (payload = p), b),
+      upsert: (p: any, x?: { onConflict?: string; ignoreDuplicates?: boolean }) => ((op = "upsert"), (payload = p), (conflict = x?.onConflict ?? null), (ignoreDup = !!x?.ignoreDuplicates), b), insert: (p: any) => ((op = "insert"), (payload = p), b),
       then: (res: any, rej: any) => run().then(res, rej),
     };
     async function run() {
@@ -32,15 +32,15 @@ export function pgDb(c: pg.Client | pg.PoolClient, opts: { maxRows?: number } = 
         if (op === "select") {
           if (head) { const r = await c.query(`select count(*)::int as n from "${table}"${w}`, vals); return { data: null, count: r.rows[0].n, error: null }; }
           const n = Math.min(lim ?? Infinity, cap);
-          const r = await c.query(`select ${ident(cols)} from "${table}"${w}${orders.length ? ` order by ${orders.join(",")}` : ""}${Number.isFinite(n) ? ` limit ${n}` : ""}`, vals);
+          const r = await c.query(`select ${ident(cols)} from "${table}"${w}${orders.length ? ` order by ${orders.join(",")}` : ""}${Number.isFinite(n) ? ` limit ${n}` : ""}${off ? ` offset ${off}` : ""}`, vals);
           return { data: single ? r.rows[0] ?? null : r.rows, count: count ? r.rowCount : null, error: null };
         }
         if (op === "delete") { await c.query(`delete from "${table}"${w}`, vals); return { data: null, error: null }; }
         if (op === "update") { const ks = Object.keys(payload); await c.query(`update "${table}" set ${ks.map((k) => `"${k}" = ${$(payload[k])}`).join(",")}${w}`, vals); return { data: null, error: null }; }
         const rows = Array.isArray(payload) ? payload : [payload];
         for (const row of rows) {
-          const ks = Object.keys(row); const vs = ks.map((k) => $(row[k]));
-          const on = op === "upsert" ? ` on conflict (${conflict ?? ks[0]}) do update set ${ks.map((k) => `"${k}" = excluded."${k}"`).join(",")}` : "";
+          const ks = Object.keys(row); const vs = ks.map((k) => $(opts.jsonArrays && Array.isArray(row[k]) ? JSON.stringify(row[k]) : row[k]));
+          const on = op === "upsert" && ignoreDup ? ` on conflict (${conflict ?? ks[0]}) do nothing` : op === "upsert" ? ` on conflict (${conflict ?? ks[0]}) do update set ${ks.map((k) => `"${k}" = excluded."${k}"`).join(",")}` : "";
           await c.query(`insert into "${table}" (${ks.map((k) => `"${k}"`).join(",")}) values (${vs.join(",")})${on}`, vals.splice(0));
         }
         return { data: null, error: null };

@@ -1,6 +1,6 @@
 /** Health heartbeats live in the existing `cursors` table under health:* keys. Writes are throttled per key. */
 import type { SupabaseClient } from "@supabase/supabase-js";
-export type HeartbeatKey = "ws_connected" | "last_trade" | "last_db_write" | "last_eval" | "last_tg_delivery" | "last_mark" | "worker_boot" | "last_portfolio";
+export type HeartbeatKey = "ws_connected" | "last_trade" | "last_db_write" | "last_eval" | "last_tg_delivery" | "last_mark" | "worker_boot" | "last_portfolio" | "last_shadow_books";
 const last = new Map<string, number>();
 export async function heartbeat(db: SupabaseClient, key: HeartbeatKey, value?: string, minIntervalMs = 15_000) {
   const now = Date.now(); const prev = last.get(key) ?? 0;

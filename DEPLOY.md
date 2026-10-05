@@ -19,7 +19,7 @@ Cost: Supabase free, Vercel free (Hobby), Railway ~$5/month, Telegram free.
 1. Go to supabase.com → **New project**. Name it `polymarket-signals`, choose a strong DB password (save it), region **London**. Wait ~2 minutes for it to provision.
 2. Left sidebar → **SQL Editor** → **New query**.
 3. Open `supabase/migrations/0001_init.sql` in Cursor, copy **all** of it, paste into the editor, click **Run**. You should see "Success".
-4. Repeat for **every other file** in `supabase/migrations/`, in order: `0002_telegram.sql`, `0003_v2_paper.sql`, `0004_retention.sql`, `0005_signal_correctness.sql`, `0006_execution_sim.sql`, `0007_stabilise.sql`, `0008_portfolio.sql`, `0009_orphan_resolutions.sql`, `0010_portfolio_report.sql`, `0011_portfolio_report_access.sql`. Each should say "Success". Skipping any of them breaks the worker (missing tables, columns and database functions).
+4. Repeat for **every other file** in `supabase/migrations/`, in order: `0002_telegram.sql`, `0003_v2_paper.sql`, `0004_retention.sql`, `0005_signal_correctness.sql`, `0006_execution_sim.sql`, `0007_stabilise.sql`, `0008_portfolio.sql`, `0009_orphan_resolutions.sql`, `0010_portfolio_report.sql`, `0011_portfolio_report_access.sql`, and (only if you will use the Phase 4.1 shadow measurement) `0012_shadow_books.sql`. Each should say "Success". Skipping any of them breaks the worker (missing tables, columns and database functions).
 5. Left sidebar → **Project Settings** → **API**. Copy two things:
    - **Project URL** (`https://xxxx.supabase.co`) → `NEXT_PUBLIC_SUPABASE_URL`
    - **service_role** key (click Reveal; it's the long secret one, *not* anon) → `SUPABASE_SERVICE_ROLE_KEY`
@@ -137,6 +137,20 @@ it on the Railway worker. Two variables, both read once when the worker starts:
 Switch it on **only by following the runbook**, `docs/PORTFOLIO.md` §8 (migrations `0010`–`0011`, a dry run first,
 the read-only check `railway run npm run portfolio:audit`, then real runs). Switching off: delete the variables and
 redeploy; nothing is deleted (§9).
+
+### Shadow order-book measurement (Phase 4.1; optional, off by default)
+
+A read-only recorder of **public** order books for the token behind each entry signal, so the real cost of following a wallet (spread, depth, price movement, fees) can be measured against what the paper simulator assumes. It places no
+orders and uses no key, account or authenticated call. Migration `0012_shadow_books.sql` (add it to the list in Step 4) must be applied before it is switched on. Worker variables, read once at start:
+
+| Variable | Value |
+|---|---|
+| `SHADOW_BOOKS` | `1` = on. Unset, empty or `0` = off (no request and no database access from this job). Anything else turns it off with one log line. |
+| `SHADOW_BOOKS_MIN_SCORE` | Optional, 0–100 (default `0` = every entry signal). |
+| `SHADOW_BOOKS_DAILY_REQUESTS` | Optional whole number (default `20000`): a hard daily request budget; at most 2 requests per second regardless. |
+
+Switch it on **only by following the operator guide**, `docs/phase4/SHADOW_BOOKS.md` §2 (what it does, the rollback, what a refusal from the venue means: it is recorded and the job pauses; nothing works round it). Read the result with
+`railway run npm run phase4:shadow-report -- --print-files shadow_report.md`. Switching off: delete the variable and redeploy; nothing is deleted.
 
 ### Late alerts (D22)
 

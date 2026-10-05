@@ -9,19 +9,25 @@ import { describe, expect, it } from "vitest";
 const walk = (dir: string): string[] => readdirSync(dir).flatMap((n) => { const p = join(dir, n); return statSync(p).isDirectory() ? (n === "node_modules" || n === ".next" ? [] : walk(p)) : [p]; });
 const src = (p: string) => readFileSync(p, "utf8");
 
+// Phase 4.1 adds exactly one production path: the flag-gated shadow order-book job, imported by the worker entry point and nothing else.
+const SHADOW_HOOK = "worker/ws-listener.ts"; const SHADOW_DIR = join("src", "lib", "phase4", "shadow");
+/** Every mention of "phase4" in `text` with the allowed shadow-job import paths and the heartbeat key removed. */
+const strayPhase4 = (text: string) => text.replace(/\.\.\/src\/lib\/phase4\/shadow\/(config|job)/g, "").replace(/\bPhase 4\.1\b/g, "");
+
 describe("Phase 4.0 is not part of any production path", () => {
-  it("nothing outside src/lib/phase4, scripts/phase4 and tests imports it (worker, Vercel routes, pages, the other libraries)", () => {
+  it("nothing outside src/lib/phase4, scripts/phase4 and tests imports it (the Vercel routes, pages, the other libraries); the worker only imports the 4.1 shadow job", () => {
     const files = [...walk("src"), ...walk("worker"), ...walk("scripts"), "next.config.ts", "vercel.json"].filter((p) => !p.startsWith(join("src", "lib", "phase4")) && !p.startsWith(join("scripts", "phase4")));
-    const offenders = files.filter((p) => /phase4/i.test(src(p)) && !/\.(md)$/.test(p));
+    const offenders = files.filter((p) => (p === SHADOW_HOOK ? /phase4/i.test(strayPhase4(src(p))) : /phase4/i.test(src(p))) && !/\.(md)$/.test(p));
     expect(offenders).toEqual([]);
   });
-  it("vercel.json and the worker entry point do not mention the new scripts", () => { for (const p of ["vercel.json", "worker/ws-listener.ts"]) expect(src(p)).not.toMatch(/phase4/i); });
+  it("vercel.json does not mention the new scripts, and the worker entry point mentions nothing of Phase 4 but the two shadow-job imports", () => { expect(src("vercel.json")).not.toMatch(/phase4/i); expect(strayPhase4(src("worker/ws-listener.ts"))).not.toMatch(/phase4/i); });
 });
 
 describe("the Phase 4.0 library cannot write to a database or reach a trading, account or credential endpoint", () => {
   const libs = walk(join("src", "lib", "phase4")).filter((p) => p.endsWith(".ts"));
   it("has files to check", () => { expect(libs.length).toBeGreaterThanOrEqual(12); });
-  it("never calls a write method or rpc", () => { for (const p of libs) expect(src(p), p).not.toMatch(/\.(insert|upsert|update|delete|rpc)\s*\(/); });
+  // Phase 4.1: the ONE file that writes is shadow/store.ts, and only to shadow_books (tests/phase4-shadow-readonly.test.ts checks that precisely).
+  it("never calls a write method or rpc (except shadow/store.ts, the 4.1 recorder's only database writer)", () => { for (const p of libs.filter((x) => x !== join(SHADOW_DIR, "store.ts"))) expect(src(p), p).not.toMatch(/\.(insert|upsert|update|delete|rpc)\s*\(/); });
   it("never builds an authorization or key header, and never names an order, balance, wallet-key or account endpoint", () => {
     for (const p of libs) { const t = src(p).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1"); expect(t, p).not.toMatch(/["']?authorization["']?\s*:|setRequestHeader|\.headers\.set\(|bearer|private[-_ ]?key|passphrase|signature|\/orders?\b|\/balance|\/account|\/positions\b|\/portfolio|createOrder|postOrder|placeOrder|x-api-key|api[-_]key\s*:/i); }
   });

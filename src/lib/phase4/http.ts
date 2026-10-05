@@ -19,24 +19,26 @@ export const DEFAULT_USER_AGENT = "polymarket-signal-engine-research/4.0 (read-o
 export type HttpFailureKind = "BLOCKED" | "BLOCKED_SKIPPED" | "NOT_FOUND" | "BAD_REQUEST" | "RATE_LIMITED" | "SERVER_ERROR" | "TIMEOUT" | "NETWORK" | "MALFORMED";
 export type HttpResult<T = unknown> =
   | { ok: true; status: number; json: T; ms: number; attempts: number }
-  | { ok: false; kind: HttpFailureKind; status: number | null; message: string; attempts: number };
+  | { ok: false; kind: HttpFailureKind; status: number | null; message: string; attempts: number; /** 4.1: the server's Retry-After in ms (as sent, NOT capped: the client's own sleep is capped, a caller that pauses may honour all of it), when it sent one on a 429 / 5xx */ retryAfterMs?: number };
 
 export interface HttpEvent { url: string; ok: boolean; kind: string; status: number | null; attempts: number }
 export interface PoliteHttpOptions {
   fetch?: typeof fetch; sleep?: (ms: number) => Promise<void>; now?: () => number;
   /** 4.0d: checked before every request; throws HeapBudgetExceeded when the heap in use is over budget. */ guard?: Guard;
+  /** 4.1: false = a 429 is returned at once (RATE_LIMITED, with `retryAfterMs`), never retried or slept on; the caller pauses instead. Default true: unchanged behaviour. */ retryRateLimited?: boolean;
+  /** 4.1: false = the per-request `events` list is not kept (a long-lived worker would otherwise grow it without bound); `requests` still counts. Default true. */ recordEvents?: boolean;
   userAgent?: string; minIntervalMs?: number; /** a SLOWER gap for one origin (e.g. a venue whose documented limit is 60 requests/minute); never faster than the 500 ms floor */ originGapMs?: Record<string, number>; maxAttempts?: number; timeoutMs?: number; blockedStop?: number; maxRetryAfterMs?: number;
 }
 
 export class PoliteHttp {
   private f: typeof fetch; private sleep: (ms: number) => Promise<void>; private now: () => number;
   private ua: string; private gap: number; private maxAttempts: number; private timeoutMs: number; private blockedStop: number; private maxRetryAfterMs: number;
-  private guard: Guard | null; private originGaps = new Map<string, number>(); private lastStart = -Infinity; private blockedRun = new Map<string, number>(); private stopped = new Set<string>();
+  private retryRateLimited: boolean; private recordEvents: boolean; private guard: Guard | null; private originGaps = new Map<string, number>(); private lastStart = -Infinity; private blockedRun = new Map<string, number>(); private stopped = new Set<string>();
   /** Every request outcome, in order (urls without credentials by construction). Scripts summarise it. */
   readonly events: HttpEvent[] = []; requests = 0;
   constructor(o: PoliteHttpOptions = {}) {
     this.f = o.fetch ?? globalThis.fetch.bind(globalThis); this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))); this.now = o.now ?? (() => Date.now());
-    this.guard = o.guard ?? null; this.ua = o.userAgent ?? DEFAULT_USER_AGENT; for (const [k, v] of Object.entries(o.originGapMs ?? {})) this.originGaps.set(k, Math.max(500, v));
+    this.guard = o.guard ?? null; this.retryRateLimited = o.retryRateLimited ?? true; this.recordEvents = o.recordEvents ?? true; this.ua = o.userAgent ?? DEFAULT_USER_AGENT; for (const [k, v] of Object.entries(o.originGapMs ?? {})) this.originGaps.set(k, Math.max(500, v));
     // The 2 requests/second ceiling is a hard floor on the gap: a caller may be slower, never faster.
     this.gap = Math.max(500, o.minIntervalMs ?? 500); this.maxAttempts = Math.max(1, Math.min(3, o.maxAttempts ?? 3));
     this.timeoutMs = o.timeoutMs ?? 20_000; this.blockedStop = Math.max(1, o.blockedStop ?? 2); this.maxRetryAfterMs = o.maxRetryAfterMs ?? 30_000;
@@ -51,13 +53,13 @@ export class PoliteHttp {
 
   async getJson<T = unknown>(url: string): Promise<HttpResult<T>> {
     const origin = this.originOf(url);
-    const done = (r: HttpResult<T>, attempts: number): HttpResult<T> => { this.events.push({ url, ok: r.ok, kind: r.ok ? "OK" : r.kind, status: r.status, attempts }); return r; };
+    const done = (r: HttpResult<T>, attempts: number): HttpResult<T> => { if (this.recordEvents) this.events.push({ url, ok: r.ok, kind: r.ok ? "OK" : r.kind, status: r.status, attempts }); return r; };
     if (this.stopped.has(origin)) return done({ ok: false, kind: "BLOCKED_SKIPPED", status: null, message: `skipped: ${origin} refused access earlier in this run and is not asked again`, attempts: 0 }, 0);
     let last: HttpResult<T> = { ok: false, kind: "NETWORK", status: null, message: "no attempt made", attempts: 0 };
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       this.guard?.check(`request ${this.requests + 1}`);
       await this.pace(origin); this.requests++;
-      const t0 = this.now(); let retryAfterMs = 0;
+      const t0 = this.now(); let retryAfterMs = 0; let serverRetryAfterMs = 0;
       try {
         const res = await this.f(url, { method: "GET", headers: { Accept: "application/json", "User-Agent": this.ua }, signal: AbortSignal.timeout(this.timeoutMs), redirect: "follow" });
         if (res.status === 401 || res.status === 403 || res.status === 451) {
@@ -68,8 +70,9 @@ export class PoliteHttp {
         this.blockedRun.set(origin, 0);
         if (res.status === 404) return done({ ok: false, kind: "NOT_FOUND", status: 404, message: `HTTP 404 on ${url}`, attempts: attempt }, attempt);
         if (res.status === 429 || res.status >= 500) {
-          const ra = Number(res.headers.get("retry-after")); retryAfterMs = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, this.maxRetryAfterMs) : 0;
-          last = { ok: false, kind: res.status === 429 ? "RATE_LIMITED" : "SERVER_ERROR", status: res.status, message: `HTTP ${res.status} on ${url}`, attempts: attempt };
+          const ra = Number(res.headers.get("retry-after")); serverRetryAfterMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 0; retryAfterMs = Math.min(serverRetryAfterMs, this.maxRetryAfterMs);
+          last = { ok: false, kind: res.status === 429 ? "RATE_LIMITED" : "SERVER_ERROR", status: res.status, message: `HTTP ${res.status} on ${url}`, attempts: attempt, ...(serverRetryAfterMs ? { retryAfterMs: serverRetryAfterMs } : {}) };
+          if (res.status === 429 && !this.retryRateLimited) return done(last, attempt);
         } else if (!res.ok) {
           return done({ ok: false, kind: "BAD_REQUEST", status: res.status, message: `HTTP ${res.status} on ${url}`, attempts: attempt }, attempt);
         } else {

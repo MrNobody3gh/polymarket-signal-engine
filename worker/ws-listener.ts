@@ -24,6 +24,8 @@ import { refresh, refreshDue } from "../src/lib/scoring/refresh";
 import { resolveOrphans } from "../src/lib/paper/resolve-orphans";
 import { ensureTokenOrder } from "../src/lib/polymarket/token-order";
 import { portfolioJobSetup, runPortfolioJob, makeSimCycle } from "../src/lib/paper/portfolio/job";
+import { shadowSetup, CYCLE_MS as SHADOW_CYCLE_MS } from "../src/lib/phase4/shadow/config";
+import { ShadowJob, runShadowCycleSafely } from "../src/lib/phase4/shadow/job";
 
 const engine = new SignalEngine({ db: db(), log: (m) => console.log(new Date().toISOString(), "[signal]", m) });
 let backoff = 1000; let seen = 0, kept = 0;
@@ -63,6 +65,10 @@ async function main() {
     portfolio: portfolio.config ? () => withMemLog("portfolio", () => runPortfolioJob(db(), { ...portfolio, log: (m) => console.log(new Date().toISOString(), m) })) : null,
   });
   setTimeout(simulate, 90_000); setInterval(simulate, 15 * 60 * 1000);
+  // Phase 4.1 shadow order books (operator guide: SHADOW_BOOKS.md under docs): its own timer, busy guard and error handling, NOT part of the cycle above, so nothing in it
+  // can reach the sweep, the simulation, the portfolio or the alerts. SHADOW_BOOKS unset/0/malformed → off: no timer, no request, no database call.
+  const shadow = shadowSetup(process.env, (m) => console.log(new Date().toISOString(), m));
+  if (shadow.on) { const log = (m: string) => console.log(new Date().toISOString(), m); const job = new ShadowJob({ db: db(), config: shadow.config, log }); const tick = () => void runShadowCycleSafely(job, { db: db(), log }); setTimeout(tick, 120_000); setInterval(tick, SHADOW_CYCLE_MS); }
   // Bot detection: measure fills/day for tracked wallets daily (and now, if the last measurement is stale).
   const measureAll = async () => {
     const { data } = await db().from("wallets").select("address,program_share,activity_measured_at").eq("tracked", true);

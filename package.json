@@ -26,6 +26,7 @@
     "phase4:gamestart-check": "tsx scripts/phase4/gamestart-check.ts",
     "phase4:bundle": "tsx scripts/phase4/bundle.ts",
     "phase4:bundle-decode": "tsx scripts/phase4/bundle-decode.ts",
+    "phase4:shadow-report": "tsx scripts/phase4/shadow-report.ts",
     "phase4:mutations": "tsx scripts/phase4/mutation-check.ts"
   },
   "dependencies": {
