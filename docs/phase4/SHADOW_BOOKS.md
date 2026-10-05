@@ -1,5 +1,8 @@
 # Phase 4.1 — shadow order-book measurement (operator guide)
 
+> **Owner decisions, 6 Oct 2026: D106 accepted as proposed** (offsets 0/60/300 s, sizes $10/$25/$100, 10 stored levels, retention 45 days). **D107 (switching the flag on) is not yet decided**: migration 0012 is applied with the flag OFF. **D111 (the fee formula and unit conversion) is unverified: do not read the report's fee verdict until it is settled.**
+
+
 **Status: built and tested against fixtures; NOT run against the live venue.** The authoring environment's network policy refuses `clob.polymarket.com`,
 `gamma-api.polymarket.com` and `docs.polymarket.com` (HTTP 403 from the egress proxy, a host refusal; nothing was tried to get round it). Every
 endpoint, field name and unit below comes from search snippets of the official documentation, not from a request, and is **unverified** until the
