@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { MUTATIONS_4_0D } from "./mutations-4-0d";
+import { MUTATIONS_4_0E } from "./mutations-4-0e";
 
 interface Edit { file: string; find: string; replace: string }
 interface Mutation { id: string; what: string; edits: Edit[]; tests: string[] }
@@ -235,7 +236,7 @@ function run(files: string[]): { failedTests: boolean; out: string } {
 }
 
 async function main() {
-  const only = new Set(process.argv.slice(2)); const list = [...MUTATIONS, ...MUTATIONS_4_0D].filter((x) => !only.size || only.has(x.id));
+  const only = new Set(process.argv.slice(2)); const list = [...MUTATIONS, ...MUTATIONS_4_0D, ...MUTATIONS_4_0E].filter((x) => !only.size || only.has(x.id));
   const originals = new Map<string, string>(); const touched = [...new Set(list.flatMap((x) => x.edits.map((e) => e.file)))];
   for (const f of touched) originals.set(f, readFileSync(f, "utf8"));
   const restore = () => { for (const [f, c] of originals) writeFileSync(f, c); };

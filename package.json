@@ -23,6 +23,9 @@
     "phase4:review-sheet": "tsx scripts/phase4/review-sheet.ts",
     "phase4:review-ingest": "tsx scripts/phase4/review-ingest.ts",
     "phase4:wallet-share": "tsx scripts/phase4/wallet-share.ts",
+    "phase4:gamestart-check": "tsx scripts/phase4/gamestart-check.ts",
+    "phase4:bundle": "tsx scripts/phase4/bundle.ts",
+    "phase4:bundle-decode": "tsx scripts/phase4/bundle-decode.ts",
     "phase4:mutations": "tsx scripts/phase4/mutation-check.ts"
   },
   "dependencies": {
