@@ -1,6 +1,6 @@
 # Phase 4.1 — shadow order-book measurement (operator guide)
 
-> **Owner decisions, 6 Oct 2026: D106 accepted as proposed** (offsets 0/60/300 s, sizes $10/$25/$100, 10 stored levels, retention 45 days). **D107 (switching the flag on) is not yet decided**: migration 0012 is applied with the flag OFF. **D111 (the fee formula and unit conversion) is unverified: do not read the report's fee verdict until it is settled.**
+> **Owner decisions, 6 Oct 2026: D106 accepted as proposed** (offsets 0/60/300 s, sizes $10/$25/$100, 10 stored levels, retention 45 days). **D107 decided (owner, 6 Oct 2026): the flag is switched ON** (`SHADOW_BOOKS=1` on the worker). **D111: the fee formula is verified against Polymarket's official documentation; the unit conversion is checked on the first rows (see §3).**
 
 
 **Status: built and tested against fixtures; NOT run against the live venue.** The authoring environment's network policy refuses `clob.polymarket.com`,
@@ -54,7 +54,7 @@ parsing is tolerant where the documentation is ambiguous and `tests/phase4-shado
 **Fees (D111, important).** The paper simulator's fee is `shares × rate × p × (1 − p)` with `rate` a fraction (`src/lib/paper/sim/execute.ts`, `takerFee`). The recorder reuses **that function** on each
 level taken, and converts the venue's `fee_rate_bps` with one constant, `BPS_PER_UNIT = 10 000` (`src/lib/phase4/shadow/fee.ts`). The unit conversion and the formula are **not verified**: search snippets
 of the fee page show a formula with an exponent for some categories and a different rate scale. The raw `fee_rate_bps` is stored on every row, so every fee can be recomputed later without
-re-measuring. **Do not read the fee verdict of the report until D111 is settled.** Provenance uses the paper vocabulary: `OBSERVED_FEE_FREE` (0 bps), `OBSERVED_RATE` (> 0), `ASSUMED_UNKNOWN` (the rate could
+re-measuring. **D111 update, 6 Oct 2026 (formula verified; units to be confirmed on the first rows):** Polymarket's official fee documentation (`docs.polymarket.com/trading/fees` and its help centre page) gives `fee = C × feeRate × p × (1 − p)` with C the shares and p the price, **takers only; makers are never charged and receive rebates**; this is exactly the paper simulator's function and the recorder's. The category rates differ and change over time (the official page lists crypto 0.07 and sports 0.05; third-party pages list other values from other dates), so the per-token `fee_rate_bps` read from the venue is the authority. **Unit check on the first rows:** if the venue reports basis points as `rate × 10,000`, a crypto token should show about 700 and a sports token about 300–500; a value like 7, 0.07 or 70,000 means the conversion is wrong and the report's fee column must not be read until it is fixed. Because the raw rate is stored on every row, no re-measurement is needed. **The fee column of the report is readable only after that unit check passes.** Provenance uses the paper vocabulary: `OBSERVED_FEE_FREE` (0 bps), `OBSERVED_RATE` (> 0), `ASSUMED_UNKNOWN` (the rate could
 not be read: the paper REALISTIC fallback rate 0.05 is used and the row says so). Fees are not rounded (the paper model does not round; the venue is documented to round to 4 decimals, an effect below $0.0001 per fill).
 
 ## 4. What is recorded (`shadow_books`, migration `0012`)
