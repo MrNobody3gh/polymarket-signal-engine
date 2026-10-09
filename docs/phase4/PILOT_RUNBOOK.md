@@ -3,8 +3,8 @@
 Written 8 Oct 2026. Manual orders only. No bot, no key outside Polymarket's own app, no Grok authority.
 
 ## Limits (set by the owner in writing before the first order; these are the suggested values)
-- Total pilot money: **$250**. Per order: **$10**. One open order at a time. **At most 40 orders.**
-- **Stop** at cumulative **−$75**, at order 40, or on any fill more than **5 points** worse than the alert price. After a stop nothing is added.
+- Total pilot money (maximum): **$250**. Per order: **$10**. One open order at a time. **At most 40 orders.**
+- **Stop** at cumulative **−$40**, at order 40, or on any fill more than **5 points** worse than the alert price. After a stop nothing is added.
 - Only alerts that satisfy policy V1 (copy score ≥ 68, ≤ 24 h, event not started). No other markets, no discretionary trades.
 
 ## Before the first order (once)
