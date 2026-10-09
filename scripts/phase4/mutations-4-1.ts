@@ -5,7 +5,7 @@
  */
 import type { Mutation } from "./mutations-4-0d";
 const L = "src/lib/phase4/shadow/";
-const T = { fill: "tests/phase4-shadow-fill.test.ts", sch: "tests/phase4-shadow-schedule.test.ts", job: "tests/phase4-shadow-job.test.ts", rep: "tests/phase4-shadow-report.test.ts", bd: "tests/phase4-shadow-boundaries.test.ts", sql: "tests/phase4-shadow-sql.test.ts", iso: "tests/phase4-isolation.test.ts", http: "tests/phase4-http.test.ts" };
+const T = { fc: "tests/phase4-shadow-fee-compare.test.ts", pas: "tests/phase4-shadow-passive.test.ts", r4b: "tests/phase4-shadow-report-4-1b.test.ts", fill: "tests/phase4-shadow-fill.test.ts", sch: "tests/phase4-shadow-schedule.test.ts", job: "tests/phase4-shadow-job.test.ts", rep: "tests/phase4-shadow-report.test.ts", bd: "tests/phase4-shadow-boundaries.test.ts", sql: "tests/phase4-shadow-sql.test.ts", iso: "tests/phase4-isolation.test.ts", http: "tests/phase4-http.test.ts" };
 const m = (id: string, what: string, file: string, find: string, replace: string, tests: string[]): Mutation => ({ id, what, edits: [{ file: file.includes("/") ? file : L + file, find, replace }], tests });
 
 export const MUTATIONS_4_1: Mutation[] = [
@@ -103,7 +103,7 @@ export const MUTATIONS_4_1: Mutation[] = [
   { id: "s4H4", what: "the 500 ms floor on the global gap is removed and the job asks every 100 ms", edits: [{ file: "src/lib/phase4/http.ts", find: "this.gap = Math.max(500, o.minIntervalMs ?? 500);", replace: "this.gap = Math.max(50, o.minIntervalMs ?? 50);" }, { file: L + "job.ts", find: "minIntervalMs: 500,", replace: "minIntervalMs: 100," }], tests: [T.job, T.bd] },
   // ── report arithmetic
   m("s4R1", "depth within 1 point excludes a level exactly 1 point away", "report.ts", "points / PTS + 1e-9", "points / PTS - 1e-9", [T.rep]),
-  m("s4R2", "the interval ignores clustering", "report.ts", "Math.sqrt((g / (g - 1)) * ss) / n", "Math.sqrt(ss * 0.5) / n", [T.rep]),
+  m("s4R2", "the interval ignores clustering", "report-math.ts", "Math.sqrt((g / (g - 1)) * ss) / n", "Math.sqrt(ss * 0.5) / n", [T.rep]),
   m("s4R3", "a lower bound of exactly 0 is called UNDERSTATED", "report.ts", 'd.lo > 0 ? "UNDERSTATED"', 'd.lo >= 0 ? "UNDERSTATED"', [T.rep]),
   m("s4R4", "3 pairs are enough for a verdict", "report.ts", "export const MIN_PAIRS = 30;", "export const MIN_PAIRS = 3;", [T.rep]),
   m("s4R5", "2 markets are enough for a verdict", "report.ts", "MIN_CLUSTERS = 10;", "MIN_CLUSTERS = 2;", [T.rep]),
@@ -126,7 +126,7 @@ export const MUTATIONS_4_1: Mutation[] = [
   m("s4L3", "numeric strings from Postgres are not coerced", "report-cli.ts", "const N = (v: unknown): number | null => (v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null);", "const N = (v: unknown): number | null => v as number | null;", [T.rep, T.sql]),
   m("s4L4", "the row cap is not enforced", "report-cli.ts", "if (seen >= o.maxRows) throw", "if (false) throw", [T.rep]),
   m("s4L5", "a missing database variable is not noticed", "report-cli.ts", "if (!d.db && !(env.NEXT_PUBLIC_SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY)) {", "if (false) {", [T.rep]),
-  m("s4L6", "the report's category is the signal kind", "report-cli.ts", "category: categorize({ title: s.title, slug: s.slug }).category", "category: String(s.kind)", [T.rep]),
+  m("s4L6", "the report's category is the signal kind", "report-cli.ts", "category: stratum(categorize({ title: s.title, slug: s.slug }))", "category: String(s.kind)", [T.rep, T.r4b]),
   // ── worker wiring and the migration
   m("s4W1", "the worker starts the shadow job whatever the flag says", "worker/ws-listener.ts", "if (shadow.on) {", "if (true) {", [T.job]),
   m("s4W2", "the migration lets the public read the table", "supabase/migrations/0012_shadow_books.sql", "alter table shadow_books enable row level security;", 'alter table shadow_books enable row level security;\ncreate policy "public read shadow_books" on shadow_books for select using (true);', [T.bd, T.sql]),
@@ -137,4 +137,54 @@ export const MUTATIONS_4_1: Mutation[] = [
   m("s4W7", "a MISSED row may carry data", "supabase/migrations/0012_shadow_books.sql", "status <> 'MISSED' or (bids is null", "status <> 'MISSED' or (true or bids is null", [T.sql]),
   m("s4W8", "the status vocabulary admits anything", "supabase/migrations/0012_shadow_books.sql", "check (status in ('OK','EMPTY_BOOK','ONE_SIDED','CROSSED','NOT_FOUND','ERROR','REFUSED','MISSED'))", "check (true)", [T.sql]),
   m("s4W9", "the key is not unique per offset", "supabase/migrations/0012_shadow_books.sql", "primary key (signal_id, offset_s),", "primary key (signal_id, offset_s, due_at),", [T.sql]),
+  // ── Phase 4.1b: the fee relation and the fee at the market's own rate (Part A)
+  m("s4A1", "an unknown venue rate is not recorded as the paper fallback 0.05", "fee-compare.ts", "bps === null ? PAPER_FEE_MODE.fallbackFeeRate : bps / BPS_PER_UNIT", "bps === null ? 0 : bps / BPS_PER_UNIT", [T.fc]),
+  m("s4A2", "a market rate of 0 does not give a fee of 0", "fee-compare.ts", "if (rate === 0) return 0;\n", "", [T.fc]),
+  m("s4A3", "the fee is rescaled the wrong way round", "fee-compare.ts", "return (fill.fee_usd * rate) / rec;", "return (fill.fee_usd * rec) / rate;", [T.fc, T.r4b]),
+  m("s4A4", "a re-walk that does not reproduce the fill is accepted", "fee-compare.ts", "return Math.abs(w.filled_usd - fill.filled_usd) <= EPS_USD ? w.fee_usd : null;", "return w.fee_usd;", [T.fc]),
+  m("s4A5", "an assumed (fallback) rate is used as if it were the market's", "fee-compare.ts", 'return r.source === "OBSERVED_RATE" || r.source === "OBSERVED_FEE_FREE" ? { rate: r.rate, source: r.source } : UNKNOWN_FEE;', "return { rate: r.rate, source: r.source as MarketFeeSource };", [T.fc]),
+  m("s4A6", "3 pairs are enough to name a relation", "fee-compare.ts", "export const REL_MIN_PAIRS = 30;", "export const REL_MIN_PAIRS = 3;", [T.fc]),
+  m("s4A7", "EQUAL tolerates 5 % instead of 1 %", "fee-compare.ts", "export const REL_EQUAL_TOL = 0.01;", "export const REL_EQUAL_TOL = 0.05;", [T.fc]),
+  m("s4A8", "half of the pairs are enough for a relation", "fee-compare.ts", "REL_SHARE = 0.95;", "REL_SHARE = 0.5;", [T.fc]),
+  m("s4A9", "a constant multiple tolerates 50 % instead of 5 %", "fee-compare.ts", "REL_MULT_TOL = 0.05;", "REL_MULT_TOL = 0.5;", [T.fc]),
+  m("s4A10", "any recorded rate against a market rate of 0 counts as equal", "fee-compare.ts", "bps === 0 ? 1 : Infinity", "1", [T.fc]),
+  m("s4A11", "the pair counts have no memory bound", "fee-compare.ts", "else if (this.pairs.size < this.max) this.pairs.set(k, [bps, rate, 1]); else this.overflow++;", "else this.pairs.set(k, [bps, rate, 1]);", [T.fc]),
+  m("s4A12", "the relation counts every row, not only rows with both rates", "fee-compare.ts", "if (rate === null) { this.noMarketRate++; return; }", "if (rate === null) { this.noMarketRate++; rate = 0; }", [T.fc, T.r4b]),
+  m("s4A13", "the recorded-bps fee column is halved (the two fees are no longer side by side)", "report.ts", "a.feeRecorded.push(pct(f.fee_usd, f.filled_usd));", "a.feeRecorded.push(pct(f.fee_usd / 2, f.filled_usd));", [T.r4b]),
+  m("s4A14", "an unknown market rate is replaced by the paper's 0.05", "report.ts", "if (mf.rate === null) return null;", "if (mf.rate === null) return recomputeFeeUsd(f, size, r.asks, r.fee_rate_bps, 0.05);", [T.r4b, T.rep]),
+  m("s4A15", "the paired fee line uses the recorded-bps fee", "report.ts", "(p) => p.obsFeeRec as number", "(p) => p.obsFee", [T.rep, T.r4b]),
+  m("s4A16", "the signal's condition id is looked up with the wrong case (markets are stored in lower case)", "report-cli.ts", "marketFee: fees.get(String(s.condition_id ?? \"\").toLowerCase()) };", "marketFee: fees.get(String(s.condition_id ?? \"\")) };", [T.r4b]),
+  m("s4A17", "the market's rate is not read at all", "report-cli.ts", "marketFee: fees.get(String(s.condition_id ?? \"\").toLowerCase()) };", "};", [T.r4b, T.rep]),
+  // ── Phase 4.1b: the start-up back-fill (Part B1)
+  m("s4K1", "a MISSED row due exactly at the start is called back-fill", "report.ts", "dueSec < this.startSec) {", "dueSec <= this.startSec) {", [T.r4b]),
+  m("s4K2", "every row before the start is called back-fill, not only MISSED", "report.ts", 'if (row.status === "MISSED" && this.startSec !== null', "if (this.startSec !== null", [T.r4b]),
+  m("s4K3", "the cut is not applied", "report.ts", 'row.status === "MISSED" && this.startSec !== null && dueSec < this.startSec', "false", [T.r4b]),
+  m("s4K4", "back-fill-only signals are reported as signals with no row", "report.ts", "o.entrySignalsInPeriod - measured - backfillOnly)", "o.entrySignalsInPeriod - measured)", [T.r4b]),
+  m("s4K5", "the start is the LATEST OK snapshot", "report-cli.ts", '.eq("status", "OK").order("taken_at", { ascending: true }).limit(1)', '.eq("status", "OK").order("taken_at", { ascending: false }).limit(1)', [T.r4b]),
+  m("s4K6", "the start is the earliest snapshot of any status", "report-cli.ts", '.eq("status", "OK").order("taken_at"', '.order("taken_at"', [T.r4b]),
+  // ── Phase 4.1b: categories and thin cells (Part B2)
+  m("s4K8", "a cell of exactly 30 signals is 'too few'", "report.ts", "tooFew: signalsOk < MIN_CELL,", "tooFew: signalsOk <= MIN_CELL,", [T.r4b]),
+  m("s4K9", "3 signals are enough for a cell", "report.ts", "export const MIN_CELL = 30;", "export const MIN_CELL = 3;", [T.r4b]),
+  m("s4K10", "the 'too few' mark is dropped from the decision table", "decision.ts", '${r.tooFew ? `  ${THIN}` : ""}`);\n  }\n  if (rows.length > cap)', '`);\n  }\n  if (rows.length > cap)', [T.r4b]),
+  m("s4K11", "the decision table is not capped on the console", "decision.ts", "for (const r of rows.slice(0, cap)) {", "for (const r of rows) {", [T.r4b]),
+  // ── Phase 4.1b: the passive indicator (Part C)
+  m("s4P1", "a touch exactly at the limit is not a touch", "passive.ts", "s.ask <= limit + TOUCH_EPS", "s.ask < limit", [T.pas, T.r4b]),
+  m("s4P2", "the touch looks at the bid, not the ask", "passive.ts", "return s.ask !== null && s.ask <= limit + TOUCH_EPS;", "return s.bid !== null && s.bid <= limit + TOUCH_EPS;", [T.pas]),
+  m("s4P3", "the touch is not cumulative (a touch at 60 s is forgotten at 300 s)", "passive.ts", "by.push({ offset, known: cohort, touched: cohort && hit });", "by.push({ offset, known: cohort, touched: cohort && t === true });", [T.pas, T.r4b]),
+  m("s4P4", "an unreadable snapshot does not break the cohort", "passive.ts", "if (t === null) cohort = false;", "", [T.pas, T.r4b]),
+  m("s4P5", "the mid limit is the best bid", "passive.ts", 's.status === "OK" && s.mid !== null ? s.mid : null', 's.status === "OK" && s.mid !== null ? s.bid : null', [T.pas]),
+  m("s4P6", "the price improvement has the wrong sign", "passive.ts", "improvementPts: a !== null ? (a - L) * 100 : null", "improvementPts: a !== null ? (L - a) * 100 : null", [T.pas, T.r4b]),
+  m("s4P7", "a touch at exactly the wallet's price counts as 'below the wallet's price'", "passive.ts", "price < base.source - TOUCH_EPS", "price <= base.source + TOUCH_EPS", [T.pas]),
+  m("s4P8", "a crossed book is readable", "passive.ts", 'new Set(["OK", "ONE_SIDED", "EMPTY_BOOK"])', 'new Set(["OK", "ONE_SIDED", "EMPTY_BOOK", "CROSSED"])', [T.pas]),
+  m("s4P9", "a readable book with no asks counts as touched", "passive.ts", "return s.ask !== null && s.ask <= limit + TOUCH_EPS;", "return s.ask === null || s.ask <= limit + TOUCH_EPS;", [T.pas]),
+  m("s4P10", "the avoided fee of an unknown rate is counted as 0", "passive.ts", "else this.feeUnknown++;", "else this.fee.push(0);", [T.pas, T.r4b]),
+  m("s4P11", "a signal is never evaluated when its last snapshot arrives (the bookkeeping grows without bound)", "report.ts", "if (r.offset_s === this.planned[this.planned.length - 1]) this.finalize(r.signal_id);", "", [T.r4b]),
+  m("s4P12", "signals still waiting at the end of the window are dropped", "report.ts", "flush(): void { for (const id of Object.keys(this.pend)) this.finalize(id); }", "flush(): void { }", [T.r4b]),
+  m("s4P13", "the report is built without evaluating the waiting signals", "report.ts", "acc.flush();\n  const groups", "const groups", [T.r4b]),
+  // ── Phase 4.1b: intervals and the power note (Part D)
+  m("s4D1", "the power arithmetic uses 1.64 for the 95 % interval", "report-math.ts", "export const Z_95 = 1.96;", "export const Z_95 = 1.64;", [T.r4b]),
+  m("s4D2", "the observed-error extrapolation forgets the square", "report-math.ts", "((Z_95 * se) / target) ** 2) : null);", "((Z_95 * se) / target)) : null);", [T.r4b]),
+  m("s4D3", "the power note drops the 'outcomes are not here' statement", "decision.ts", "OUTCOMES (does following pay) are not in this report.", "Outcomes are in this report.", [T.r4b]),
+  m("s4D4", "the slippage interval ignores the market clusters", "report.ts", "slipPtsCi: clusterMean(a.pts, a.cl)", "slipPtsCi: clusterMean(a.pts, a.pts.map((_, i) => String(i)))", [T.r4b]),
+  m("s4D5", "the decision table's paired line takes the wrong metric", "decision.ts", "const POINTS = /^price cost, points of price/;", "const POINTS = /^price cost, % of stake/;", [T.r4b]),
 ];

@@ -6,14 +6,15 @@
  *   npm run phase4:shadow-report -- [--days 14] [--since 2026-10-06T00:00:00Z] [--out-dir docs/phase4/data] [--print-files shadow_report.md,shadow_groups.csv]
  *
  * Exit: 0 finished, 1 failed, 2 database variables missing (the database is not touched).
- * Files (in --out-dir): shadow_report.json (everything), shadow_report.md (the console text), shadow_groups.csv, shadow_paired.csv. `npm run phase4:bundle` returns them from a log-only host.
+ * Files (in --out-dir): shadow_report.json (everything), shadow_report.md (the console text plus every stratum, kind and interval), shadow_groups.csv, shadow_paired.csv, shadow_passive.csv, shadow_fees.csv. `npm run phase4:bundle` returns them from a log-only host.
  */
 import { EXIT, parseArgs, num, printFiles, type CliDeps } from "../cli";
 import { readOnly, selectIn, type ReadOnlyDb } from "../readonly-db";
-import { categorize } from "../categorize";
+import { categorize, stratum } from "../categorize";
 import { db as supabaseDb } from "../../db";
 import { OFFSETS_S, SIZES_USD } from "./config";
-import { ReportAcc, buildReport, consoleLines, groupsCsv, nearestOffset, pairedCsv, type PaperLite, type RowLite, type SignalMeta } from "./report";
+import { ReportAcc, buildReport, consoleLines, feeRelationCsv, fullMarkdown, groupsCsv, nearestOffset, pairedCsv, passiveCsv, type PaperLite, type RowLite, type SignalMeta } from "./report";
+import { marketFee } from "./fee-compare";
 
 export const SHADOW_REPORT_USAGE = "usage: npm run phase4:shadow-report -- [--days 14] [--since ISO] [--out-dir docs/phase4/data] [--max-rows 400000] [--print-files a,b]";
 export const REPORT_PAGE = 500;
@@ -22,8 +23,18 @@ const COLS = "signal_id,offset_s,due_at,status,source_price,best_bid,best_ask,sp
 const levels = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map((l) => [Number((l as number[])[0]), Number((l as number[])[1])] as [number, number]) : null);
 const fillsOf = (v: any) => (v && v.by_usd ? v : null);
 
+/**
+ * The job's start: the `taken_at` of the earliest OK snapshot in the whole table (not only the window, so a short `--days` does not move it). MISSED rows due before it are the
+ * start-up back-fill and are left out of every figure (report.ts `ReportAcc.add`). null when no OK snapshot exists.
+ */
+export async function readStart(rdb: ReadOnlyDb): Promise<number | null> {
+  const { data, error } = await rdb.select("shadow_books", "taken_at").eq("status", "OK").order("taken_at", { ascending: true }).limit(1);
+  if (error) throw new Error(`shadow_books: ${error.message}`);
+  const t = (data as { taken_at?: string }[] | null)?.[0]?.taken_at; const ms = t ? Date.parse(t) : NaN; return Number.isFinite(ms) ? ms / 1000 : null;
+}
+
 export async function readReport(rdb: ReadOnlyDb, o: { sinceIso: string; days: number; maxRows: number; nowIso: string }) {
-  const acc = new ReportAcc({ sizes: SIZES_USD, pairOffset: nearestOffset(OFFSETS_S) });
+  const acc = new ReportAcc({ sizes: SIZES_USD, pairOffset: nearestOffset(OFFSETS_S), startSec: await readStart(rdb), offsets: OFFSETS_S });
   let seen = 0;
   for (let from = 0; seen < o.maxRows; from += REPORT_PAGE) {
     const { data, error } = await rdb.select("shadow_books", COLS).gte("due_at", o.sinceIso).order("due_at", { ascending: true }).order("signal_id", { ascending: true }).order("offset_s", { ascending: true }).range(from, from + REPORT_PAGE - 1);
@@ -31,10 +42,13 @@ export async function readReport(rdb: ReadOnlyDb, o: { sinceIso: string; days: n
     const rows = (data ?? []) as Record<string, any>[]; if (!rows.length) break;
     const ids = [...new Set(rows.map((r) => String(r.signal_id)))];
     const sigs = new Map((await selectIn<Record<string, any>>(ids, (c) => rdb.select("signals", "id,kind,title,slug,condition_id,created_at").in("id", c as string[]))).map((s) => [String(s.id), s]));
+    // the market's own effective fee rate, read exactly as the paper simulator reads it (markets.fees_enabled / taker_fee_rate)
+    const conds = [...new Set([...sigs.values()].map((s) => String(s.condition_id ?? "").toLowerCase()).filter(Boolean))];
+    const fees = new Map((await selectIn<Record<string, any>>(conds, (c) => rdb.select("markets", "condition_id,fees_enabled,taker_fee_rate").in("condition_id", c as string[]))).map((m) => [String(m.condition_id).toLowerCase(), marketFee(m)]));
     const paper = new Map((await selectIn<Record<string, any>>(ids, (c) => rdb.select("paper_executions", "signal_id,status,signal_price,market_price,fill_price,filled_usd,entry_fee,fee_source,evaluated_ts").eq("mode", "REALISTIC").in("signal_id", c as string[]))).map((p) => [String(p.signal_id), p]));
     for (const r of rows) {
       const s = sigs.get(String(r.signal_id)); if (!s) continue; // the signal was deleted after the row was written (cascade makes this impossible; skipped, never guessed)
-      const meta: SignalMeta = { kind: String(s.kind), category: categorize({ title: s.title, slug: s.slug }).category, conditionId: String(s.condition_id) };
+      const meta: SignalMeta = { kind: String(s.kind), category: stratum(categorize({ title: s.title, slug: s.slug })), conditionId: String(s.condition_id), marketFee: fees.get(String(s.condition_id ?? "").toLowerCase()) };
       const p = paper.get(String(r.signal_id)); const created = Date.parse(s.created_at) / 1000; const ev = p?.evaluated_ts ? Date.parse(p.evaluated_ts) / 1000 : null;
       const pl: PaperLite | null = p ? { status: String(p.status), signal_price: N(p.signal_price), market_price: N(p.market_price), fill_price: N(p.fill_price), filled_usd: N(p.filled_usd), entry_fee: N(p.entry_fee), fee_source: p.fee_source ?? null, evaluated_gap_s: ev === null ? null : created - ev } : null;
       const row: RowLite = { signal_id: String(r.signal_id), offset_s: Number(r.offset_s), status: String(r.status), source_price: N(r.source_price), best_bid: N(r.best_bid), best_ask: N(r.best_ask), spread: N(r.spread), mid: N(r.mid), bids: levels(r.bids), asks: levels(r.asks), fills: fillsOf(r.fills), fee_rate_bps: N(r.fee_rate_bps), fee_source: r.fee_source ?? null, bytes: JSON.stringify([r.bids, r.asks, r.fills]).length + 220 };
@@ -61,9 +75,9 @@ export async function runShadowReportCli(argv: string[], env: Record<string, str
   try {
     const rdb = d.db ? d.db() : readOnly(supabaseDb());
     const report = await readReport(rdb, { sinceIso: new Date(Date.parse(since)).toISOString(), days, maxRows: num(opts["max-rows"], 400_000), nowIso: new Date(nowMs).toISOString() });
-    const files = ["shadow_report.md", "shadow_report.json", "shadow_groups.csv", "shadow_paired.csv"]; d.mkdir?.(outDir);
+    const files = ["shadow_report.md", "shadow_report.json", "shadow_groups.csv", "shadow_paired.csv", "shadow_passive.csv", "shadow_fees.csv"]; d.mkdir?.(outDir);
     const lines = consoleLines(report, outDir, files);
-    write(`${outDir}/shadow_report.json`, JSON.stringify(report)); write(`${outDir}/shadow_groups.csv`, groupsCsv(report)); write(`${outDir}/shadow_paired.csv`, pairedCsv(report)); write(`${outDir}/shadow_report.md`, ["# Phase 4.1 shadow order-book report", "", "```", ...lines, "```", ""].join("\n"));
+    write(`${outDir}/shadow_report.json`, JSON.stringify(report)); write(`${outDir}/shadow_groups.csv`, groupsCsv(report)); write(`${outDir}/shadow_paired.csv`, pairedCsv(report)); write(`${outDir}/shadow_passive.csv`, passiveCsv(report)); write(`${outDir}/shadow_fees.csv`, feeRelationCsv(report)); write(`${outDir}/shadow_report.md`, fullMarkdown(report, outDir, files).join("\n"));
     for (const l of lines) log(l);
     await printFiles((opts["print-files"] ?? "").split(",").map((x) => x.trim()).filter(Boolean), { outDir, readFile: d.readFile, log, sleep: d.sleep });
     return EXIT.OK;

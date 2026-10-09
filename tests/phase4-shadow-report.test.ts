@@ -12,7 +12,7 @@ const mkRow = (i: number, o: Partial<RowLite> & { avg?: number; source?: number;
   return { signal_id: uid(i), offset_s: 0, status: "OK", source_price: source, best_bid: 0.5, best_ask: 0.52, spread: 0.02, mid, bids: [[0.5, 100], [0.49, 100]], asks: [[0.52, 100], [0.53, 400], [0.56, 100]], fills: { by_usd: { "10": f(10), "25": f(25), "100": f(100) } }, fee_rate_bps: 200, fee_source: o.feeSource ?? "OBSERVED_RATE", bytes: 1200, ...o } as RowLite;
 };
 const paper = (o: Partial<PaperLite> = {}): PaperLite => ({ status: "FILLED", signal_price: 0.5, market_price: 0.51, fill_price: 0.52, filled_usd: 100, entry_fee: 1, fee_source: "OBSERVED_RATE", evaluated_gap_s: 2, ...o });
-const meta = (i: number, o: Partial<SignalMeta> = {}): SignalMeta => ({ kind: "NEW_POSITION", category: "sports", conditionId: `c${i % 12}`, ...o });
+const meta = (i: number, o: Partial<SignalMeta> = {}): SignalMeta => ({ kind: "NEW_POSITION", category: "sports", conditionId: `c${i % 12}`, marketFee: { rate: 0.02, source: "OBSERVED_RATE" }, ...o });
 const acc = () => new ReportAcc({ sizes: [10, 25, 100], pairOffset: 0 });
 
 describe("report arithmetic", () => {
@@ -51,11 +51,11 @@ describe("the paired comparison with paper REALISTIC (fixture with known answers
     expect(price.diff.mean).toBeCloseTo((0.03 / 0.53 - 0.02 / 0.52) * 100, 9); expect(price.verdict).toBe("UNDERSTATED"); expect(price.observedShareOfPaper).toBeCloseTo((0.03 / 0.53) / (0.02 / 0.52), 9);
     expect(metric(r, /price moved before/).observedMean).toBeCloseTo((0.01 / 0.53) * 100, 9); expect(metric(r, /spread and impact/).observedMean).toBeCloseTo((0.02 / 0.53) * 100, 9);
     expect(metric(r, /points of price/).diff.mean).toBeCloseTo(1, 9);
-    const fee = metric(r, /^fee/); expect(fee.paperMean).toBeCloseTo(1, 9); expect(fee.observedMean).toBeCloseTo(2, 9); expect(fee.verdict).toBe("UNDERSTATED");
+    const fee = metric(r, /^fee, % of stake at the market's own rate/); expect(fee.paperMean).toBeCloseTo(1, 9); expect(fee.observedMean).toBeCloseTo(2, 9); expect(fee.verdict).toBe("UNDERSTATED");
   });
   it("an observed book exactly as dear as the paper assumed is CONFIRMED; a cheaper one is OVERSTATED", () => {
     expect(metric(run((i) => mkRow(i, { avg: 0.52 }), () => paper()), /points of price/).verdict).toBe("CONFIRMED");
-    const cheaper = run((i) => mkRow(i, { avg: 0.505, mid: 0.503, fee: 0.5 }), () => paper()); expect(metric(cheaper, /points of price/).verdict).toBe("OVERSTATED"); expect(metric(cheaper, /^fee/).verdict).toBe("OVERSTATED");
+    const cheaper = run((i) => mkRow(i, { avg: 0.505, mid: 0.503, fee: 0.5 }), () => paper()); expect(metric(cheaper, /points of price/).verdict).toBe("OVERSTATED"); expect(metric(cheaper, /^fee, % of stake at the market's own rate/).verdict).toBe("OVERSTATED"); expect(metric(cheaper, /^fee, % of stake at the recorded bps/).verdict).toBe("OVERSTATED");
   });
   it("noise around the paper's cost gives an interval that straddles 0 → CONFIRMED (with the sign of the mean still shown)", () => {
     const r = run((i) => mkRow(i, { avg: 0.52 + (i % 2 ? 0.004 : -0.004) * ((i % 7) + 1) / 7 }), () => paper(), 120); expect(metric(r, /points of price/).verdict).toBe("CONFIRMED");
@@ -68,9 +68,13 @@ describe("the paired comparison with paper REALISTIC (fixture with known answers
     const r = run((i) => (i % 5 === 0 ? mkRow(i, { fills: { by_usd: { "10": fill(10, null), "25": fill(25, null), "100": fill(100, null) } } as any }) : i % 7 === 0 ? mkRow(i, { offset_s: 60 }) : mkRow(i)), (i) => (i % 3 === 0 ? paper({ status: "UNFILLED" }) : i % 4 === 0 ? null : paper()), 84);
     const expected = Array.from({ length: 84 }, (_, k) => k + 1).filter((i) => i % 5 && i % 7 && i % 3 && i % 4).length; expect(r.paired.pairs).toBe(expected);
   });
-  it("a fee is compared only where BOTH sides observed a rate: an assumed rate on either side drops the pair from the fee line, not from the price lines", () => {
+  it("a fee is compared only where BOTH sides observed a rate: an assumed rate on either side drops the pair from the fee lines, not from the price lines", () => {
     const r = run((i) => mkRow(i, { feeSource: i % 2 ? "ASSUMED_UNKNOWN" : "OBSERVED_RATE" }), (i) => paper({ fee_source: i % 3 ? "OBSERVED_RATE" : "ASSUMED_UNKNOWN" }));
-    const both = Array.from({ length: 60 }, (_, k) => k + 1).filter((i) => i % 2 === 0 && i % 3 !== 0).length; expect(metric(r, /^fee/).n).toBe(both); expect(metric(r, /points of price/).n).toBe(60);
+    const both = Array.from({ length: 60 }, (_, k) => k + 1).filter((i) => i % 2 === 0 && i % 3 !== 0).length; expect(metric(r, /^fee, % of stake at the recorded bps/).n).toBe(both); expect(metric(r, /points of price/).n).toBe(60);
+  });
+  it("the fee at the market's own rate needs the market's rate: an unknown rate drops the pair from that line only (the recorded-bps line is unaffected)", () => {
+    const a = acc(); for (let i = 1; i <= 60; i++) a.add(mkRow(i), meta(i, { marketFee: i % 2 ? { rate: null, source: "UNKNOWN" } : { rate: 0.02, source: "OBSERVED_RATE" } }), T0, paper());
+    const r = buildReport(a, { generatedAt: "x", days: 1 }); expect(metric(r, /^fee, % of stake at the market's own rate/).n).toBe(30); expect(metric(r, /^fee, % of stake at the recorded bps/).n).toBe(60); expect(metric(r, /points of price/).n).toBe(60);
   });
   it("pairs are also reported per category", () => {
     const a = acc(); for (let i = 1; i <= 60; i++) a.add(mkRow(i), meta(i, { category: i % 2 ? "sports" : "esports" }), T0, paper()); const r = buildReport(a, { generatedAt: "x", days: 1 });
@@ -128,9 +132,9 @@ describe("the database side is read-only and streams", () => {
   };
   it("reads every page (more than one REPORT_PAGE), joins signals and paper rows, categorises, and makes no write and no rpc", async () => {
     const n = REPORT_PAGE * 2 + 137; const db = shadowDb(seed(n)); const r = await readReport(readOnly(db as any), { sinceIso: new Date((T0 - 86400) * 1000).toISOString(), days: 1, maxRows: 100_000, nowIso: "x" });
-    expect(r.coverage.rows).toBe(n); expect(r.paired.pairs).toBe(n); expect(r.groups.map((g) => g.key)).toEqual(expect.arrayContaining(["cat:sports", "cat:crypto_short_term", "kind:NEW_POSITION"])); expect(r.paired.evalGapMedianS).toBe(2); expect(r.groups.find((g) => g.key === "ALL")!.feeBps.p50).toBe(200); expect(r.groups.find((g) => g.key === "ALL")!.spreadPts["0"].p50).toBeCloseTo(2, 9); expect(r.coverage.entrySignalsInPeriod).toBe(n);
+    expect(r.coverage.rows).toBe(n); expect(r.paired.pairs).toBe(n); expect(r.groups.map((g) => g.key)).toEqual(expect.arrayContaining(["cat:sports:basketball", "cat:crypto_short_term", "kind:NEW_POSITION"])); expect(r.paired.evalGapMedianS).toBe(2); expect(r.groups.find((g) => g.key === "ALL")!.feeBps.p50).toBe(200); expect(r.groups.find((g) => g.key === "ALL")!.spreadPts["0"].p50).toBeCloseTo(2, 9); expect(r.coverage.entrySignalsInPeriod).toBe(n);
     expect(db.writes).toEqual([]); expect(db.calls.filter((c) => c.op !== "from" && c.op !== "select")).toEqual([]);
-    expect(db.calls.filter((c) => c.table === "shadow_books" && c.op === "select").length).toBe(3); // one query per page, never the whole table at once
+    expect(db.calls.filter((c) => c.table === "shadow_books" && c.op === "select").length).toBe(4); // one query per page (3) plus the one-row start query; never the whole table at once
   });
   it("the wrapper exposes no write method and no rpc at all", () => { const ro = readOnly(shadowDb() as any) as any; for (const k of ["insert", "upsert", "update", "delete", "rpc", "from"]) expect(ro[k]).toBeUndefined(); expect(Object.keys(ro)).toEqual(["select"]); });
   it("a window above --max-rows is refused loudly, never silently truncated", async () => { await expect(readReport(readOnly(shadowDb(seed(50)) as any), { sinceIso: "2000-01-01T00:00:00Z", days: 1, maxRows: 10, nowIso: "x" })).rejects.toThrow(/more than 10 rows/); });
@@ -141,10 +145,10 @@ describe("the database side is read-only and streams", () => {
     expect(await runShadowReportCli(["--since", "yesterday"], {}, { db: () => readOnly(db as any), log: (l) => out.push(l) })).toBe(2); expect(db.calls).toHaveLength(0);
     out.length = 0; expect(await runShadowReportCli(["--help"], {}, { log: (l) => out.push(l) })).toBe(0); expect(out[0]).toMatch(/^usage: npm run phase4:shadow-report/);
   });
-  it("the CLI end to end: ≤ 60 console lines, four files written, --print-files returns a file between markers, exit 0", async () => {
+  it("the CLI end to end: ≤ 60 console lines, six files written, --print-files returns a file between markers, exit 0", async () => {
     const out: string[] = []; const files = new Map<string, string>(); const db = shadowDb(seed(40));
     const code = await runShadowReportCli(["--since", new Date((T0 - 86400) * 1000).toISOString(), "--print-files", "shadow_report.md"], {}, { db: () => readOnly(db as any), now: () => T0 * 1000, log: (l) => out.push(l), writeFile: (p, c) => files.set(p, c), readFile: (p) => files.get(p) ?? null, mkdir: () => {}, sleep: async () => {} });
-    expect(code).toBe(0); expect([...files.keys()].sort()).toEqual(["docs/phase4/data/shadow_groups.csv", "docs/phase4/data/shadow_paired.csv", "docs/phase4/data/shadow_report.json", "docs/phase4/data/shadow_report.md"]);
+    expect(code).toBe(0); expect([...files.keys()].sort()).toEqual(["docs/phase4/data/shadow_fees.csv", "docs/phase4/data/shadow_groups.csv", "docs/phase4/data/shadow_paired.csv", "docs/phase4/data/shadow_passive.csv", "docs/phase4/data/shadow_report.json", "docs/phase4/data/shadow_report.md"]);
     const marker = out.indexOf("=====FILE shadow_report.md"); expect(marker).toBeGreaterThan(0); expect(out.slice(0, marker).length).toBeLessThanOrEqual(60); expect(out.at(-1)).toBe("=====END shadow_report.md"); expect(db.writes).toEqual([]);
   });
 });

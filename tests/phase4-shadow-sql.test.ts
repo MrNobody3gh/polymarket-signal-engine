@@ -102,9 +102,13 @@ describe("the job and the report over the real schema", () => {
   });
   it("the report reads the real schema (numeric columns arrive as strings) read-only, and pairs with paper_executions", async () => {
     for (let i = 1; i <= 7; i++) await jc.query("insert into paper_executions (signal_id, mode, kind, config_hash, status, state, signal_price, market_price, fill_price, filled_usd, entry_fee, fee_source, evaluated_ts) values ($1, 'REALISTIC', 'NEW_POSITION', 'h', 'FILLED', 'OPEN', 0.49, 0.5, 0.51, 100, 1, 'OBSERVED_RATE', $2) on conflict do nothing", [uid(i), new Date((T0 - 3) * 1000).toISOString()]);
+    for (let i = 1; i <= 7; i++) await jc.query("insert into markets (condition_id, fees_enabled, taker_fee_rate) values ($1, true, 0.05) on conflict (condition_id) do update set fees_enabled = true, taker_fee_rate = 0.05", [`c${i}`]); // the market's own rate, as the paper path stores it (Phase 4.1b)
     const log: string[] = []; const spy = pgDb(jc) as any; const ro = readOnly({ from: (t: string) => { log.push(t); return spy.from(t); } } as any);
     const r = await readReport(ro, { sinceIso: new Date((T0 - 86400) * 1000).toISOString(), days: 1, maxRows: 10_000, nowIso: "x" });
-    expect(r.coverage.rows).toBeGreaterThan(5); expect(r.paired.paperRowsSeen).toBeGreaterThan(0); expect(r.paired.metrics.every((m) => Number.isFinite(m.n))).toBe(true); expect(new Set(log)).toEqual(new Set(["shadow_books", "signals", "paper_executions"]));
+    expect(r.coverage.rows).toBeGreaterThan(5); expect(r.paired.paperRowsSeen).toBeGreaterThan(0); expect(r.paired.metrics.every((m) => Number.isFinite(m.n))).toBe(true); expect(new Set(log)).toEqual(new Set(["shadow_books", "signals", "paper_executions", "markets"]));
+    // Phase 4.1b on the real schema: the start-up back-fill (signal 7's two MISSED rows were due before the first OK snapshot) is excluded; numeric and boolean columns arrive as strings/booleans and still give the market's rate
+    expect(r.backfill.rows).toBe(2); expect(r.backfill.startIso).not.toBeNull(); const f25 = r.groups.find((x) => x.key === "ALL")!.fills.find((f) => f.offset === 0 && f.usd === 25)!; expect(f25.feeMarketPct.n).toBeGreaterThan(0); expect(f25.feeMarketUnknown).toBe(0);
+    expect(f25.feeMarketPct.mean! / f25.feeRecordedPct.mean!).toBeCloseTo(0.05 / 0.02, 6); // the fake venue's fee-rate answer is 200 bps (0.02); the market's is 0.05
     const g = r.groups.find((x) => x.key === "ALL")!; expect(g.spreadPts["0"].p50).toBeCloseTo(2, 6);
   });
 });

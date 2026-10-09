@@ -88,6 +88,7 @@ G1 eligibility (reopened, §3) · G2 evidence (absolute and relative, pre-regist
 | D109 | Custody model (wallet type, key storage) | open; after G1 |
 | D110 | Lawyer and accountant engagement in South Africa | owner action |
 | D111–D116 | Shadow-measurement decisions: fee unit and formula, storage, a refusing host, which offset judges G4, report thresholds, outage back-fill | open; listed with recommendations in `docs/phase4/SHADOW_BOOKS.md` §10 |
+| D117–D120 | Phase 4.1b report conventions: which fee rate the headline uses, the start-up back-fill cut, the passive-buy label (an indicator, not a bound), the report strata | report-only conventions, recorded in `docs/phase4/SHADOW_BOOKS.md` §10; none changes the recorder or a policy |
 | D30–D52, D54–D58 | as v2 §13 | unchanged except D51 (tolerance) and the mapper, which no longer apply |
 | D59–D104 | Phase 4.0 tooling decisions | closed for the US exchange and Kalshi; the audit tooling is reused for the international venue |
 
